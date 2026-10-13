@@ -1,0 +1,40 @@
+# anykms-azure probe (key vault, api 2025-07-01)
+no token: get                            401 Unauthorized AKV10000: Request is missing a Bearer, PoP, or MTLS_POP token. challenge=Bearer authorization="https://login.microsoftonline.com/<uuid>", resource="https://vault.azure.net"
+missing key: get                         404 KeyNotFound A key with (name/id) PREFIX-none was not found in this key vault. If you recently deleted this key you may be able to recover it using the correct recovery command. For help resolving this issue, please see https://go.microsoft.com/fwlink/?linkid=2125182
+missing key: sign                        404 KeyNotFound A key with (name/id) PREFIX-none was not found in this key vault. If you recently deleted this key you may be able to recover it using the correct recovery command. For help resolving this issue, please see https://go.microsoft.com/fwlink/?linkid=2125182
+## signing
+versionless sign ES256                   200 - -
+versioned sign ES256                     200 - -
+ES256 signature bytes: 64
+verify ok                                200 - -
+{"value":true}
+verify other digest                      200 - -
+{"value":false}
+verify malformed signature               200 - -
+verify missing version                   404 KeyNotFound A key with (name/id) PREFIX-ec/<version> was not found in this key vault. If you recently deleted this key you may be able to recover it using the correct recovery command. For help resolving this issue, please see https://go.microsoft.com/fwlink/?linkid=2125182
+sign RS256 with EC key                   400 BadParameter Key and signing algorithm are incompatible. Key https://<host>/keys/PREFIX-ec/<version> is of type 'EC', and algorithm 'RS256' can only be used with a key of type 'RSA' or 'RSA-HSM'.
+sign PS256                               200 - -
+PS256 signature bytes: 256
+sign with key_ops [wrapKey,unwrapKey]    403 Forbidden/KeyOperationForbidden Operation sign is not permitted on this key.
+sign with a 20-byte digest               400 BadParameter Invalid length of 'value': 20 bytes. PS256 requires 32 bytes, encoded with base64url.
+## wrap
+versionless wrapkey                      200 - -
+wrapped bytes: 256
+unwrapkey                                200 - -
+unwrap round trip: ok
+unwrapkey damaged                        400 BadParameter The parameter is incorrect.
+unwrapkey missing version                404 KeyNotFound A key with (name/id) PREFIX-kek/<version> was not found in this key vault. If you recently deleted this key you may be able to recover it using the correct recovery command. For help resolving this issue, please see https://go.microsoft.com/fwlink/?linkid=2125182
+wrapkey 191 bytes (limit 190)            400 BadParameter The parameter is incorrect.
+wrapkey A256KW on RSA                    400 BadParameter Invalid algorithm: A256KW
+## key state
+disabled: get                            200 - -
+disabled: get version                    200 - -
+disabled: sign                           403 Forbidden/KeyDisabled Operation sign is not allowed on a disabled key.
+disabled: verify                         403 Forbidden/KeyDisabled Operation verify is not allowed on a disabled key.
+not yet valid: get                       200 - -
+not yet valid: sign                      403 Forbidden/KeyNotYetValid Operation sign is not allowed because the 'not before' constraint on this key is not met.
+not yet valid: wrapkey                   403 Forbidden/KeyNotYetValid Operation wrapKey is not allowed because the 'not before' constraint on this key is not met.
+wrap before expiry                       200 - -
+expired: sign                            403 Forbidden/KeyExpired Operation sign is not allowed on an expired key.
+expired: wrapkey                         403 Forbidden/KeyExpired Operation wrapKey is not allowed on an expired key.
+expired: unwrapkey                       200 - -

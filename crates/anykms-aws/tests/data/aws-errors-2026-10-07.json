@@ -1,0 +1,334 @@
+[
+  {
+    "name": "access-denied",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000001"
+    },
+    "body": {
+      "Message": "User: arn:aws:iam::111122223333:user/anykms-denied is not authorized to perform: kms:Encrypt on resource: arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-111111111111 because no identity-based policy allows the kms:Encrypt action",
+      "__type": "AccessDeniedException"
+    }
+  },
+  {
+    "name": "clock-skew-30min-behind",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000002"
+    },
+    "body": {
+      "__type": "InvalidSignatureException",
+      "message": "Signature expired: 20261007T004003Z is now earlier than 20261007T010503Z (20261007T011003Z - 5 min.)"
+    }
+  },
+  {
+    "name": "context-over-limit",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000003"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "Invalid EncryptionContext"
+    }
+  },
+  {
+    "name": "decrypt-other-key",
+    "target": "Decrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000004"
+    },
+    "body": {
+      "__type": "IncorrectKeyException",
+      "message": "The key ID in the request does not identify a CMK that can perform this operation."
+    }
+  },
+  {
+    "name": "decrypt-tampered",
+    "target": "Decrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000005"
+    },
+    "body": {
+      "__type": "InvalidCiphertextException"
+    }
+  },
+  {
+    "name": "decrypt-wrong-context",
+    "target": "Decrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000006"
+    },
+    "body": {
+      "__type": "InvalidCiphertextException"
+    }
+  },
+  {
+    "name": "encrypt-4097",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000007"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'plaintext' failed to satisfy constraint: Member must have length less than or equal to 4096"
+    }
+  },
+  {
+    "name": "encrypt-disabled",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000008"
+    },
+    "body": {
+      "__type": "DisabledException",
+      "message": "arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-222222222222 is disabled."
+    }
+  },
+  {
+    "name": "encrypt-empty",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000009"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'plaintext' failed to satisfy constraint: Member must have length greater than or equal to 1"
+    }
+  },
+  {
+    "name": "encrypt-pending-deletion",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000010"
+    },
+    "body": {
+      "__type": "KMSInvalidStateException",
+      "message": "arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-222222222222 is pending deletion."
+    }
+  },
+  {
+    "name": "generate-mac-4097",
+    "target": "GenerateMac",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000011"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096"
+    }
+  },
+  {
+    "name": "generate-mac-empty",
+    "target": "GenerateMac",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000012"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1"
+    }
+  },
+  {
+    "name": "invalid-arn",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000013"
+    },
+    "body": {
+      "__type": "NotFoundException",
+      "message": "Invalid arn arn:aws:kms:nowhere"
+    }
+  },
+  {
+    "name": "invalid-key-usage",
+    "target": "Sign",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000014"
+    },
+    "body": {
+      "__type": "InvalidKeyUsageException",
+      "message": "arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-111111111111 key usage is ENCRYPT_DECRYPT which is not valid for Sign."
+    }
+  },
+  {
+    "name": "invalid-signature",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000015"
+    },
+    "body": {
+      "__type": "InvalidSignatureException",
+      "message": "The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method. Consult the service documentation for details.\n\nThe Canonical String for this request should have been\n'POST\n/\n\ncontent-type:application/x-amz-json-1.1\nhost:kms.us-east-1.amazonaws.com\nx-amz-date:20261007T011003Z\nx-amz-target:TrentService.Encrypt\n\ncontent-type;host;x-amz-date;x-amz-target\nf5b87fd46280b21b48d626baf716133070e06caeeb4380979039bf20dcf3b20f'\n\nThe String-to-Sign should have been\n'AWS4-HMAC-SHA256\n20261007T011003Z\n20261007/us-east-1/kms/aws4_request\n451faaf1b3f87a73b9e64a2fbab0bf06ae32d9acf2c9bbef4633aa1f5bc9909c'\n"
+    }
+  },
+  {
+    "name": "malformed-json",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000016"
+    },
+    "body": {
+      "Message": "Unexpected value type in payload",
+      "__type": "SerializationException"
+    }
+  },
+  {
+    "name": "not-found",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000017"
+    },
+    "body": {
+      "__type": "NotFoundException",
+      "message": "Key 'arn:aws:kms:us-east-1:111122223333:key/00000000-0000-0000-0000-000000000000' does not exist"
+    }
+  },
+  {
+    "name": "rsa-with-context",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000018"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "EncryptionContext is not supported when encrypting/decrypting with asymmetric CMKs."
+    }
+  },
+  {
+    "name": "sign-disabled",
+    "target": "Sign",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000019"
+    },
+    "body": {
+      "__type": "DisabledException",
+      "message": "arn:aws:kms:us-east-1:111122223333:key/44444444-4444-4444-4444-444444444444 is disabled."
+    }
+  },
+  {
+    "name": "sign-ed25519-raw-4097",
+    "target": "Sign",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000020"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length less than or equal to 4096"
+    }
+  },
+  {
+    "name": "sign-ed25519-raw-empty",
+    "target": "Sign",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000021"
+    },
+    "body": {
+      "__type": "ValidationException",
+      "message": "1 validation error detected: Value at 'message' failed to satisfy constraint: Member must have length greater than or equal to 1"
+    }
+  },
+  {
+    "name": "unknown-operation",
+    "target": "NoSuchOperation",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000022"
+    },
+    "body": {
+      "__type": "UnknownOperationException"
+    }
+  },
+  {
+    "name": "unrecognized-client",
+    "target": "Encrypt",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000023"
+    },
+    "body": {
+      "__type": "UnrecognizedClientException",
+      "message": "The security token included in the request is invalid."
+    }
+  },
+  {
+    "name": "unsupported-operation",
+    "target": "RotateKeyOnDemand",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000024"
+    },
+    "body": {
+      "__type": "UnsupportedOperationException"
+    }
+  },
+  {
+    "name": "verify-bad-signature",
+    "target": "Verify",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000025"
+    },
+    "body": {
+      "__type": "KMSInvalidSignatureException"
+    }
+  },
+  {
+    "name": "verify-mac-bad",
+    "target": "VerifyMac",
+    "status": 400,
+    "headers": {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amzn-requestid": "00000000-0000-4000-8000-000000000026"
+    },
+    "body": {
+      "__type": "KMSInvalidMacException"
+    }
+  }
+]

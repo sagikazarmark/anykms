@@ -1,0 +1,54 @@
+[package]
+name = "anykms-local"
+version.workspace = true
+description = "In-process software backend for anykms, for tests and development only"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "testing", "mock", "encryption"]
+categories = ["cryptography", "development-tools::testing"]
+# Tests are not published: no test sources or test keys in the package.
+exclude = ["tests/"]
+
+[dependencies]
+anykms-core.workspace = true
+
+zeroize.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+aes-gcm.workspace = true
+p256.workspace = true
+p384.workspace = true
+p521.workspace = true
+ecdsa.workspace = true
+ed25519-dalek.workspace = true
+signature.workspace = true
+spki.workspace = true
+getrandom.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+anykms-recipes.workspace = true
+anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "conformance"
+harness = false
+
+[[test]]
+name = "conformance_gcp_shaped"
+harness = false
+
+[[test]]
+name = "conformance_azure_shaped"
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

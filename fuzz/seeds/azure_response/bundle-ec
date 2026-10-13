@@ -1,0 +1,1 @@
+{"key":{"kid":"https://kv1.vault.azure.net/keys/k/0123456789abcdef0123456789abcdef","kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0","key_ops":["sign","verify"]},"attributes":{"enabled":true,"created":1700000000},"tags":{"a":"b"}}

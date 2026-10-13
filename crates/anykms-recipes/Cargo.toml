@@ -1,0 +1,103 @@
+[package]
+name = "anykms-recipes"
+version.workspace = true
+description = "Portable recipes over anykms key handles: envelope encryption, emulated data keys, local verification"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "envelope-encryption", "jwt", "jwks", "signature"]
+categories = ["cryptography"]
+# The published crate ships no tests: several need anykms-local, a path-only dev-dependency that
+# `cargo publish` strips (anykms-local dev-depends on this crate), and the vectors hold throwaway
+# test keys. The unit tests in `src/` build from the package.
+exclude = ["tests/"]
+
+[features]
+default = ["jose", "envelope", "rsa-aws-lc-rs"]
+# Recipes with their own dependencies. Without both, the crate is local verification
+# (`LocalVerifier`, `CachedVerifier`, the hashed helpers, `ecdsa_der`) plus `EmulatedDataKeys`:
+# what a backend that only needs to verify locally depends on.
+# - `jose`: JWS/JWT/JWK/JWKS (`jose`, the `serde_json` re-export); pulls in serde and serde_json.
+# - `envelope`: envelope encryption (`envelope`, `EnvelopeAead`, `EnvelopeKeyring`, `IntoKek`);
+#   pulls in AES-GCM, HKDF, SHA-2 and subtle.
+jose = ["dep:serde", "dep:serde_json"]
+envelope = ["dep:aes-gcm", "dep:hkdf", "dep:sha2", "dep:subtle"]
+# RSA signature verification backends (ECDSA and Ed25519 never need one), named as in the facade
+# and the cloud backends:
+# - `rsa-aws-lc-rs`: AWS-LC through `aws-lc-rs` (the default; needs a C toolchain);
+# - `rsa-rustcrypto`: RustCrypto's pure-Rust `rsa` crate. Opt-in: only a 0.10 release candidate is
+#   built on the digest-0.11/signature-3 stack, and RCs may break their API between releases.
+# With both enabled, `rsa-aws-lc-rs` is used: features unify, so another crate enabling
+# `rsa-rustcrypto` never swaps a stable backend for the RC; for `rsa-rustcrypto` alone, disable
+# default features. With neither, verifying with an RSA key fails with `Unsupported`; parsing RSA
+# keys, their JWKs and every other algorithm keep working. ring cannot be a backend: it cannot
+# verify a precomputed digest.
+rsa-rustcrypto = ["dep:rsa", "dep:sha2"]
+rsa-aws-lc-rs = ["dep:aws-lc-rs"]
+
+[dependencies]
+anykms-core.workspace = true
+
+zeroize.workspace = true
+subtle = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+hkdf = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+p256.workspace = true
+p384.workspace = true
+p521.workspace = true
+ecdsa.workspace = true
+ed25519-dalek.workspace = true
+rsa = { workspace = true, optional = true }
+aws-lc-rs = { workspace = true, optional = true }
+spki.workspace = true
+signature.workspace = true
+getrandom.workspace = true
+base64.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# In-process KMS keys with versions (tests/jose_interop.rs, tests/emulated.rs). Path only, so
+# `cargo publish` strips it: anykms-local dev-depends on this crate.
+anykms-local = { path = "../anykms-local" }
+
+# Creates the RSA test keys and signatures, whichever backend verifies them.
+rsa.workspace = true
+hex = "0.4"
+# tests/envelope_vectors.rs builds the envelope vectors from these primitives, independently of
+# the envelope recipe (regular dependencies only with `envelope`).
+aes-gcm.workspace = true
+hkdf.workspace = true
+# The RSA test signatures' digests (a regular dependency only with `rsa-rustcrypto` or `envelope`).
+sha2.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+# Interop: tokens signed here verify with a widely used JWT library (tests/jose_interop.rs and the
+# `jose` module docs).
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
+
+[[test]]
+name = "envelope_vectors"
+required-features = ["envelope"]
+
+[[test]]
+name = "envelope_padding"
+required-features = ["envelope"]
+
+[[test]]
+name = "envelope_rotation"
+required-features = ["envelope"]
+
+[[test]]
+name = "jose_interop"
+required-features = ["jose"]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

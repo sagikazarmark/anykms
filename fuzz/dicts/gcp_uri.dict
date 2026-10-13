@@ -1,0 +1,9 @@
+# libFuzzer dictionary for gcp_uri (the target prepends "gcp-kms:").
+authority="//"
+projects="projects/"
+locations="/locations/"
+global="global"
+key_rings="/keyRings/"
+crypto_keys="/cryptoKeys/"
+versions="/cryptoKeyVersions/"
+domain=".com:"

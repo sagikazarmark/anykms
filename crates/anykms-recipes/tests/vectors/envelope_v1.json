@@ -1,0 +1,141 @@
+{
+  "format": "anykms envelope v1",
+  "invalid": [
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010077ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "flipped_commitment"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010176ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "nonzero_flags"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010876ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "unknown_flag"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010476ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "padded_flag_on_unpadded"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45020076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "unknown_version"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a503",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "truncated"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313adeb0e38ced1e41de6f92e70eddd09c25108cf1afcb08733d38966006b4fb3079e29aa87f67cde31d955e9309e5222178176e68f8e58c8db8eda68161f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "swapped_wrapped_dek"
+    },
+    {
+      "aad": "726f772d32",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "wrong_aad"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e99b972d17a6b97b8ce96d2bcff56cb90a99bf74c970f5c6ba3407496fcd2072ad8c497c3d8cbf8b9675fb0f37685191e98f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "keyring",
+      "kek_id": "app-kek",
+      "name": "kek_id_rewritten_to_other_keyring_kek"
+    },
+    {
+      "aad": "726f772d31",
+      "description": "Isolates decryption step 4 (key commitment). The data key unwraps and is 32 bytes, and the payload is valid AES-256-GCM under the data key's derived enc_key with this envelope's header (including its commitment) in the AAD, but the header's commitment is not the HKDF-derived one. Only the commitment comparison rejects it.",
+      "envelope": "414b45010077ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c82e2851e595cb3fbc402d06bd9cc65b45",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "commitment_mismatch_gcm_valid"
+    },
+    {
+      "aad": "726f772d31",
+      "description": "Isolates the data-key length check (decryption step 3). The wrapped data key unwraps to 16 bytes; the commitment and the AES-256-GCM payload are computed from that 16-byte key exactly as specified (HKDF-SHA256 still yields a 32-byte enc_key and a matching commitment). An implementation without the length check accepts it.",
+      "envelope": "414b450100b51f698c79db65afe25e4ef6448479871e9efe43f9478d4929b91f5270fa3d2e666666666666666666666666076170702d6b656b0037746573746b656b3a76313ab1bfaa407f70c80c650379dfb9c468e484d90917df0c53ea54c9f68b2acd5ed5f3c9da88d90c8a3c453b1980bac6a57b424ea2fa4588e1edc06bdfa99ac628907e50a087ab7c077f6f0bfe7750f5388a3746ca4a7d146cc95139",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "short_dek"
+    },
+    {
+      "aad": "726f772d31",
+      "description": "Isolates the padding check (decryption step 6). Flags 0x04, and the payload is valid AES-256-GCM under the committed data key, but its plaintext does not end in 0x80 followed by zero bytes. An implementation that ignores the padded flag returns the raw plaintext.",
+      "envelope": "414b4501045bf92db924146fd07f78b2a86787db3091c7cc5f46fd0198d42d29d1bda177dcaaaaaaaaaaaaaaaaaaaaaaaa076170702d6b656b0047746573746b656b3a76313aaf834b2357bae6ad7eccd35c66a09ea37a860e74f6e5b0717f97ca063b7c6a54452d89e17ee921ff953426e99300052fb7e73908f37d9a7739b349da01eb90af41cb9dd8bd5845a3869f96e40d7bb3c6b58cfbe3a915620a2b6912e6cc64e4cdbcea80fbcd63ecee482d",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "name": "bad_padding_marker"
+    }
+  ],
+  "test_kek": "AES-256-GCM, K_v = SHA-256(\"anykms test kek <name> v<v>\"), nonce = SHA-256(pt)[..12], framing \"testkek:v<v>:\" || nonce || ct || tag",
+  "valid": [
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e9970e43743dbe086f03248f90053076cbf83041f098bda1cf525b690ed92bf5ba3a2409f042748cf932310733027a435a9f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "kek_versions": 1,
+      "name": "plain",
+      "plaintext": "616e796b6d7320656e76656c6f7065207631207465737420766563746f72"
+    },
+    {
+      "aad": "",
+      "envelope": "414b45010088ab132920c3817b91868bb02379016fb9ad0c4da12f3f6b280d196cc9a9d923444444444444444444444444000047746573746b656b3a76313adeb0e38ced1e41de6f92e70eddd09c25108cf1afcb08733d38966006b4fb3079e29aa87f67cde31d955e9309e5222178176e68f8e58c8db8eda68161f6d3206e0d9d96b943826172bce532a8",
+      "kek": "a",
+      "kek_id": "",
+      "kek_versions": 1,
+      "name": "empty",
+      "plaintext": ""
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076170702d6b656b0047746573746b656b3a76323a02d449a31fbb267c8f352e99bb752eb1e779a4cf8e90bb524f1431ff1f4ef43d2ef35503819b636bce383ddca0c3badddc861adb263667cdb3229f10f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "kek_versions": 2,
+      "name": "rewrapped",
+      "plaintext": "616e796b6d7320656e76656c6f7065207631207465737420766563746f72"
+    },
+    {
+      "aad": "726f772d31",
+      "envelope": "414b45010076ac1329d326007ddcebf97c5585a2716ff90ac6b816fa062a8f39f836d044fd222222222222222222222222076e65772d6b656b0047746573746b656b3a76313a02d449a31fbb267c8f352e99b972d17a6b97b8ce96d2bcff56cb90a99bf74c970f5c6ba3407496fcd2072ad8c497c3d8cbf8b9675fb0f37685191e98f25f310bd68b811ed95f3034777901c1a20b2b3a683dbb25b9f2053401c80586038b69e2c0224a716d0339a5037e",
+      "kek": "b",
+      "kek_id": "new-kek",
+      "kek_versions": 1,
+      "name": "rewrap_to",
+      "plaintext": "616e796b6d7320656e76656c6f7065207631207465737420766563746f72"
+    },
+    {
+      "aad": "726f772d31",
+      "description": "Flags 0x04: the plaintext is padded to 16-byte blocks (30 bytes, the 0x80 marker and one zero byte), and decryption removes the padding.",
+      "envelope": "414b450104ed21d6651f97c88444af5df0fdea7191267d489390686fa98708979c2c1ea2d0888888888888888888888888076170702d6b656b0047746573746b656b3a76313ae29442e61ad354e5cb0831e20d218045bff0b31b6994b68a94aab997ddd16f154999c5912650bab20bc11d5a00222180d4c14978e4f42a39b52e05e57d1491ba2a9a198cc5e8260b23acc89d24b95b0f36e112f22082096b5d7cf67d98dd3fb483a3af8f209aeb41b0d9da4b",
+      "kek": "a",
+      "kek_id": "app-kek",
+      "kek_versions": 1,
+      "name": "padded",
+      "plaintext": "616e796b6d7320656e76656c6f7065207631207465737420766563746f72"
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+[package]
+name = "anykms-gcp"
+version.workspace = true
+description = "Google Cloud KMS backend for anykms"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "gcp", "google-cloud", "cloud-kms", "encryption"]
+categories = ["cryptography", "api-bindings"]
+# Tests are not published: no test sources or test keys in the package.
+exclude = ["tests/"]
+
+[features]
+default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs", "service-account-key"]
+# TLS crypto provider, used when neither `GcpProviderBuilder::crypto_provider` nor a process-wide
+# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
+# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
+# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
+# with `default-features = false` and `rustls-ring`.
+rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+# RSA backend for local signature verification (`LocalVerifier`) and the local RSA-OAEP wrap of
+# `asymmetricDecrypt` KEKs. Without either, RSA signing, verifying and public-key handles and RSA
+# KEKs fail to open with `Configuration` naming these features (ECDSA and Ed25519 are unaffected).
+rsa-aws-lc-rs = ["anykms-recipes/rsa-aws-lc-rs"]
+rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
+# Service-account JSON keys (RS256 self-signed JWTs, signed with aws-lc-rs). Without it, a
+# service-account credential is a `Configuration` error naming this feature.
+service-account-key = ["dep:aws-lc-rs"]
+# Spans and events for every request and token fetch (field allowlist; never data or tokens).
+tracing = ["dep:tracing", "anykms-http/tracing"]
+# Allow HttpVersion::Http2.
+http2 = ["reqwest/http2", "anykms-http/http2"]
+# Credentials from Google's official auth library (`Credentials::google_cloud_auth` over a
+# `google_cloud_auth::credentials::AccessTokenCredentials`): AWS- and executable-sourced
+# workload identity federation, `external_account_authorized_user` and whatever else it supports.
+# Only access tokens come from it; KMS calls stay on this crate's client.
+google-cloud-auth = ["dep:google-cloud-auth"]
+
+[dependencies]
+anykms-core.workspace = true
+# TLS provider selection, the reqwest client, zeroizing buffers, transport errors, the
+# single-flight credential cache.
+anykms-http.workspace = true
+# Local verification (LocalVerifier), PEM/SPKI parsing and the local RSA-OAEP wrap; no `jose`,
+# no `envelope`.
+anykms-recipes.workspace = true
+
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+url = "2"
+rustls.workspace = true
+rustls-pki-types = { workspace = true, features = ["std"] }
+aws-lc-rs = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# 1.3: the first release with `credentials::AccessTokenCredentials`, which the bridge uses.
+google-cloud-auth = { version = "1.3", optional = true, default-features = false }
+# Single-flight token refresh; reqwest already depends on tokio.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+# The conformance suite (tests/conformance.rs over the fake server, tests/conformance_live.rs).
+anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
+# Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
+anykms-testkit = { path = "../anykms-testkit" }
+anykms-recipes = { workspace = true, features = ["envelope"] }
+
+# The fake Cloud KMS server's crypto (tests/common/fake.rs: AES-GCM, ECDSA, Ed25519, RSA, HMAC)
+# and service-account test keys.
+aws-lc-rs.workspace = true
+tokio.workspace = true
+wiremock.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+# In-process google-cloud-auth providers for the `google-cloud-auth` tests (tests/auth.rs); `http`
+# for their trait signatures.
+google-cloud-auth = { version = "1.3", default-features = false }
+http = "1"
+
+[[test]]
+name = "conformance"
+harness = false
+
+[[test]]
+name = "conformance_cached"
+harness = false
+
+[[test]]
+name = "conformance_live"
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

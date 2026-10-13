@@ -1,0 +1,62 @@
+# Three-node integrated-storage (raft) cluster for scripts/probe-failover.sh. Not part of the
+# shared dev servers: it is started, probed and torn down by that script.
+#
+# HA_IMAGE selects the server (hashicorp/vault:<v>@sha256:<digest> or openbao/openbao:<v>@sha256:<digest>;
+# probe-failover.sh pins the digest of each verified version). Both images write
+# *_LOCAL_CONFIG into their config dir and accept the same raft config. Nodes are sealed with a
+# single Shamir share that the script generates; ports are bound to loopback only.
+x-node: &node
+  image: ${HA_IMAGE:?set HA_IMAGE}
+  command: ["server"]
+  cap_add: [IPC_LOCK]
+  tmpfs: ["/data:mode=1777"]
+  environment: &env
+    VAULT_LOCAL_CONFIG: &config >-
+      {"storage": {"raft": {"path": "/data", "retry_join": [
+        {"leader_api_addr": "http://ha-1:8200"},
+        {"leader_api_addr": "http://ha-2:8200"},
+        {"leader_api_addr": "http://ha-3:8200"}]}},
+       "listener": {"tcp": {"address": "0.0.0.0:8200", "cluster_address": "0.0.0.0:8201",
+                            "tls_disable": true}},
+       "disable_mlock": true, "ui": false}
+    BAO_LOCAL_CONFIG: *config
+
+services:
+  ha-1:
+    <<: *node
+    hostname: ha-1
+    environment:
+      <<: *env
+      VAULT_API_ADDR: http://ha-1:8200
+      VAULT_CLUSTER_ADDR: http://ha-1:8201
+      VAULT_RAFT_NODE_ID: ha-1
+      BAO_API_ADDR: http://ha-1:8200
+      BAO_CLUSTER_ADDR: http://ha-1:8201
+      BAO_RAFT_NODE_ID: ha-1
+    ports: ["127.0.0.1:8401:8200"]
+
+  ha-2:
+    <<: *node
+    hostname: ha-2
+    environment:
+      <<: *env
+      VAULT_API_ADDR: http://ha-2:8200
+      VAULT_CLUSTER_ADDR: http://ha-2:8201
+      VAULT_RAFT_NODE_ID: ha-2
+      BAO_API_ADDR: http://ha-2:8200
+      BAO_CLUSTER_ADDR: http://ha-2:8201
+      BAO_RAFT_NODE_ID: ha-2
+    ports: ["127.0.0.1:8402:8200"]
+
+  ha-3:
+    <<: *node
+    hostname: ha-3
+    environment:
+      <<: *env
+      VAULT_API_ADDR: http://ha-3:8200
+      VAULT_CLUSTER_ADDR: http://ha-3:8201
+      VAULT_RAFT_NODE_ID: ha-3
+      BAO_API_ADDR: http://ha-3:8200
+      BAO_CLUSTER_ADDR: http://ha-3:8201
+      BAO_RAFT_NODE_ID: ha-3
+    ports: ["127.0.0.1:8403:8200"]

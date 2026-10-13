@@ -1,0 +1,10 @@
+# libFuzzer dictionary for transit_uri (the target prepends "hashivault:").
+authority="//"
+default_server="///"
+keys="/keys/"
+transit_keys="/transit/keys/"
+namespace="?namespace="
+alias="prod"
+dotdot=".."
+at="@"
+colon=":"

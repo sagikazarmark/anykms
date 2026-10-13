@@ -1,0 +1,6 @@
+# libFuzzer dictionary for local_framing (local:v<N>: + nonce + ciphertext + tag).
+prefix="local:v"
+v1="local:v1:"
+v12="local:v12:"
+sep=":"
+zero="0"

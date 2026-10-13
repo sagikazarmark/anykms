@@ -1,0 +1,87 @@
+[package]
+name = "anykms-transit"
+version.workspace = true
+description = "HashiCorp Vault and OpenBao transit backend for anykms"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "vault", "openbao", "transit", "hashicorp"]
+categories = ["cryptography", "api-bindings"]
+# Tests are not published: no test sources or test keys in the package.
+exclude = ["tests/"]
+
+[features]
+default = ["rustls-aws-lc-rs"]
+# TLS crypto provider, used when neither `ServerConfig::crypto_provider` nor a process-wide
+# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
+# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
+# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
+# with `default-features = false` and `rustls-ring`.
+rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+# Spans and events for every operation (field allowlist; never data).
+tracing = ["dep:tracing", "anykms-http/tracing"]
+# Allow HttpVersion::Http2.
+http2 = ["reqwest/http2", "anykms-http/http2"]
+
+[dependencies]
+anykms-core.workspace = true
+# TLS provider selection, the reqwest client, zeroizing buffers, transport errors.
+anykms-http.workspace = true
+
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+url = "2"
+rustls.workspace = true
+rustls-pki-types = { workspace = true, features = ["std"] }
+tracing = { workspace = true, optional = true }
+# One login or renewal at a time (`Login`); reqwest already depends on tokio.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NONBLOCK for opening token files (no unsafe code).
+libc = "0.2"
+
+[dev-dependencies]
+anykms-conformance.workspace = true
+# Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
+anykms-testkit = { path = "../anykms-testkit" }
+anykms-recipes.workspace = true
+
+# Formats the HTTP-date `Retry-After` the mock server sends (tests/mock.rs).
+httpdate = "1"
+tokio.workspace = true
+wiremock.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+# Test-side TLS clients (fixture admin, integration) use ring, whatever provider the library uses.
+rustls = { workspace = true, features = ["ring"] }
+rustls-pki-types.workspace = true
+libtest-mimic.workspace = true
+
+[[test]]
+name = "integration"
+harness = false
+
+[[test]]
+name = "conformance_vault"
+harness = false
+
+[[test]]
+name = "conformance_openbao"
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

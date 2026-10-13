@@ -1,0 +1,7 @@
+# libFuzzer dictionary for key_uri.
+hashivault="hashivault://"
+openbao="openbao://"
+local="local://"
+transit_keys="/transit/keys/"
+namespace="?namespace="
+default_keyset="default/"

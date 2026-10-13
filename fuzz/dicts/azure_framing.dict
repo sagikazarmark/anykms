@@ -1,0 +1,6 @@
+# libFuzzer dictionary for azure_framing.
+magic="AZK\x01"
+rsa="AZK\x01\x01\x20"
+gcm="AZK\x01\x02\x20"
+kw="AZK\x01\x03\x20"
+version="0123456789abcdef0123456789abcdef"

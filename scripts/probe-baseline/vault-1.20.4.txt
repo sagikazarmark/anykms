@@ -1,0 +1,111 @@
+# server: vault 1.20.4
+-- create keys
+aes "ok"
+ec "ok"
+ed "ok"
+rsa "ok"
+hm "ok"
+-- encrypt with associated_data
+vault:v1:<b64>
+-- decrypt, right AD
+{"plaintext":"aGVsbG8="}
+-- decrypt, wrong AD
+400
+["cipher: message authentication failed"]
+-- decrypt, no AD
+["cipher: message authentication failed"]
+-- decrypt, tampered ciphertext
+["cipher: message authentication failed"]
+-- datakey with associated_data
+{"warnings":["Endpoint ignored these unrecognized parameters: [associated_data]"],"errors":null,"ciphertext":"vault:v1:<b64>","plaintext_len":44}
+   decrypt datakey with AD
+["cipher: message authentication failed"]
+   decrypt datakey without AD
+["plaintext"]
+-- datakey wrapped
+["ciphertext","key_version"]
+-- rotate, then decrypt the v1 ciphertext
+2
+{"plaintext":"aGVsbG8="}
+-- encrypt with key_version=1 after rotation
+"vault:v1:<b64>"
+-- min_decryption_version=2, then decrypt v1
+"ok"
+400
+["ciphertext or signature version is disallowed by policy (too old)"]
+-- encrypt to a missing key (disable_upsert)
+400
+["encryption key not found"]
+-- decrypt with a missing key
+400
+["encryption key not found"]
+-- bad token
+403
+-- sign ecdsa, prehashed
+vault:v1:<b64>
+   verify
+{"valid":true}
+   verify another input
+{"valid":false}
+-- sign ecdsa, jws marshaling
+"vault:v1:<b64>"
+-- sign rsa pss, prehashed
+"vault:v1:<b64>"
+-- sign rsa pkcs1v15, prehashed
+"vault:v1:<b64>"
+-- sign ed25519, prehashed
+["failed to parse batch item: only Pure Ed25519 signatures supported, prehashed must be false"]
+-- sign ed25519, raw message
+"vault:v1:<b64>"
+-- hmac
+vault:v1:<b64>
+   verify hmac
+{"valid":true}
+   hmac with an aes key
+"vault:v2:<b64>"
+-- sign/verify/hmac error messages (pinned in anykms-transit src/errors.rs)
+sign-missing-key 400 ["signing key not found"]
+verify-missing-key 400 ["signature verification key not found"]
+hmac-missing-key 400 ["encryption key not found"]
+verify-non-der-signature 400 ["supplied signature is invalid"]
+verify-bad-base64-signature 400 ["invalid base64 signature value"]
+verify-signature-no-prefix 400 ["invalid signature: no prefix"]
+verify-signature-too-new 400 ["invalid signature: version is too new"]
+verify-ed25519-garbage 200 {"valid":false}
+verify-hmac-garbage 200 {"valid":false}
+verify-hmac-bad-base64 400 ["unable to decode verification HMAC as base64: illegal base64 data at input byte 0"]
+verify-hmac-no-prefix 400 ["invalid HMAC to verify: no prefix"]
+verify-hmac-too-new 400 ["invalid HMAC: version is too new"]
+verify-hmac-too-old 400 ["cannot verify HMAC: version is too old (disallowed by policy)"]
+-- random
+44
+   sys/tools/random
+44
+-- read key ec
+{"type":"ecdsa-p256","latest_version":1,"min_decryption_version":1,"min_encryption_version":0,"deletion_allowed":false,"exportable":false,"supports_encryption":false,"supports_signing":true,"supports_decryption":false,"supports_derivation":false,"kv":[{"k":"1","v":["certificate_chain","creation_time","hybrid_public_key","name","public_key"]}]}
+-- read key aes
+{"type":"aes256-gcm96","latest_version":2,"min_decryption_version":2,"versions":["2"]}
+-- read key hmac
+{"type":"hmac","latest_version":1,"keys":null}
+-- export public key
+["1"]
+-- cmac
+["1 error occurred:\n\t* unsupported path\n\n"]
+-- delete a key without deletion_allowed
+["error deleting policy hm: deletion is not allowed for this key"]
+-- encrypt with an ed25519 key
+["message encryption not supported for key type ed25519"]
+-- large plaintext (2 MB)
+500
+-- chacha20-poly1305 key
+"ok"
+"vault:v1:<b64>"
+-- ml-dsa key
+["PQC key types are only available in enterprise versions of Vault"]
+-- list keys
+["aes","cc","ec","ed","hm","rsa"]
+-- reserved (non-transit) paths shaped like <mount>/keys/<name>
+sys 404
+auth/token 404
+identity 404
+cubbyhole 404

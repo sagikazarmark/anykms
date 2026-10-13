@@ -1,0 +1,748 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly fuzzing and live AWS conformance.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+defaults:
+  run:
+    # Every step runs in the devenv shell, with the project's toolchain (devenv.nix), unless a job
+    # picks a devenv profile for another one.
+    shell: devenv shell -- bash -e {0}
+
+jobs:
+  check:
+    name: Check
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # This job builds many feature combinations into one target directory, which outgrows the
+      # runner's free disk: drop preinstalled toolchains it never uses.
+      - name: Free disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Format
+        run: just fmt
+
+      - name: Clippy
+        run: just clippy
+
+      - name: Check each crate without default features
+        run: just check
+
+      - name: TLS provider features
+        run: just tls
+
+      - name: Recipe features
+        run: just recipes
+
+      - name: Docs
+        run: just doc
+
+      - name: Test
+        run: just test
+
+      - name: Package
+        run: just package
+
+      # In-process fixtures: the recipe fails on a skipped case.
+      - name: Local conformance (fail on skip)
+        run: just conformance local
+
+      - name: GCP conformance over the fake server (fail on skip)
+        run: just conformance gcp
+
+      - name: Minimal backend example (fail on skip)
+        run: just conformance conformance
+
+      - name: Examples against local keys
+        run: just examples
+
+  features:
+    name: Features
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Features
+        run: just features
+
+  # Each published crate's docs as docs.rs builds them: nightly, the features and rustdoc
+  # arguments of its [package.metadata.docs.rs] (`--cfg docsrs` turns on `doc_cfg`), one crate
+  # at a time, rustdoc warnings denied. docs.rs pages are frozen per published version.
+  docs-rs:
+    name: Docs (docs.rs settings, nightly)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv --profile nightly shell -- bash -e {0}
+    env:
+      # Only rustdoc's warnings are denied: a new nightly rustc lint must not fail this job.
+      RUSTFLAGS: ""
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+        with:
+          build-shell: false
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv --profile nightly shell -- {0}
+
+      - name: Build each crate's docs.rs documentation
+        run: just docs-rs
+
+  fuzz-build:
+    name: Fuzz targets build
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Check fuzz targets
+        run: just fuzz-check
+
+  deny:
+    name: cargo-deny
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Check advisories, bans, licenses and sources
+        run: just deny
+
+  # MSRV policy (README, "MSRV"): 1.91 covers every crate with every feature, its tests and
+  # examples, built from the committed lockfile. Cargo's MSRV-aware resolver holds the AWS SDK
+  # credential types (`aws-sdk-credentials`) on releases that support 1.91; newer ones need a newer
+  # compiler. The `msrv` devenv profile pins the toolchain.
+  msrv:
+    name: MSRV (1.91)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv --profile msrv shell -- bash -e {0}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+        with:
+          build-shell: false
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv --profile msrv shell -- {0}
+
+      - name: Test
+        run: just test
+
+  integration:
+    name: Integration (Vault ${{ matrix.vault }}, OpenBao ${{ matrix.openbao }})
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported pair (OpenBao 2.4 has no data-key AAD: exercises fail-closed).
+          # Images are pinned by digest too (same digests as compose.yaml and
+          # scripts/probe-failover.sh).
+          - vault: "1.20.4"
+            vault_digest: sha256:268bb80aa9c6d13d65fcfa05c0c268caca068952240a8087291a6ce0b66e3a10
+            openbao: "2.4.4"
+            openbao_digest: sha256:595c83b42614a4d2b044608e4593c05b019c5db25bc9c185d8fff3ac96c03ddd
+          # Latest pair.
+          - vault: "2.1.1"
+            vault_digest: sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2
+            openbao: "2.7.1"
+            openbao_digest: sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+    env:
+      VAULT_IMAGE: hashicorp/vault:${{ matrix.vault }}@${{ matrix.vault_digest }}
+      OPENBAO_IMAGE: openbao/openbao:${{ matrix.openbao }}@${{ matrix.openbao_digest }}
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      ANYKMS_FAIL_ON_SKIP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Start servers
+        run: scripts/dev-up.sh --sealed --tls
+
+      - name: Conformance and integration
+        run: just integration transit
+
+      - name: Examples against Vault
+        env:
+          VAULT_ADDR: http://127.0.0.1:8200
+          VAULT_TOKEN: root
+          ANYKMS_KEK_URI: hashivault:///transit/keys/app-kek
+          ANYKMS_SIGNING_URI: hashivault:///transit/keys/release
+          ANYKMS_MAC_URI: hashivault:///transit/keys/tokens
+        run: |
+          # The CLI defaults to https; the dev listener is plain http.
+          docker compose exec -T -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root vault sh -ec '
+            vault write -f transit/keys/app-kek type=aes256-gcm96
+            vault write -f transit/keys/release type=ecdsa-p256
+            vault write transit/keys/tokens type=hmac key_size=32'
+          just examples --all-features
+
+      - name: Server logs
+        if: failure()
+        run: docker compose --profile sealed --profile tls logs
+
+  # The AWS conformance suite and end-to-end tests against Floci (MIT, no token, real
+  # cryptography; it neither checks SigV4 nor enforces IAM or disabled keys on Sign). Runs on
+  # every push and PR, forks included: it needs no secret. The mock-server tests run in `check`.
+  # Every conformance case it can run must run: a `skip` fails, while `n/a` (absent by design,
+  # e.g. the IAM cases, as Floci enforces no IAM) stays ignored.
+  aws-emulator:
+    name: AWS (Floci emulator)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      ANYKMS_FAIL_ON_SKIP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Start Floci
+        run: docker compose --profile aws up -d --wait floci
+
+      - name: Conformance and end-to-end
+        run: just integration aws
+
+      - name: Emulator logs
+        if: failure()
+        run: docker compose --profile aws logs floci
+
+  # The same against LocalStack, only where its auth token is available (never on fork PRs).
+  # Without the token every step is skipped and the job still reports success, so it is not a
+  # release gate (Floci is; docs/releasing.md): the skip is a visible warning instead.
+  aws-localstack:
+    name: AWS (LocalStack emulator)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      ANYKMS_AWS_EMULATOR: localstack
+      ANYKMS_AWS_EMULATOR_ENDPOINT: http://127.0.0.1:4567
+    steps:
+      - name: Token available
+        id: token
+        shell: bash
+        run: |
+          if [ -n "$LOCALSTACK_AUTH_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::LOCALSTACK_AUTH_TOKEN is not available (fork PR or unset): LocalStack conformance did not run"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        if: steps.token.outputs.present == 'true'
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        if: steps.token.outputs.present == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Start LocalStack
+        if: steps.token.outputs.present == 'true'
+        run: docker compose --profile aws-localstack up -d --wait localstack
+
+      - name: Conformance and end-to-end
+        if: steps.token.outputs.present == 'true'
+        run: just integration aws
+
+  # Live AWS: nightly and on demand, in this repository only (never forks), with GitHub OIDC
+  # federation to a test-account role. The backend's own web-identity source exchanges the OIDC
+  # token, so no third-party action holds AWS credentials. Configure the repository variables
+  # AWS_LIVE_ROLE_ARN, AWS_LIVE_REGION and the pool key ARNs (scripts/aws-test-setup.sh prints
+  # them); without AWS_LIVE_ROLE_ARN the job is skipped.
+  aws-live:
+    name: AWS (live)
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && github.repository == 'sagikazarmark/anykms' && vars.AWS_LIVE_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ANYKMS_AWS_LIVE: "1"
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      AWS_REGION: ${{ vars.AWS_LIVE_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_LIVE_ROLE_ARN }}
+      AWS_ROLE_SESSION_NAME: anykms-ci-${{ github.run_id }}
+      AWS_EC2_METADATA_DISABLED: "true"
+      ANYKMS_AWS_ACCOUNT: ${{ vars.AWS_LIVE_ACCOUNT }}
+      ANYKMS_AWS_KEY_AEAD: ${{ vars.ANYKMS_AWS_KEY_AEAD }}
+      ANYKMS_AWS_KEY_HMAC: ${{ vars.ANYKMS_AWS_KEY_HMAC }}
+      ANYKMS_AWS_KEY_HMAC_384: ${{ vars.ANYKMS_AWS_KEY_HMAC_384 }}
+      ANYKMS_AWS_KEY_HMAC_512: ${{ vars.ANYKMS_AWS_KEY_HMAC_512 }}
+      ANYKMS_AWS_KEY_P256: ${{ vars.ANYKMS_AWS_KEY_P256 }}
+      ANYKMS_AWS_KEY_P384: ${{ vars.ANYKMS_AWS_KEY_P384 }}
+      ANYKMS_AWS_KEY_P521: ${{ vars.ANYKMS_AWS_KEY_P521 }}
+      ANYKMS_AWS_KEY_RSA_SIGN: ${{ vars.ANYKMS_AWS_KEY_RSA_SIGN }}
+      ANYKMS_AWS_KEY_ED25519: ${{ vars.ANYKMS_AWS_KEY_ED25519 }}
+      ANYKMS_AWS_KEY_RSA_WRAP: ${{ vars.ANYKMS_AWS_KEY_RSA_WRAP }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: GitHub OIDC token
+        run: |
+          token_file="$RUNNER_TEMP/aws-web-identity-token"
+          curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value > "$token_file"
+          chmod 600 "$token_file"
+          echo "AWS_WEB_IDENTITY_TOKEN_FILE=$token_file" >> "$GITHUB_ENV"
+
+      - name: Live conformance
+        run: just live aws
+
+  # Mocks, credentials, the TRACE hygiene test, and Lowkey Vault end to end with the conformance
+  # suite (every case runs or is n/a by declaration). The live targets run in azure-live.
+  azure:
+    name: Azure (mocks and Lowkey Vault)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      ANYKMS_FAIL_ON_SKIP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Start Lowkey Vault
+        run: |
+          docker compose --profile azure up -d lowkey-vault
+          # The management ping (8480) answers before the vault's HTTPS listener (8443), which
+          # the tests use: wait for both (any HTTP answer on 8443 will do).
+          for _ in $(seq 120); do
+            curl -sf -o /dev/null http://127.0.0.1:8480/ping \
+              && curl -sk -o /dev/null https://127.0.0.1:8443/ && exit 0
+            sleep 1
+          done
+          echo "Lowkey Vault did not start" >&2
+          exit 1
+
+      - name: Test
+        run: just integration azure
+
+      - name: Lowkey Vault logs
+        if: failure()
+        run: docker compose --profile azure logs lowkey-vault
+
+  # Real Azure, nightly and on demand, never on forks or pull requests. Authenticates with GitHub
+  # OIDC federated to an Entra ID app (workload identity: no stored secret). Configure the
+  # repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID and ANYKMS_AZURE_VAULT_URL (and the
+  # pooled-key URIs printed by scripts/azure-test-setup.sh); without them the job is skipped.
+  azure-live:
+    name: Azure (live vault)
+    if: >-
+      github.repository == 'sagikazarmark/anykms'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && vars.ANYKMS_AZURE_VAULT_URL != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ANYKMS_AZURE_LIVE: "1"
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ANYKMS_AZURE_VAULT_URL: ${{ vars.ANYKMS_AZURE_VAULT_URL }}
+      ANYKMS_AZURE_KEK_URI: ${{ vars.ANYKMS_AZURE_KEK_URI }}
+      ANYKMS_AZURE_EC_URI: ${{ vars.ANYKMS_AZURE_EC_URI }}
+      ANYKMS_AZURE_RSA_URI: ${{ vars.ANYKMS_AZURE_RSA_URI }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      # The GitHub OIDC token as the federated token file workload identity reads (refreshed
+      # before the steps that need it: it is valid for minutes).
+      - name: Federated token
+        run: |
+          curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r .value > "$RUNNER_TEMP/azure-federated-token"
+          chmod 600 "$RUNNER_TEMP/azure-federated-token"
+          echo "AZURE_FEDERATED_TOKEN_FILE=$RUNNER_TEMP/azure-federated-token" >> "$GITHUB_ENV"
+
+      - name: Build tests
+        run: just live azure --no-run
+
+      - name: Live tests and conformance
+        run: |
+          curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r .value > "$AZURE_FEDERATED_TOKEN_FILE"
+          just live azure
+
+      # Purges keys the fixture created more than a day ago (a cancelled run leaves some).
+      - name: Janitor
+        if: always()
+        run: |
+          curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r .value > "$AZURE_FEDERATED_TOKEN_FILE"
+          az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+            --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" --allow-no-subscriptions >/dev/null
+          scripts/azure-test-setup.sh janitor
+
+  semver:
+    name: Semver (${{ matrix.package }})
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # cargo-semver-checks-action installs its own toolchain and the cargo-semver-checks release
+    # that reads its rustdoc JSON, so this job stays outside devenv.
+    defaults:
+      run:
+        shell: bash
+    # Blocking for a crate published on crates.io. A crate not published yet is compared with the
+    # PR's base branch, non-blocking: before 0.1.0 the pre-release API work breaks it on purpose
+    # (docs/cloud/architecture-plan.md, R2). After the first publish every crate below has a
+    # registry baseline, so the job blocks with no change here (docs/releasing.md).
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every published crate. anykms-testkit (`publish = false`) is never published and is not
+        # listed.
+        package:
+          - anykms-core
+          - anykms-recipes
+          - anykms-transit
+          - anykms-aws
+          - anykms-azure
+          - anykms-http
+          - anykms-gcp
+          - anykms-local
+          - anykms-conformance
+          - anykms
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # crates.io first (`cargo info --registry` never answers from the workspace). A crate it does
+      # not know falls back to the base branch; a crate missing there too, or `publish = false`
+      # there, has nothing to compare. Any other `cargo info` failure (the registry unreachable)
+      # fails the step instead of silently downgrading to the non-blocking check.
+      - name: Find baseline
+        id: baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          if out=$(cargo info "$PACKAGE" --registry crates-io 2>&1); then
+            echo "::notice::$PACKAGE is published; comparing with crates.io (blocking)"
+            echo "source=registry" >> "$GITHUB_OUTPUT"
+          elif grep -qF "could not find \`$PACKAGE\`" <<<"$out"; then
+            if ! git cat-file -e "$BASE_SHA:crates/$PACKAGE/Cargo.toml" 2>/dev/null; then
+              echo "::notice::$PACKAGE is not in the base branch; skipping semver checks"
+              echo "source=none" >> "$GITHUB_OUTPUT"
+            elif git show "$BASE_SHA:crates/$PACKAGE/Cargo.toml" | grep -q '^publish = false'; then
+              echo "::notice::$PACKAGE is not published in the base branch; skipping semver checks"
+              echo "source=none" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::$PACKAGE is not on crates.io; comparing with the base branch (non-blocking)"
+              echo "source=base" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "$out"
+            echo "::error::cargo info failed for $PACKAGE"
+            exit 1
+          fi
+
+      - name: Check semver (crates.io)
+        if: steps.baseline.outputs.source == 'registry'
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          package: ${{ matrix.package }}
+
+      - name: Check semver (base branch, non-blocking)
+        if: steps.baseline.outputs.source == 'base'
+        continue-on-error: true
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          package: ${{ matrix.package }}
+          baseline-rev: ${{ github.event.pull_request.base.sha }}
+
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv --profile nightly shell -- bash -e {0}
+    # cargo-fuzz appends its flags to RUSTFLAGS: the workflow's `-D warnings` would let a new
+    # nightly lint fail a fuzz run that found no crash.
+    env:
+      RUSTFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aws_context
+          - aws_credentials
+          - aws_error
+          - aws_profile
+          - aws_success
+          - aws_uri
+          - core_values
+          - der_fixed
+          - envelope_parse
+          - envelope_roundtrip
+          - key_uri
+          - local_framing
+          - pem_spki
+          - transit_response
+          - transit_success
+          - transit_uri
+          - gcp_uri
+          - gcp_response
+          - gcp_classify
+          - azure_uri
+          - azure_framing
+          - azure_response
+          - jwk_spki
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+        with:
+          build-shell: false
+
+      - name: Fuzz for 10 minutes
+        run: just fuzz "${{ matrix.target }}" 600
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  # Real Cloud KMS, nightly and on demand, never for pull requests or forks. Credentials come from
+  # GitHub OIDC through workload identity federation (no long-lived keys): the data-plane identity
+  # through the external_account file google-github-actions/auth writes (Application Default
+  # Credentials, so this also exercises the crate's WIF path), and short-lived access tokens for
+  # the fixture's admin identity and for an identity without roles. Provisioning:
+  # scripts/gcp-test-setup.sh (key ring, pooled keys, service accounts, workload identity pool).
+  # The job's values live in the `cloud-gcp` environment, which a job-level `if` cannot read, so
+  # a repository-level variable ANYKMS_GCP_LIVE=true enables it (set it once provisioned).
+  gcp-live:
+    name: GCP live (nightly)
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && github.repository == 'sagikazarmark/anykms'
+      && vars.ANYKMS_GCP_LIVE == 'true'
+    runs-on: ubuntu-latest
+    environment: cloud-gcp
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ANYKMS_GCP_LIVE: "1"
+      ANYKMS_REQUIRE_FIXTURE: "1"
+      ANYKMS_GCP_KEY_RING: ${{ vars.ANYKMS_GCP_KEY_RING }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Admin token (fixture provisioning)
+        id: admin
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_ADMIN_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+
+      - name: Token of an identity without roles
+        id: unauthorized
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_UNAUTHORIZED_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+
+      # Last, so its credentials file is the one GOOGLE_APPLICATION_CREDENTIALS names.
+      # Also a token of the same identity, for the request-counting provider (the admin
+      # identity cannot sign).
+      - name: Data-plane credentials (workload identity federation, ADC)
+        id: data
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DATA_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Live tests and conformance
+        env:
+          ANYKMS_GCP_ADMIN_TOKEN: ${{ steps.admin.outputs.access_token }}
+          ANYKMS_GCP_DATA_TOKEN: ${{ steps.data.outputs.access_token }}
+          ANYKMS_GCP_UNAUTHORIZED_TOKEN: ${{ steps.unauthorized.outputs.access_token }}
+        run: just live gcp

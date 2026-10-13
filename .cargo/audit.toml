@@ -1,0 +1,5 @@
+# cargo-audit reads this file; cargo-deny (CI) reads deny.toml. Keep the ignores in sync.
+[advisories]
+# Marvin attack (RSA private-key timing): rsa is used for public-key verification only. See the
+# reason in deny.toml.
+ignore = ["RUSTSEC-2023-0071"]

@@ -1,0 +1,48 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+  # Marvin attack: timing side channel in RSA *private-key* operations. The `rsa` crate is only
+  # compiled with anykms-recipes' opt-in `rsa-rustcrypto` feature (the default `rsa-aws-lc-rs`
+  # backend does not use it), and then only for public-key operations: signature verification
+  # (LocalVerifier, CachedVerifier) and RSA-OAEP encryption (rsa_oaep_sha256_encrypt), which
+  # involve no private key. Private-key operations happen only in
+  # recipes' tests (a dev-dependency), on throwaway keys. The dev-dependency jsonwebtoken (JWT
+  # interop tests and the jwt_signing example) and jwt-simple (the jwt_signing_jwt_simple example,
+  # through superboring) bring rsa 0.9, also for verification only.
+  { id = "RUSTSEC-2023-0071", reason = "rsa (recipes' opt-in `rsa-rustcrypto` backend feature) used for public-key operations only" },
+]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+
+  "Unicode-3.0",
+  "BSD-3-Clause",
+  "ISC",
+  "CDLA-Permissive-2.0",
+]
+
+[bans]
+# Two versions of one crate in the graph fail the check. Each skip names the older version and the
+# dependents that keep it (`cargo tree -i <crate>@<version>`). Drop a skip once its duplicate is
+# gone: cargo-deny warns about a skip that matches nothing. Duplicates reached only through
+# dev-dependencies (jsonwebtoken's older RustCrypto generation) are not reported
+# (`multiple-versions-include-dev` defaults to false).
+multiple-versions = "deny"
+skip = [
+  { crate = "getrandom@0.2", reason = "ring (the opt-in rustls-ring provider, and the ring-based TLS servers in transit's and Azure's tests) still uses getrandom 0.2; everything else is on 0.4" },
+  { crate = "syn@2", reason = "proc-macro dependents not yet on syn 3: curve25519-dalek-derive, jni-macros, jni-sys-macros, tracing-attributes, trait-variant and zeroize_derive" },
+  { crate = "windows-sys@0.52", reason = "Windows-only: ring still uses windows-sys 0.52; tokio, mio, socket2 and the rest are on 0.61" },
+  { crate = "http@0.2", reason = "the AWS SDK credential types (aws-smithy-runtime-api, aws-smithy-types; anykms-aws `sdk-credentials`) still depend on http 0.2 next to 1.x; everything else is on 1.x" },
+  { crate = "http-body@0.4", reason = "aws-smithy-types (anykms-aws `sdk-credentials`) still depends on http-body 0.4 next to 1.x; everything else is on 1.x" },
+  { crate = "base64@0.22", reason = "the Azure SDK core (typespec, typespec_client_core; anykms-azure `azure-identity`) still depends on base64 0.22; everything else is on 0.23 (the dev-dependency jsonwebtoken also uses 0.22)" },
+]
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,10 @@
+# libFuzzer dictionary for core_values (anykms_core::encoding). Inputs start with one selector
+# byte; the rest is decoded as a signature or tag.
+sig_magic="AKS"
+tag_magic="AKT"
+sig_v1="AKS\x01"
+tag_v1="AKT\x01"
+format_v1="\x01"
+version_none="\x00"
+version_1="\x011"
+version_12="\x0212"

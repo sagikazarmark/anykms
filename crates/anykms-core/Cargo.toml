@@ -1,0 +1,41 @@
+[package]
+name = "anykms-core"
+version.workspace = true
+description = "Core traits and types for anykms: capability traits on KMS key handles"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "encryption", "signing", "key-management", "envelope"]
+categories = ["cryptography"]
+
+[features]
+default = ["digest"]
+# `Digest::sha256(msg)` and friends.
+digest = ["dep:sha2"]
+# Events for every retry made by `Retry`, and for retry layers a handle skips.
+tracing = ["dep:tracing"]
+# `Serialize`/`Deserialize` for `Ciphertext`, `Signature` and `Tag` (their base64 storage
+# encoding in human-readable formats, bytes in binary ones).
+serde = ["dep:serde"]
+
+[dependencies]
+trait-variant.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+sha2 = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+# Not the workspace definition, which enables `derive`.
+serde = { version = "1", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

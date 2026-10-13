@@ -1,0 +1,83 @@
+# encrypt limits and empty input
+== encrypt empty plaintext
+200 {"ciphertext":"<ciphertext>","ciphertextCrc32c":"<crc>","name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead/cryptoKeyVersions/1","protectionLevel":"SOFTWARE"}
+== encrypt 65536
+200 {"ciphertext":"<ciphertext>","ciphertextCrc32c":"<crc>","name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead/cryptoKeyVersions/1","protectionLevel":"SOFTWARE"}
+== encrypt 65537
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"actual_size":"65537","field_name":"plaintext","max_expected_size":"65536","min_expected_size":"0"},"reason":"INVALID_REQUEST_FIELD_SIZE"}],"message":"Request field plaintext must have length of at least 0, but not more than 65536. Provided value had length 65537.","status":"INVALID_ARGUMENT"}}
+== encrypt aad 65537
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"actual_size":"65537","field_name":"additional_authenticated_data","max_expected_size":"65536","min_expected_size":"0"},"reason":"INVALID_REQUEST_FIELD_SIZE"}],"message":"Request field additional_authenticated_data must have length of at least 0, but not more than 65536. Provided value had length 65537.","status":"INVALID_ARGUMENT"}}
+== encrypt wrong plaintextCrc32c
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"checksum_field":"plaintext_crc32c","data_field":"plaintext"},"reason":"INVALID_CHECKSUM"}],"message":"The checksum in field plaintext_crc32c did not match the data in field plaintext.","status":"INVALID_ARGUMENT"}}
+== encrypt with crc
+200 {"ciphertext":"<ciphertext>","ciphertextCrc32c":"<crc>","name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","verifiedPlaintextCrc32c":"<crc>"}
+# decrypt failures
+== decrypt right aad
+200 {"plaintext":"<plaintext>","plaintextCrc32c":"<crc>","protectionLevel":"SOFTWARE","usedPrimary":true}
+== decrypt wrong aad
+400 {"error":{"code":400,"message":"Decryption failed.","status":"INVALID_ARGUMENT"}}
+== decrypt with another key
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/hmac-sha256","type":"CRYPTO_SCHEME_MISMATCH"}]}],"message":"Operation requested for Key projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/hmac-sha256 has incorrect key purpose: MAC, expected key purpose is: ENCRYPT_DECRYPT","status":"FAILED_PRECONDITION"}}
+== decrypt wrong ciphertextCrc32c
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"checksum_field":"ciphertext_crc32c","data_field":"ciphertext"},"reason":"INVALID_CHECKSUM"}],"message":"The checksum in field ciphertext_crc32c did not match the data in field ciphertext.","status":"INVALID_ARGUMENT"}}
+== decrypt garbage
+400 {"error":{"code":400,"message":"Decryption failed: the ciphertext is invalid.","status":"INVALID_ARGUMENT"}}
+# purpose and algorithm mismatches
+== asymmetricSign on an AEAD key
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead","type":"CRYPTO_SCHEME_MISMATCH"}]}],"message":"Operation requested for Key projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead has incorrect key purpose: ENCRYPT_DECRYPT, expected key purpose is: ASYMMETRIC_SIGN","status":"FAILED_PRECONDITION"}}
+== encrypt on a signing key
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256","type":"CRYPTO_SCHEME_MISMATCH"}]}],"message":"Operation requested for Key projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256 has incorrect key purpose: ASYMMETRIC_SIGN, expected key purpose is: ENCRYPT_DECRYPT","status":"FAILED_PRECONDITION"}}
+== getPublicKey on an AEAD key
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead/cryptoKeyVersions/1","type":"CRYPTO_SCHEME_MISMATCH"}]}],"message":"Operation requested for Key projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/aead/cryptoKeyVersions/1 has incorrect key purpose: ENCRYPT_DECRYPT","status":"FAILED_PRECONDITION"}}
+== macSign on a signing key
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256","type":"CRYPTO_SCHEME_MISMATCH"}]}],"message":"Operation requested for Key projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256 has incorrect key purpose: ASYMMETRIC_SIGN, expected key purpose is: MAC","status":"FAILED_PRECONDITION"}}
+== sha384 digest on P-256
+400 {"error":{"code":400,"message":"The digest SHA384 is not valid for CryptoKeys with algorithm EC_SIGN_P256_SHA256.","status":"INVALID_ARGUMENT"}}
+== data on P-256
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== wrong digestCrc32c
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"checksum_field":"digest_crc32c","data_field":"digest"},"reason":"INVALID_CHECKSUM"}],"message":"The checksum in field digest_crc32c did not match the data in field digest.","status":"INVALID_ARGUMENT"}}
+# message and MAC sizes
+== Ed25519 data 0
+400 {"error":{"code":400,"message":"For algorithm EC_SIGN_ED25519 and protection level SOFTWARE, data must be set.","status":"INVALID_ARGUMENT"}}
+== Ed25519 data 4096
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ed25519/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== Ed25519 data 8192
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ed25519/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== Ed25519 data 16384
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ed25519/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== Ed25519 data 32768
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ed25519/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== Ed25519 data 65536
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ed25519/cryptoKeyVersions/1","protectionLevel":"SOFTWARE","signature":"<signature>","signatureCrc32c":"<crc>"}
+== Ed25519 data 65537
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"actual_size":"65537","field_name":"data","max_expected_size":"65536","min_expected_size":"0"},"reason":"INVALID_REQUEST_FIELD_SIZE"}],"message":"Request field data must have length of at least 0, but not more than 65536. Provided value had length 65537.","status":"INVALID_ARGUMENT"}}
+== macSign data 0
+200 {"mac":"<mac>","macCrc32c":"<crc>","name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/hmac-sha256/cryptoKeyVersions/1","protectionLevel":"SOFTWARE"}
+== macSign data 65536
+200 {"mac":"<mac>","macCrc32c":"<crc>","name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/hmac-sha256/cryptoKeyVersions/1","protectionLevel":"SOFTWARE"}
+== macSign data 65537
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","domain":"cloudkms.googleapis.com","metadata":{"actual_size":"65537","field_name":"data","max_expected_size":"65536","min_expected_size":"0"},"reason":"INVALID_REQUEST_FIELD_SIZE"}],"message":"Request field data must have length of at least 0, but not more than 65536. Provided value had length 65537.","status":"INVALID_ARGUMENT"}}
+== macVerify wrong tag
+200 {"name":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/hmac-sha256/cryptoKeyVersions/1","protectionLevel":"SOFTWARE"}
+# missing keys, versions and bad tokens
+== encrypt missing key
+404 {"error":{"code":404,"message":"CryptoKey projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/does-not-exist not found.","status":"NOT_FOUND"}}
+== getPublicKey missing version
+404 {"error":{"code":404,"message":"CryptoKeyVersion projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/ec-p256/cryptoKeyVersions/999 not found.","status":"NOT_FOUND"}}
+== encrypt with a bad token
+401 {"error":{"code":401,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"method":"google.cloud.kms.v1.KeyManagementService.Encrypt","service":"cloudkms.googleapis.com"},"reason":"ACCESS_TOKEN_TYPE_UNSUPPORTED"}],"message":"Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.","status":"UNAUTHENTICATED"}}
+== encrypt in another project
+404 {"error":{"code":404,"message":"Project 'projects/anykms-probe-nonexistent' not found.","status":"NOT_FOUND"}}
+# disabled versions (probe keys)
+create symmetric: 200
+create signing: 200
+disable propagation: refused after ~0s (15 s buckets)
+== encrypt, primary disabled
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1","type":"KEY_DISABLED"}]}],"message":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1 is not enabled, current state is: DISABLED.","status":"FAILED_PRECONDITION"}}
+== decrypt, version disabled
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1","type":"KEY_DISABLED"}]}],"message":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1 is not enabled, current state is: DISABLED.","status":"FAILED_PRECONDITION"}}
+== sign, version disabled
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1","type":"KEY_DISABLED"}]}],"message":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1 is not enabled, current state is: DISABLED.","status":"FAILED_PRECONDITION"}}
+== getPublicKey, version disabled
+400 {"error":{"code":400,"details":[{"@type":"type.googleapis.com/google.rpc.PreconditionFailure","violations":[{"subject":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1","type":"KEY_DISABLED"}]}],"message":"projects/<project>/locations/global/keyRings/anykms-test/cryptoKeys/<probe-key>/cryptoKeyVersions/1 is not enabled, current state is: DISABLED.","status":"FAILED_PRECONDITION"}}

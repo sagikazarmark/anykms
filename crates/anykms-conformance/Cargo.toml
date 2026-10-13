@@ -1,0 +1,47 @@
+[package]
+name = "anykms-conformance"
+version.workspace = true
+description = "Shared conformance suite that every anykms backend runs"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "testing", "conformance"]
+categories = ["cryptography", "development-tools::testing"]
+
+[features]
+# Helpers for backend fixtures: `RunId`, `KeySpecTable`, `FreshKeys` and `typed_handles!`.
+fixture-helpers = []
+
+[dependencies]
+anykms-core.workspace = true
+# The recipe cases (envelope, JOSE), and an RSA backend for the RSA cases (LocalVerifier,
+# CachedVerifier, JOSE).
+anykms-recipes = { workspace = true, features = ["jose", "envelope", "rsa-aws-lc-rs"] }
+
+trait-variant.workspace = true
+zeroize.workspace = true
+tokio.workspace = true
+libtest-mimic.workspace = true
+base64.workspace = true
+# Independent envelope v1 decoder (recipes::envelope::format).
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+# examples/minimal_backend.rs: key material and nonces for its toy KMS.
+getrandom.workspace = true
+
+# A toy backend that passes the suite; a test target too (`cargo test` runs its `main`).
+[[example]]
+name = "minimal_backend"
+test = true
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

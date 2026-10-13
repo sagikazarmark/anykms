@@ -1,0 +1,104 @@
+{
+  "description": "anykms Azure ciphertext frames (docs/azure-ciphertext.md). Every `frame` parses to `alg`, `version` and `body`; `plaintext` is what the body decrypts to under the given key.",
+  "valid": [
+    {
+      "name": "rsa-oaep-256",
+      "alg": "RSA-OAEP-256",
+      "version": "0123456789abcdef0123456789abcdef",
+      "body": "928b02d164a579561d94d4a3880dcddb28e8cd2395fc7307746b31fcbd3cde9ada239b43de8a6088eadbbaccd5bf234fcd45e8f7d61c2f6fbbb565cff9589b23997435bd1b65791151d6f6b0603075350e318da9a485e69018c0f1e738a9445df48eadaff8714e8f5a6b5ed6bed28b0072bd7027a11ba540aedd50c07c0ed52df07dd6282dd3e6b92d1341ccede6d5c19faa528fccbebdc97fc9195d33d8cd025e909a0ac985d2a5b2e12da774a3999a96d91884ea40ca6f458474a9def26b9df6b05c53c783c0788e73ee8e5a1bea4bb605689f1ca9cfee133d111cce482edfbee306ad836fdd7cb9e6053e0e69a1093324a7bebb22d901dc913d8c9fa386a8",
+      "frame": "415a4b0101203031323334353637383961626364656630313233343536373839616263646566928b02d164a579561d94d4a3880dcddb28e8cd2395fc7307746b31fcbd3cde9ada239b43de8a6088eadbbaccd5bf234fcd45e8f7d61c2f6fbbb565cff9589b23997435bd1b65791151d6f6b0603075350e318da9a485e69018c0f1e738a9445df48eadaff8714e8f5a6b5ed6bed28b0072bd7027a11ba540aedd50c07c0ed52df07dd6282dd3e6b92d1341ccede6d5c19faa528fccbebdc97fc9195d33d8cd025e909a0ac985d2a5b2e12da774a3999a96d91884ea40ca6f458474a9def26b9df6b05c53c783c0788e73ee8e5a1bea4bb605689f1ca9cfee133d111cce482edfbee306ad836fdd7cb9e6053e0e69a1093324a7bebb22d901dc913d8c9fa386a8",
+      "key": "crates/anykms-azure/tests/data/rsa_2048.pk8.pem (PKCS#8 RSA-2048 private key)",
+      "plaintext": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "a256gcm",
+      "alg": "A256GCM",
+      "version": "0123456789abcdef0123456789abcdef",
+      "body": "22222222222222222222222276997e22adbcbf3e9f4aac5968c09bb472f6ed940fe2d824202531c73aae4f7377f87a56d5185f713f",
+      "frame": "415a4b010220303132333435363738396162636465663031323334353637383961626364656622222222222222222222222276997e22adbcbf3e9f4aac5968c09bb472f6ed940fe2d824202531c73aae4f7377f87a56d5185f713f",
+      "key": "1111111111111111111111111111111111111111111111111111111111111111",
+      "iv": "222222222222222222222222",
+      "aad": "75736572732f3432",
+      "tag": "2531c73aae4f7377f87a56d5185f713f",
+      "plaintext": "616e796b6d7320617a757265206672616d6520766563746f72"
+    },
+    {
+      "name": "a256kw (RFC 3394 4.6)",
+      "alg": "A256KW",
+      "version": "0123456789abcdef0123456789abcdef",
+      "body": "28c9f404c4b810f4cbccb35cfb87f8263f5786e2d80ed326cbc7f0e71a99f43bfb988b9b7a02dd21",
+      "frame": "415a4b010320303132333435363738396162636465663031323334353637383961626364656628c9f404c4b810f4cbccb35cfb87f8263f5786e2d80ed326cbc7f0e71a99f43bfb988b9b7a02dd21",
+      "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "plaintext": "00112233445566778899aabbccddeeff000102030405060708090a0b0c0d0e0f"
+    },
+    {
+      "name": "non-hex version (length-prefixed)",
+      "alg": "RSA-OAEP-256",
+      "version": "v7",
+      "body": "928b02d164a579561d94d4a3880dcddb28e8cd2395fc7307746b31fcbd3cde9ada239b43de8a6088eadbbaccd5bf234fcd45e8f7d61c2f6fbbb565cff9589b23997435bd1b65791151d6f6b0603075350e318da9a485e69018c0f1e738a9445df48eadaff8714e8f5a6b5ed6bed28b0072bd7027a11ba540aedd50c07c0ed52df07dd6282dd3e6b92d1341ccede6d5c19faa528fccbebdc97fc9195d33d8cd025e909a0ac985d2a5b2e12da774a3999a96d91884ea40ca6f458474a9def26b9df6b05c53c783c0788e73ee8e5a1bea4bb605689f1ca9cfee133d111cce482edfbee306ad836fdd7cb9e6053e0e69a1093324a7bebb22d901dc913d8c9fa386a8",
+      "frame": "415a4b0101027637928b02d164a579561d94d4a3880dcddb28e8cd2395fc7307746b31fcbd3cde9ada239b43de8a6088eadbbaccd5bf234fcd45e8f7d61c2f6fbbb565cff9589b23997435bd1b65791151d6f6b0603075350e318da9a485e69018c0f1e738a9445df48eadaff8714e8f5a6b5ed6bed28b0072bd7027a11ba540aedd50c07c0ed52df07dd6282dd3e6b92d1341ccede6d5c19faa528fccbebdc97fc9195d33d8cd025e909a0ac985d2a5b2e12da774a3999a96d91884ea40ca6f458474a9def26b9df6b05c53c783c0788e73ee8e5a1bea4bb605689f1ca9cfee133d111cce482edfbee306ad836fdd7cb9e6053e0e69a1093324a7bebb22d901dc913d8c9fa386a8"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty",
+      "frame": "",
+      "error": "Truncated"
+    },
+    {
+      "name": "bad magic",
+      "frame": "415a4c0101016100",
+      "error": "BadMagic"
+    },
+    {
+      "name": "unknown format",
+      "frame": "415a4b0201016100",
+      "error": "UnknownFormat"
+    },
+    {
+      "name": "unknown algorithm",
+      "frame": "415a4b0104016100",
+      "error": "UnknownAlgorithm"
+    },
+    {
+      "name": "zero version length",
+      "frame": "415a4b01010000",
+      "error": "BadVersion"
+    },
+    {
+      "name": "version above 64",
+      "frame": "415a4b010141616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616100",
+      "error": "BadVersion"
+    },
+    {
+      "name": "uppercase version",
+      "frame": "415a4b0101014100",
+      "error": "BadVersion"
+    },
+    {
+      "name": "truncated version",
+      "frame": "415a4b0101206161",
+      "error": "Truncated"
+    },
+    {
+      "name": "empty RSA body",
+      "frame": "415a4b01010161",
+      "error": "Truncated"
+    },
+    {
+      "name": "GCM body under 28 bytes",
+      "frame": "415a4b01020161000000000000000000000000000000000000000000000000000000",
+      "error": "Truncated"
+    },
+    {
+      "name": "A256KW body under 24 bytes",
+      "frame": "415a4b0103016100000000000000000000000000000000",
+      "error": "Truncated"
+    },
+    {
+      "name": "A256KW body not a multiple of 8",
+      "frame": "415a4b0103016100000000000000000000000000000000000000000000000000",
+      "error": "BadBody"
+    }
+  ]
+}

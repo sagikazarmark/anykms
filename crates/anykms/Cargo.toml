@@ -1,0 +1,134 @@
+[package]
+name = "anykms"
+version.workspace = true
+description = "One interface for key-management services (Vault and OpenBao transit, AWS KMS, Google Cloud KMS, Azure Key Vault) that keeps their differences visible"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+# tests/doc_snippets.rs compiles the snippets of the workspace's documents, which the package
+# does not hold.
+keywords = ["kms", "vault", "openbao", "encryption", "envelope"]
+categories = ["cryptography", "api-bindings"]
+exclude = ["tests/doc_snippets.rs"]
+
+[features]
+default = ["recipes", "rsa-aws-lc-rs", "tokio", "rustls-aws-lc-rs", "gcp-service-account-key"]
+# Every recipe (envelope encryption, JOSE, emulated data keys, local verification). Depend on
+# anykms-recipes directly to pick its `jose` and `envelope` features one by one.
+recipes = ["dep:anykms-recipes", "anykms-recipes/jose", "anykms-recipes/envelope"]
+# RSA signature verification backend for `recipes` (LocalVerifier, CachedVerifier, JOSE):
+# AWS-LC (default) or RustCrypto's pure-Rust `rsa` crate (a 0.10 release candidate, opt-in). With
+# both, AWS-LC is used; with neither, RSA verification fails with `Unsupported` (ECDSA and Ed25519
+# are unaffected). For RustCrypto only:
+# `default-features = false, features = ["recipes", "rsa-rustcrypto", "tokio"]`.
+rsa-rustcrypto = ["recipes", "anykms-recipes/rsa-rustcrypto", "anykms-aws?/rsa-rustcrypto", "anykms-gcp?/rsa-rustcrypto", "anykms-azure?/rsa-rustcrypto"]
+rsa-aws-lc-rs = ["recipes", "anykms-recipes/rsa-aws-lc-rs", "anykms-aws?/rsa-aws-lc-rs", "anykms-gcp?/rsa-aws-lc-rs", "anykms-azure?/rsa-aws-lc-rs"]
+transit = ["dep:anykms-transit"]
+# AWS KMS (`aws-kms://` keys). Its RSA key-wrapping keys wrap locally with the RSA backend of
+# `rsa-aws-lc-rs` / `rsa-rustcrypto`.
+aws = ["dep:anykms-aws", "dep:anykms-http"]
+# AWS SDK credentials for `aws` (`anykms-aws/sdk-credentials`: `credentials::SdkCredentials` over an
+# `aws-config` provider, for SSO, role chaining and `credential_process`).
+aws-sdk-credentials = ["aws", "anykms-aws/sdk-credentials"]
+# Google Cloud KMS (`gcp-kms://`). Its RSA verification backend follows
+# `rsa-aws-lc-rs`/`rsa-rustcrypto`, its TLS provider `rustls-*`, and service-account key files
+# `gcp-service-account-key`.
+gcp = ["dep:anykms-gcp", "dep:anykms-http"]
+# Service-account JSON key files for `gcp` (`anykms-gcp/service-account-key`; they sign with
+# aws-lc-rs, so a C toolchain is needed even in ring/RustCrypto builds). A default feature, not
+# tied to an RSA backend; without it a service-account credential is a `Configuration` error
+# naming the feature. No effect without `gcp`.
+gcp-service-account-key = ["anykms-gcp?/service-account-key"]
+# google-cloud-auth credentials for `gcp` (`anykms-gcp/google-cloud-auth`:
+# `Credentials::google_cloud_auth`, for credential types not built in).
+gcp-google-cloud-auth = ["gcp", "anykms-gcp/google-cloud-auth"]
+# TLS crypto provider for the HTTP backends (transit, aws, gcp, azure; no effect without one).
+# `rustls-aws-lc-rs` is a default feature (aws-lc-sys builds C and assembly: a C compiler is
+# needed); for ring: `default-features = false, features = ["transit", "rustls-ring"]` plus the
+# other features you need (`rsa-rustcrypto` rather than `rsa-aws-lc-rs` to leave aws-lc out
+# entirely; `gcp-service-account-key` always uses it). See the backends' crate docs.
+rustls-ring = ["anykms-transit?/rustls-ring", "anykms-aws?/rustls-ring", "anykms-gcp?/rustls-ring", "anykms-azure?/rustls-ring"]
+rustls-aws-lc-rs = ["anykms-transit?/rustls-aws-lc-rs", "anykms-aws?/rustls-aws-lc-rs", "anykms-gcp?/rustls-aws-lc-rs", "anykms-azure?/rustls-aws-lc-rs"]
+# Azure Key Vault and Managed HSM (`azure-kv://`). See anykms-azure's crate docs. Its
+# experimental `mhsm-hmac` is not forwarded: depend on anykms-azure directly to enable it.
+azure = ["dep:anykms-azure", "dep:anykms-http"]
+# Azure SDK credentials for `azure` (`anykms-azure/azure-identity`: `AzureIdentity` over an
+# `azure_identity` credential, e.g. the Azure CLI or a certificate).
+azure-identity = ["azure", "anykms-azure/azure-identity"]
+# Allow HTTP/2 (`HttpVersion::Http2`) on every HTTP backend that is enabled.
+http2 = ["anykms-transit?/http2", "anykms-aws?/http2", "anykms-gcp?/http2", "anykms-azure?/http2"]
+local = ["dep:anykms-local"]
+tracing = ["dep:tracing", "anykms-core/tracing", "anykms-transit?/tracing", "anykms-aws?/tracing", "anykms-gcp?/tracing", "anykms-azure?/tracing"]
+# `Serialize`/`Deserialize` for `Ciphertext`, `Signature` and `Tag` (see anykms-core).
+serde = ["anykms-core/serde"]
+# `tokio_sleep()`, `tokio_clock()` and `retry_layer()`: only tokio's timer, no particular runtime
+# flavor.
+tokio = ["dep:tokio"]
+
+[dependencies]
+anykms-core.workspace = true
+anykms-recipes = { workspace = true, optional = true }
+anykms-transit = { workspace = true, optional = true }
+anykms-aws = { workspace = true, optional = true }
+anykms-gcp = { workspace = true, optional = true }
+anykms-azure = { workspace = true, optional = true }
+anykms-local = { workspace = true, optional = true }
+# Tells a cloud provider's empty system trust store from its other errors (`with_default_providers`).
+anykms-http = { workspace = true, optional = true }
+# Not the workspace definition, which enables rt-multi-thread and macros for tests and binaries.
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+serde_json.workspace = true
+
+# Verify the tokens of examples/jwt_signing.rs (jsonwebtoken) and
+# examples/jwt_signing_jwt_simple.rs (jwt-simple, its default BoringSSL build needs cmake;
+# jwk-simple selects the JWK).
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
+jwt-simple = { version = "=0.15.0", default-features = false, features = ["pure-rust"] }
+jwk-simple = "=0.5.0"
+
+# The snippets of the READMEs and the docs (tests/doc_snippets.rs): `anyhow` and
+# `serde` as an application has them, and the types the SDK bridge snippets pass to anykms.
+anyhow = "1"
+serde.workspace = true
+aws-credential-types = "1"
+azure_core = { version = "1", default-features = false }
+google-cloud-auth = { version = "1.3", default-features = false }
+
+# The examples run on in-memory local keys; add the `transit` feature to point them at Vault or
+# OpenBao (see examples/common/mod.rs).
+[[test]]
+name = "handles"
+required-features = ["recipes", "local", "tokio"]
+
+[[test]]
+name = "doc_snippets"
+required-features = ["recipes", "local", "tokio", "transit", "aws-sdk-credentials", "gcp-google-cloud-auth", "azure-identity"]
+
+[[example]]
+name = "field_encryption"
+required-features = ["recipes", "local", "tokio"]
+
+[[example]]
+name = "jwt_signing"
+required-features = ["recipes", "local", "tokio"]
+
+[[example]]
+name = "jwt_signing_jwt_simple"
+required-features = ["recipes", "local", "tokio"]
+
+[[example]]
+name = "hmac_tokens"
+required-features = ["local", "tokio"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true

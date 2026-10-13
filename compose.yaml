@@ -1,0 +1,168 @@
+# Dev/test servers for anykms. Dev mode: in-memory storage, root token "root", no TLS.
+# Ports are bound to loopback only. Never use this configuration outside local testing.
+#
+# Images are pinned by tag and digest (a digest wins over the tag, so both must name the same
+# release). Override the whole reference, never just a tag:
+#   VAULT_IMAGE=hashicorp/vault:<tag>@sha256:<digest> OPENBAO_IMAGE=openbao/openbao:<tag>@sha256:<digest>
+# The CI matrix (.github/workflows/ci.yaml) and scripts/probe-failover.sh carry the digests of
+# the other verified versions.
+services:
+  vault:
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.1.1@sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2}
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+    cap_add: [IPC_LOCK]
+    ports: ["127.0.0.1:8200:8200"]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  vault-init:
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.1.1@sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2}
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        vault secrets list | grep -q '^transit/' || vault secrets enable transit
+        vault write transit/config/keys disable_upsert=true
+    restart: "no"
+
+  openbao:
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf}
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root
+    cap_add: [IPC_LOCK]
+    ports: ["127.0.0.1:8300:8200"]
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  openbao-init:
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf}
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: root
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        bao secrets list | grep -q '^transit/' || bao secrets enable transit
+        bao write transit/config/keys disable_upsert=true
+    restart: "no"
+
+  # --- profile: sealed (a separate server, so sealing never disturbs the shared ones) ---
+  vault-sealed:
+    profiles: [sealed]
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.1.1@sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2}
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+    cap_add: [IPC_LOCK]
+    ports: ["127.0.0.1:8210:8200"]
+    healthcheck:
+      # `vault status` exits 0 when unsealed, 2 when sealed and 1 on errors.
+      test: ["CMD-SHELL", "vault status -address=http://127.0.0.1:8200 >/dev/null; [ $$? -ne 1 ]"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  vault-sealed-init:
+    profiles: [sealed]
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.1.1@sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2}
+    depends_on:
+      vault-sealed:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault-sealed:8200
+      VAULT_TOKEN: root
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        vault secrets list | grep -q '^transit/' || vault secrets enable transit
+        vault write -f transit/keys/sealed-key
+        vault operator seal
+    restart: "no"
+
+  # --- profile: tls (dev servers with generated certificates; CA written to .dev/tls/<server>) ---
+  vault-tls:
+    profiles: [tls]
+    image: ${VAULT_IMAGE:-hashicorp/vault:2.1.1@sha256:47f14a6acb98f48d798a07df7c83f23a6e636e1cf724c5f8ff165cb32667a1e2}
+    command: ["server", "-dev", "-dev-tls", "-dev-tls-cert-dir=/tls", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+    cap_add: [IPC_LOCK]
+    volumes: ["./.dev/tls/vault:/tls"]
+    ports: ["127.0.0.1:8201:8200"]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=https://127.0.0.1:8200", "-ca-cert=/tls/vault-ca.pem"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  openbao-tls:
+    profiles: [tls]
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf}
+    command: ["server", "-dev", "-dev-tls", "-dev-tls-cert-dir=/tls", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root
+    cap_add: [IPC_LOCK]
+    volumes: ["./.dev/tls/openbao:/tls"]
+    ports: ["127.0.0.1:8301:8200"]
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=https://127.0.0.1:8200", "-ca-cert=/tls/vault-ca.pem"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  # AWS KMS emulators (profile `aws`; `docker compose --profile aws up -d --wait floci`).
+  # Floci (MIT, no token): real AES-GCM, ECDSA, RSA, Ed25519 and HMAC; it does not check SigV4
+  # signatures, and its error texts differ from AWS (see docs/research/aws-kms.md).
+  floci:
+    image: ${FLOCI_IMAGE:-floci/floci:2.1.0@sha256:f5aa8c18302cedb4f2385f5c4e455b3efc77fee6bf7b6e5d1712b2817ba102db}
+    profiles: [aws]
+    ports: ["127.0.0.1:4566:4566"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 2s
+      start_period: 5s
+      retries: 30
+
+  # LocalStack needs LOCALSTACK_AUTH_TOKEN since 2026-03-23 (it exits without one); CI runs it
+  # only when the secret exists. `docker compose --profile aws-localstack up -d --wait localstack`.
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:2026.9.0@sha256:801a3dff7f6a23857e7310b7602e67d52a29dfdcb03e09f7c608d5c57d24b792}
+    profiles: [aws-localstack]
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+      SERVICES: kms
+    ports: ["127.0.0.1:4567:4566"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:4566/_localstack/health"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  # --- profile: azure (Lowkey Vault, an Azure Key Vault emulator; accepts any bearer token) ---
+  # HTTPS on 8443 with a self-signed certificate for `localhost` (the tests trust it on first use,
+  # over loopback only), metadata on 8080 (published as 8480). Small JVM heap for CI runners.
+  lowkey-vault:
+    profiles: [azure]
+    image: ${LOWKEY_IMAGE:-nagyesta/lowkey-vault:7.3.112@sha256:2636ad677e0e9b98f16b82f36dae16748bcb0d3eee7c9ac6d357f9e9a233be3a}
+    environment:
+      LOWKEY_ARGS: "--LOWKEY_VAULT_RELAXED_PORTS=true"
+      JAVA_TOOL_OPTIONS: "-Xmx192m -Xss512k -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC -XX:TieredStopAtLevel=1"
+    mem_limit: 512m
+    ports: ["127.0.0.1:8443:8443", "127.0.0.1:8480:8080"]

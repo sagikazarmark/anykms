@@ -1,0 +1,11 @@
+# libFuzzer dictionary for azure_response.
+kid="\"kid\":\"https://kv1.vault.azure.net/keys/k/0123456789abcdef0123456789abcdef\""
+kty_ec="\"kty\":\"EC\""
+kty_rsa="\"kty\":\"RSA-HSM\""
+kty_oct="\"kty\":\"oct-HSM\""
+crv="\"crv\":\"P-256\""
+error="{\"error\":{\"code\":"
+inner="\"innererror\":{\"code\":"
+value="\"value\":"
+token="\"access_token\":"
+expires="\"expires_on\":"

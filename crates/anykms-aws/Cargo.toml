@@ -1,0 +1,118 @@
+[package]
+name = "anykms-aws"
+version.workspace = true
+description = "AWS KMS backend for anykms"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "aws", "aws-kms", "encryption", "signing"]
+categories = ["cryptography", "api-bindings"]
+# The published crate ships no test targets (they need emulators, credentials, the hidden
+# `__test-fixtures` API, the unpublished anykms-testkit, or throwaway test keys) and not the
+# probe example, which administers keys through `__test-fixtures`. Only `tests/data/sigv4` ships:
+# the public AWS SigV4 test vectors that the `sigv4` unit test reads.
+exclude = [
+  "tests/*.rs",
+  "tests/e2e",
+  "tests/support",
+  "tests/data/*.json",
+  "tests/data/*.pk8",
+  "examples/probe.rs",
+]
+
+[features]
+default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs"]
+# TLS crypto provider, used when neither `AwsProviderBuilder::crypto_provider` nor a process-wide
+# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
+# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
+# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
+# with `default-features = false` and `rustls-ring`.
+rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+# RSA-OAEP-SHA-256 for the local wrap of RSA `KeyWrap` keys (anykms-recipes'
+# `rsa_oaep_sha256_encrypt`). With neither, wrapping with an RSA key fails with `Unsupported`.
+rsa-aws-lc-rs = ["anykms-recipes/rsa-aws-lc-rs"]
+rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
+# Spans and events for every operation (field allowlist; never data).
+tracing = ["dep:tracing", "anykms-http/tracing"]
+# Allow HttpVersion::Http2.
+http2 = ["reqwest/http2", "anykms-http/http2"]
+# Credentials from the AWS SDK (`credentials::SdkCredentials` over any
+# `aws_credential_types` provider, e.g. one built with `aws-config`): SSO, role chaining,
+# `credential_process` and the rest of the SDK chain. Only credentials come from the SDK; KMS
+# calls stay on this crate's client. Covered by the workspace MSRV (1.91): Cargo's MSRV-aware
+# resolver holds aws-credential-types on a release that supports it; newer releases need a newer
+# compiler.
+sdk-credentials = ["dep:aws-credential-types"]
+# Hidden key administration (`AwsProvider::__admin`: signed calls of any KMS action to any
+# endpoint) for the conformance fixtures and the A0 probe. Test-only: never enable it in a
+# production build (it is a `compile_error!` without debug assertions, so
+# `cargo test --release -p anykms-aws` is unsupported). The crate's own tests and examples enable
+# it (dev-dependency below).
+__test-fixtures = []
+
+[dependencies]
+anykms-core.workspace = true
+anykms-http.workspace = true
+anykms-recipes.workspace = true
+
+trait-variant.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+aws-credential-types = { version = "1", optional = true }
+httpdate = "1"
+url = "2"
+rustls.workspace = true
+tracing = { workspace = true, optional = true }
+# The lazily built link-local client (`OnceCell`); reqwest
+# already depends on tokio.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+# The tests and examples administer keys through the hidden `__test-fixtures` API. A path-only
+# dev-dependency: `cargo publish` strips it.
+anykms-aws = { path = ".", features = ["__test-fixtures"] }
+anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
+# Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
+anykms-testkit = { path = "../anykms-testkit" }
+getrandom.workspace = true
+anykms-recipes = { workspace = true, features = ["envelope"] }
+tokio.workspace = true
+wiremock.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+p256.workspace = true
+ed25519-dalek.workspace = true
+signature.workspace = true
+# Decrypts the local RSA-OAEP wraps in tests/mock.rs.
+aws-lc-rs.workspace = true
+# SDK credentials providers for the `sdk-credentials` tests (tests/credentials.rs).
+aws-credential-types = "1"
+# Formats the `Date` of the clock-skew mock.
+httpdate = "1"
+
+[[test]]
+name = "conformance_emulator"
+harness = false
+
+[[test]]
+name = "conformance_live"
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+# Every public feature, never the hidden `__test-fixtures` (a `compile_error!` in release builds).
+features = ["tracing", "http2", "rsa-aws-lc-rs", "rsa-rustcrypto", "rustls-aws-lc-rs", "rustls-ring", "sdk-credentials"]
+rustdoc-args = ["--cfg", "docsrs"]

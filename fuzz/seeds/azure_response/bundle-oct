@@ -1,0 +1,1 @@
+{"key":{"kid":"https://kv1.vault.azure.net/keys/k/0123456789abcdef0123456789abcdef","kty":"oct-HSM","key_ops":["encrypt","decrypt"]},"attributes":{"enabled":false,"nbf":1,"exp":2}}

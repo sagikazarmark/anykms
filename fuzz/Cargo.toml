@@ -1,0 +1,186 @@
+[package]
+name = "anykms-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+anykms-core = { path = "../crates/anykms-core" }
+anykms-recipes = { path = "../crates/anykms-recipes" }
+anykms-local = { path = "../crates/anykms-local" }
+anykms-transit = { path = "../crates/anykms-transit" }
+anykms-aws = { path = "../crates/anykms-aws" }
+base64 = "0.23"
+anykms-gcp = { path = "../crates/anykms-gcp" }
+anykms-azure = { path = "../crates/anykms-azure" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "key_uri"
+path = "fuzz_targets/key_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transit_uri"
+path = "fuzz_targets/transit_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_parse"
+path = "fuzz_targets/envelope_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_roundtrip"
+path = "fuzz_targets/envelope_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transit_response"
+path = "fuzz_targets/transit_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pem_spki"
+path = "fuzz_targets/pem_spki.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "der_fixed"
+path = "fuzz_targets/der_fixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "local_framing"
+path = "fuzz_targets/local_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_values"
+path = "fuzz_targets/core_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transit_success"
+path = "fuzz_targets/transit_success.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_uri"
+path = "fuzz_targets/aws_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_error"
+path = "fuzz_targets/aws_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_success"
+path = "fuzz_targets/aws_success.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_profile"
+path = "fuzz_targets/aws_profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_credentials"
+path = "fuzz_targets/aws_credentials.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aws_context"
+path = "fuzz_targets/aws_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gcp_uri"
+path = "fuzz_targets/gcp_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gcp_response"
+path = "fuzz_targets/gcp_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gcp_classify"
+path = "fuzz_targets/gcp_classify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "azure_uri"
+path = "fuzz_targets/azure_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "azure_framing"
+path = "fuzz_targets/azure_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "azure_response"
+path = "fuzz_targets/azure_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwk_spki"
+path = "fuzz_targets/jwk_spki.rs"
+test = false
+doc = false
+bench = false

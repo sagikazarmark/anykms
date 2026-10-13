@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  # The fuzz crate is outside the workspace and has its own lockfile.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: daily
+    groups:
+      cargo-fuzz:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    exclude-paths:
+      - .github/workflows/release.yml

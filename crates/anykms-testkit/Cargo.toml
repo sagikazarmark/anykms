@@ -1,0 +1,27 @@
+[package]
+name = "anykms-testkit"
+version.workspace = true
+description = "Test helpers shared by the anykms HTTP backends (trace capture, span schema and redaction assertions); never published"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published: the backends use it as a path-only dev-dependency (`cargo publish` strips it),
+# and their package `exclude` lists the test targets that use it.
+publish = false
+
+[dependencies]
+anykms-http = { path = "../anykms-http", default-features = false, features = ["tracing"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Bridges `log` records (reqwest) into the capturing subscriber.
+tracing-log = "0.2"
+
+[dev-dependencies]
+anykms-core.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.release]
+release = false

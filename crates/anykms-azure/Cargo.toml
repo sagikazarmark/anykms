@@ -1,0 +1,107 @@
+[package]
+name = "anykms-azure"
+version.workspace = true
+description = "Azure Key Vault and Managed HSM backend for anykms"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["kms", "azure", "key-vault", "managed-hsm"]
+categories = ["cryptography", "api-bindings"]
+# The published crate ships no tests (they need emulators, credentials, the unpublished
+# anykms-testkit, or throwaway test keys).
+exclude = ["tests/"]
+
+[features]
+default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs"]
+# TLS crypto provider, used when neither `AzureProviderBuilder::crypto_provider` nor a
+# process-wide default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win
+# over the features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http
+# selects it.
+# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
+# with `default-features = false` and `rustls-ring`.
+rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+# The RSA backend for local verification (`AzureOptions::local_verify` with an RSA key):
+# aws-lc-rs (default) or RustCrypto's `rsa`, through anykms-recipes. With neither, opening an
+# RSA algorithm for local verification is `Configuration`; server-side verification needs none.
+rsa-aws-lc-rs = ["anykms-recipes/rsa-aws-lc-rs"]
+rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
+# Spans and events for every request (field allowlist; never data, tokens or bodies).
+tracing = ["dep:tracing", "anykms-http/tracing"]
+# Allow HttpVersion::Http2.
+http2 = ["reqwest/http2", "anykms-http/http2"]
+# Credentials from the Azure SDK (`AzureIdentity` over any `azure_core` `TokenCredential`, e.g.
+# from `azure_identity`: the Azure CLI, certificates, Azure Pipelines, ...). Only access tokens
+# come from it; Key Vault calls stay on this crate's client.
+azure-identity = ["dep:azure_core"]
+# HMAC `Mac` on Managed HSM `oct-HSM` keys (HS256/384/512). Experimental: whether Azure's HS*
+# `sign` takes the message (portable HMAC) or a digest is not pinned yet (docs/cloud/azure.md Q4,
+# to verify with T13). Off by default.
+mhsm-hmac = []
+
+[dependencies]
+anykms-core.workspace = true
+# KeyWrapDataKeys, EmulatedDataKeys, LocalVerifier, ECDSA DER helpers, SPKI checks.
+anykms-recipes.workspace = true
+# TLS provider selection, the reqwest client, zeroizing buffers, Retry-After, CredentialCache.
+anykms-http.workspace = true
+
+zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+# EC point validation (JWK -> SPKI).
+p256.workspace = true
+p384.workspace = true
+p521.workspace = true
+reqwest.workspace = true
+url = "2"
+rustls.workspace = true
+tracing = { workspace = true, optional = true }
+azure_core = { version = "1", optional = true, default-features = false }
+# Single-flight token refresh (through anykms-http); reqwest already depends on tokio.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
+# Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
+anykms-testkit = { path = "../anykms-testkit" }
+# Check the ciphertext-frame vectors (tests/vectors.rs): RSA-OAEP-256 and AES-256-GCM.
+aws-lc-rs.workspace = true
+aes-gcm.workspace = true
+anykms-recipes = { workspace = true, features = ["envelope", "rsa-aws-lc-rs"] }
+tokio.workspace = true
+wiremock.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+httpdate = "1"
+p256.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+# Test-side TLS clients use ring, whatever provider the library uses.
+rustls = { workspace = true, features = ["ring"] }
+# An in-process Azure SDK credential for the `azure-identity` tests (tests/credentials.rs).
+azure_core = { version = "1", default-features = false }
+async-trait = "0.1"
+
+[[test]]
+name = "conformance_lowkey"
+harness = false
+
+[[test]]
+name = "conformance_azure"
+harness = false
+
+[[test]]
+name = "conformance_mhsm"
+harness = false
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

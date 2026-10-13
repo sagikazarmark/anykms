@@ -1,0 +1,31 @@
+datakey 000 (no response)
+datakey 307 (redirect)
+datakey 503 ["Vault is sealed"]
+decrypt 000 (no response)
+decrypt 307 (redirect)
+decrypt 500 ["local node not active but active cluster node not found"]
+decrypt 503 ["Vault is sealed"]
+encrypt 000 (no response)
+encrypt 307 (redirect)
+encrypt 500 ["local node not active but active cluster node not found"]
+encrypt 503 ["Vault is sealed"]
+hmac 000 (no response)
+hmac 307 (redirect)
+hmac 500 ["local node not active but active cluster node not found"]
+hmac 503 ["Vault is sealed"]
+keyread 000 (no response)
+keyread 307 (redirect)
+keyread 500 ["local node not active but active cluster node not found"]
+keyread 503 ["Vault is sealed"]
+rewrap 000 (no response)
+rewrap 307 (redirect)
+rewrap 500 ["local node not active but active cluster node not found"]
+rewrap 503 ["Vault is sealed"]
+sign 000 (no response)
+sign 307 (redirect)
+sign 500 ["local node not active but active cluster node not found"]
+sign 503 ["Vault is sealed"]
+verify 000 (no response)
+verify 307 (redirect)
+verify 500 ["local node not active but active cluster node not found"]
+verify 503 ["Vault is sealed"]
