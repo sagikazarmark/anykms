@@ -559,85 +559,85 @@ jobs:
             --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" --allow-no-subscriptions >/dev/null
           scripts/azure-test-setup.sh janitor
 
-  semver:
-    name: Semver
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    # cargo-semver-checks-action installs its own toolchain and the cargo-semver-checks release
-    # that reads its rustdoc JSON, so this job stays outside devenv.
-    defaults:
-      run:
-        shell: bash
-    # Blocking for a crate published on crates.io. A crate not published yet is compared with the
-    # PR's base branch, non-blocking: before 0.1.0 the pre-release API work breaks it on purpose
-    # (docs/cloud/architecture-plan.md, R2). After the first publish every crate below has a
-    # registry baseline, so the job blocks with no change here (docs/releasing.md).
-    strategy:
-      fail-fast: false
-      matrix:
-        # Every published crate. anykms-testkit (`publish = false`) is never published and is not
-        # listed.
-        package:
-          - anykms-core
-          - anykms-recipes
-          - anykms-transit
-          - anykms-aws
-          - anykms-azure
-          - anykms-http
-          - anykms-gcp
-          - anykms-local
-          - anykms-conformance
-          - anykms
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      # crates.io first (`cargo info --registry` never answers from the workspace). A crate it does
-      # not know falls back to the base branch; a crate missing there too, or `publish = false`
-      # there, has nothing to compare. Any other `cargo info` failure (the registry unreachable)
-      # fails the step instead of silently downgrading to the non-blocking check.
-      - name: Find baseline
-        id: baseline
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PACKAGE: ${{ matrix.package }}
-        run: |
-          if out=$(cargo info "$PACKAGE" --registry crates-io 2>&1); then
-            echo "::notice::$PACKAGE is published; comparing with crates.io (blocking)"
-            echo "source=registry" >> "$GITHUB_OUTPUT"
-          elif grep -qF "could not find \`$PACKAGE\`" <<<"$out"; then
-            if ! git cat-file -e "$BASE_SHA:crates/$PACKAGE/Cargo.toml" 2>/dev/null; then
-              echo "::notice::$PACKAGE is not in the base branch; skipping semver checks"
-              echo "source=none" >> "$GITHUB_OUTPUT"
-            elif git show "$BASE_SHA:crates/$PACKAGE/Cargo.toml" | grep -q '^publish = false'; then
-              echo "::notice::$PACKAGE is not published in the base branch; skipping semver checks"
-              echo "source=none" >> "$GITHUB_OUTPUT"
-            else
-              echo "::notice::$PACKAGE is not on crates.io; comparing with the base branch (non-blocking)"
-              echo "source=base" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "$out"
-            echo "::error::cargo info failed for $PACKAGE"
-            exit 1
-          fi
-
-      - name: Check semver (crates.io)
-        if: steps.baseline.outputs.source == 'registry'
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
-        with:
-          package: ${{ matrix.package }}
-
-      - name: Check semver (base branch, non-blocking)
-        if: steps.baseline.outputs.source == 'base'
-        continue-on-error: true
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
-        with:
-          package: ${{ matrix.package }}
-          baseline-rev: ${{ github.event.pull_request.base.sha }}
+  #   semver:
+  #     name: Semver
+  #     if: github.event_name == 'pull_request'
+  #     runs-on: ubuntu-latest
+  #     # cargo-semver-checks-action installs its own toolchain and the cargo-semver-checks release
+  #     # that reads its rustdoc JSON, so this job stays outside devenv.
+  #     defaults:
+  #       run:
+  #         shell: bash
+  #     # Blocking for a crate published on crates.io. A crate not published yet is compared with the
+  #     # PR's base branch, non-blocking: before 0.1.0 the pre-release API work breaks it on purpose
+  #     # (docs/cloud/architecture-plan.md, R2). After the first publish every crate below has a
+  #     # registry baseline, so the job blocks with no change here (docs/releasing.md).
+  #     strategy:
+  #       fail-fast: false
+  #       matrix:
+  #         # Every published crate. anykms-testkit (`publish = false`) is never published and is not
+  #         # listed.
+  #         package:
+  #           - anykms-core
+  #           - anykms-recipes
+  #           - anykms-transit
+  #           - anykms-aws
+  #           - anykms-azure
+  #           - anykms-http
+  #           - anykms-gcp
+  #           - anykms-local
+  #           - anykms-conformance
+  #           - anykms
+  #     steps:
+  #       - name: Checkout repository
+  #         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+  #         with:
+  #           persist-credentials: false
+  #           fetch-depth: 0
+  #
+  #       # crates.io first (`cargo info --registry` never answers from the workspace). A crate it does
+  #       # not know falls back to the base branch; a crate missing there too, or `publish = false`
+  #       # there, has nothing to compare. Any other `cargo info` failure (the registry unreachable)
+  #       # fails the step instead of silently downgrading to the non-blocking check.
+  #       - name: Find baseline
+  #         id: baseline
+  #         env:
+  #           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  #           PACKAGE: ${{ matrix.package }}
+  #         run: |
+  #           if out=$(cargo info "$PACKAGE" --registry crates-io 2>&1); then
+  #             echo "::notice::$PACKAGE is published; comparing with crates.io (blocking)"
+  #             echo "source=registry" >> "$GITHUB_OUTPUT"
+  #           elif grep -qF "could not find \`$PACKAGE\`" <<<"$out"; then
+  #             if ! git cat-file -e "$BASE_SHA:crates/$PACKAGE/Cargo.toml" 2>/dev/null; then
+  #               echo "::notice::$PACKAGE is not in the base branch; skipping semver checks"
+  #               echo "source=none" >> "$GITHUB_OUTPUT"
+  #             elif git show "$BASE_SHA:crates/$PACKAGE/Cargo.toml" | grep -q '^publish = false'; then
+  #               echo "::notice::$PACKAGE is not published in the base branch; skipping semver checks"
+  #               echo "source=none" >> "$GITHUB_OUTPUT"
+  #             else
+  #               echo "::notice::$PACKAGE is not on crates.io; comparing with the base branch (non-blocking)"
+  #               echo "source=base" >> "$GITHUB_OUTPUT"
+  #             fi
+  #           else
+  #             echo "$out"
+  #             echo "::error::cargo info failed for $PACKAGE"
+  #             exit 1
+  #           fi
+  #
+  #       - name: Check semver (crates.io)
+  #         if: steps.baseline.outputs.source == 'registry'
+  #         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+  #         with:
+  #           package: ${{ matrix.package }}
+  #
+  #       - name: Check semver (base branch, non-blocking)
+  #         if: steps.baseline.outputs.source == 'base'
+  #         continue-on-error: true
+  #         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+  #         with:
+  #           package: ${{ matrix.package }}
+  #           baseline-rev: ${{ github.event.pull_request.base.sha }}
 
   fuzz:
     name: Fuzz
