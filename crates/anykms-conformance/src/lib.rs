@@ -249,8 +249,6 @@ fn undeclared_message(features: &[Feature]) -> String {
     )
 }
 
-/// The `conformance::declarations` trial: fails listing every feature a case requires or
-/// consults that the fixture left undeclared. It checks every case, whatever filter the run uses.
 /// The outcome of one conformance case, as [`run_async`] reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -284,8 +282,9 @@ pub struct CaseReport {
 pub struct Report {
     /// Cases in run order.
     pub cases: Vec<CaseReport>,
-    /// Features some case needs that `probe()` left undeclared, with the cases' names. Empty
-    /// when every needed feature is declared.
+    /// Features a selected case needs that `probe()` left undeclared, with the cases' names.
+    /// Empty when every selected case's features are declared. Covers the cases the run's
+    /// `filter` selects, like `cases`; a run without a filter checks every case.
     pub undeclared: Vec<(Feature, Vec<String>)>,
 }
 
@@ -324,8 +323,11 @@ impl Report {
 ///
 /// `sleep` is how the cases wait between settle checks (e.g. a
 /// `setTimeout`-backed delay on wasm, `tokio::time::sleep` natively, or
-/// [`anykms_core::instant_sleep`] for fixtures with no settle time). `filter`, when set, runs
-/// only the cases whose full name contains it.
+/// [`anykms_core::instant_sleep`] for fixtures with no settle time). `filter`, when set, selects
+/// the cases whose full name (`<path>::<case>`) contains it: only those run, and only their
+/// undeclared features count against the report — a host running a subset is not failed by
+/// cases it did not ask for. Run without a filter to check every declaration, as the native
+/// `conformance::declarations` trial does.
 ///
 /// # Panics
 ///
@@ -343,7 +345,7 @@ pub async fn run_async<F: Fixture>(
     let typed = fx.typed();
     let all = cases::all::<F>();
     let mut report = Report::default();
-    for case in &all {
+    for case in all.iter().filter(|c| selected(filter, c)) {
         if let Gate::Undeclared(fs) = gate(&caps, case) {
             for f in fs {
                 match report.undeclared.iter_mut().find(|(g, _)| *g == f) {
@@ -387,6 +389,20 @@ pub async fn run_async<F: Fixture>(
     report
 }
 
+/// Whether a [`run_async`] `filter` selects `case`: no filter selects everything; otherwise at
+/// least one of the case's full names (`<path>::<case>`) must contain it. The same test the
+/// run loop applies per path, so `Report::undeclared` and `Report::cases` cover the same cases.
+fn selected<F>(filter: Option<&str>, case: &Case<F>) -> bool {
+    filter.is_none_or(|f| {
+        case.paths()
+            .iter()
+            .any(|path| format!("{path}::{}", case.name).contains(f))
+    })
+}
+
+/// The `conformance::declarations` trial: fails listing every feature a case requires or
+/// consults that the fixture left undeclared. It checks every case, whatever filter the run uses
+/// (the filter can still deselect the trial itself by name).
 #[cfg(not(target_arch = "wasm32"))]
 fn declarations_trial<F>(caps: &FixtureCaps, all: &[Case<F>]) -> Trial {
     let mut missing: Vec<Feature> = Vec::new();
@@ -434,6 +450,22 @@ mod tests {
             Gate::Undeclared(f) => f,
             _ => Vec::new(),
         }
+    }
+
+    #[test]
+    fn filter_selects_by_full_name_on_any_path() {
+        let c = case(&[], &[]); // name "x", both paths: typed::x, registry::x
+        assert!(selected(None, &c));
+        assert!(selected(Some("x"), &c));
+        assert!(selected(Some("typed::"), &c));
+        assert!(selected(Some("registry::x"), &c));
+        assert!(!selected(Some("zz"), &c));
+        let typed_only = Case {
+            both_paths: false,
+            ..case(&[], &[])
+        };
+        assert!(selected(Some("typed::x"), &typed_only));
+        assert!(!selected(Some("registry::"), &typed_only));
     }
 
     #[test]
