@@ -89,6 +89,7 @@ dependencies = [
  "base64",
  "sha2",
  "trait-variant",
+ "web-time",
  "zeroize",
 ]
 
@@ -164,6 +165,7 @@ dependencies = [
  "signature",
  "spki",
  "tracing",
+ "web-time",
  "zeroize",
 ]
 
@@ -188,6 +190,7 @@ dependencies = [
  "signature",
  "spki",
  "subtle",
+ "web-time",
  "zeroize",
 ]
 
@@ -651,9 +654,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1898,6 +1903,16 @@ name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

@@ -322,7 +322,7 @@ impl Report {
 /// test). Natively [`run`] is the usual choice: it runs cases in parallel and prints
 /// `libtest`-style output.
 ///
-/// `sleep` is how [`Ctx::settled`](ctx::Ctx::settled) waits between checks (e.g. a
+/// `sleep` is how the cases wait between settle checks (e.g. a
 /// `setTimeout`-backed delay on wasm, `tokio::time::sleep` natively, or
 /// [`anykms_core::instant_sleep`] for fixtures with no settle time). `filter`, when set, runs
 /// only the cases whose full name contains it.
