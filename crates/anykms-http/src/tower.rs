@@ -17,11 +17,14 @@
 //! The adapter only moves bytes. It clones the service for each request, sets `content-length`,
 //! and reads the response body frame by frame into a [`BodyBuffer`], so nothing past the limit
 //! is buffered and what was read is wiped on overflow. It has **no timeout of its own**
-//! (`tower::timeout` needs a Tokio runtime and panics inside a Worker): a native stack adds its
-//! own layer, a Worker a `map_request` layer that inserts `tower_worker_fetch::Timeout`. It
-//! **cannot control redirects**: the inner service must be configured not to follow them (on a
-//! Worker, the same layer inserts `tower_worker_fetch::Redirect::Manual`); a 3xx that reaches
-//! the adapter is returned as is, and the backends treat it as an error.
+//! (`tower::timeout` needs a Tokio runtime and panics inside a Worker), and a `tower::timeout`
+//! layer bounds only the service's response future, not the body read that follows it: the
+//! timeout that spans the whole exchange is the inner service's (the built-in client's request
+//! timeout, a `fetch` timeout). A native stack adds its own layer over a client that has one, a
+//! Worker a `map_request` layer that inserts `tower_worker_fetch::Timeout`. It **cannot control
+//! redirects**: the inner service must be configured not to follow them (on a Worker, the same
+//! layer inserts `tower_worker_fetch::Redirect::Manual`); a 3xx that reaches the adapter is
+//! returned as is, and the backends treat it as an error.
 
 use std::fmt;
 use std::future::poll_fn;

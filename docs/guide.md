@@ -125,14 +125,18 @@ let registry = anykms::Registry::builder()
 ```
 
 The adapter sets `content-length`, reads the response into the same bounded zeroizing buffer as
-the built-in transport, and keeps the client's failure classes. It has **no timeout of its own**
-(`tower::timeout` is a layer you add; a `map_err` layer that boxes a `SendError::Timeout` keeps
-the class) and **cannot control redirects**: when the service is not the built-in client, configure
-it not to follow them (for a `fetch`-based service, the `Redirect::Manual` extension below). A
-request's `RequestTimeout` extension reaches the service, which may honour it (the built-in client
-does). The service is cloned for each request, so every layer in the stack must be `Clone`: tower's
-`RateLimit` is not, so put a rate limit behind a `buffer` layer (`ServiceBuilder::buffer`, feature
-`buffer`, needs a Tokio runtime), as tower documents.
+the built-in transport, and keeps the client's failure classes. It has **no timeout of its own**,
+and a `tower::timeout` layer bounds only the service's response future, not the body the adapter
+reads afterwards: the timeout that covers the whole exchange is the one at the bottom of the stack
+(the built-in client's request timeout and `RequestTimeout` span the body; so does a `fetch`
+timeout). Over another service, give it one that does too; a `map_err` layer that boxes a
+`SendError::Timeout` keeps the class. The adapter **cannot control redirects**: when the service
+is not the built-in client, configure it not to follow them (for a `fetch`-based service, the
+`Redirect::Manual` extension below). A request's `RequestTimeout` extension reaches the service,
+which may honour it (the built-in client does). The service is cloned for each request, so every
+layer in the stack must be `Clone`: tower's `RateLimit` is not, so put a rate limit behind a
+`buffer` layer (`ServiceBuilder::buffer`, feature `buffer`, needs a Tokio runtime), as tower
+documents.
 
 One difference from the bare client: `HttpTransport::ready` (the check a backend runs before its
 credential fetch, so that running outside a Tokio runtime fails with one `NoRuntime` error) cannot
@@ -151,7 +155,7 @@ redirects by default, `Authorization` header included) and `Timeout` (the adapte
 ```rust,ignore
 use std::time::Duration;
 
-use anykms::aws::anykms_http::{RequestTimeout, TowerTransport};
+use anykms::aws::anykms_http::{RequestTimeout, TowerTransport, http};
 use tower::ServiceBuilder;
 use tower_worker_fetch::{FetchService, Redirect, Timeout};
 

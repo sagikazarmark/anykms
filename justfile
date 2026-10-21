@@ -180,11 +180,11 @@ live package *args:
 
 # Without VAULT_ADDR/BAO_ADDR or key URIs, the examples use in-memory local keys; they need only
 # the `local` feature (on top of the defaults). tower_transport is about the transport, so it runs
-# only against a server.
+# only against a server, and only when its key is named (ANYKMS_KEK_URI): it does not create one.
 [doc("Run the facade's examples.")]
 examples *flags="--features local":
     for e in field_encryption jwt_signing jwt_signing_jwt_simple hmac_tokens; do cargo run -p anykms --locked {{ flags }} --example "$e"; done
-    if [ -n "${VAULT_ADDR:-}${BAO_ADDR:-}" ]; then cargo run -p anykms --locked --features transit,tower --example tower_transport; fi
+    if [ -n "${VAULT_ADDR:-}${BAO_ADDR:-}" ] && [ -n "${ANYKMS_KEK_URI:-}" ]; then cargo run -p anykms --locked --features transit,tower --example tower_transport; fi
 
 # The transport-free crates on wasm32-unknown-unknown with their `js` feature (a JS host:
 # browsers, Node.js, Cloudflare Workers): a check of each, then anykms-wasm-tests under Node via

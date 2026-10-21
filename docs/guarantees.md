@@ -34,10 +34,11 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   `TowerTransport` (feature `tower`) adapts any tower `Service`: it sets `content-length`,
   reads the body into the same bounded zeroizing buffer and passes a boxed `SendError` from the
   service through unchanged (anything else is `Unavailable`). It has **no timeout of its own**
-  and **cannot control redirects**: the inner service must be configured not to follow them,
-  and a 3xx that comes back is an error for the backend, as always. With the built-in client at
-  the bottom (`ReqwestTransport::into_service`) both are the client's, and its failure classes
-  are kept.
+  (a `tower::timeout` layer bounds the response future only, not the body read that follows: the
+  timeout covering the whole exchange is the inner service's) and **cannot control redirects**:
+  the inner service must be configured not to follow them, and a 3xx that comes back is an error
+  for the backend, as always. With the built-in client at the bottom
+  (`ReqwestTransport::into_service`) both are the client's, and its failure classes are kept.
 - **FIPS scope.** KMS operations (encrypt, decrypt, unwrap, sign, MAC) run in the KMS, under its
   own validation. TLS follows a FIPS provider only when one is configured
   (`ReqwestTransportBuilder::crypto_provider`) or installed process-wide through the re-exported
