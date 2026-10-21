@@ -181,9 +181,7 @@ examples *flags="--features local":
 # The transport-free crates on wasm32-unknown-unknown with their `js` feature (a JS host:
 # browsers, Node.js, Cloudflare Workers): a check of each, then anykms-wasm-tests under Node via
 # wasm-bindgen-test-runner (.cargo/config.toml), which needs a wasm-bindgen-cli matching the
-# `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it). Run it in the `wasm`
-# devenv profile (`devenv --profile wasm shell`): the default profile's lld flag is not a wasm
-# linker flag.
+# `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it).
 wasm:
     cargo check -p anykms-core -p anykms-recipes -p anykms-local -p anykms-conformance \
       --target wasm32-unknown-unknown --locked --no-default-features \

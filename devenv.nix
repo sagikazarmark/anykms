@@ -44,12 +44,6 @@
     msrv.module = {
       languages.rust.version = "1.91.0";
     };
-
-    # wasm32 (`just wasm`): devenv --profile wasm shell. lld sets `RUSTFLAGS=-C link-arg=-fuse-ld=lld`,
-    # which rust-lld rejects when linking wasm; without it the workflow's RUSTFLAGS apply as well.
-    wasm.module = {
-      languages.rust.lld.enable = lib.mkForce false;
-    };
   };
 
   services = {
