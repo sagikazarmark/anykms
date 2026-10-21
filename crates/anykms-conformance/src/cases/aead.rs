@@ -7,7 +7,7 @@ use anykms_core::{
 };
 
 use super::util::{tamper, truncate, two};
-use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind};
+use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind, require_semantics};
 use crate::fixture::{Feature, Fixture, TestKey, TestKeyKind};
 
 /// Whether only versions have a state ([`StateScope::VersionOnly`]).
@@ -70,8 +70,7 @@ const ROUNDTRIP_MAX: usize = 64 * 1024;
 pub(crate) async fn roundtrip<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let big = c
-        .semantics_or_caps(k.semantics(), key.kind)?
+    let big = require_semantics(k.semantics(), key.kind)?
         .max_plaintext()
         .map_or(ROUNDTRIP_MAX, |m| m.min(ROUNDTRIP_MAX));
     for pt in [vec![7u8], vec![0xab; big]] {
@@ -159,7 +158,7 @@ async fn current_version(k: &anykms_core::AeadKey) -> Result<KeyVersion, String>
 pub(crate) async fn rotation<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.fresh_key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let sem = c.semantics_or_caps(k.semantics(), key.kind)?;
+    let sem = require_semantics(k.semantics(), key.kind)?;
     let ct1 = k.encrypt(b"before", b"x").await.ctx("encrypt v1")?;
     let v1 = k.ciphertext_version(&ct1).ctx("ciphertext_version")?;
     c.fx.rotate(&key).await.ctx("fixture rotate")?;
@@ -273,7 +272,7 @@ pub(crate) fn ensure_disabled(info: &KeyInfo, per_version: bool) -> CaseResult {
 pub(crate) async fn disabled_key<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.fresh_key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let per_version = state_per_version(&c.semantics_or_caps(k.semantics(), key.kind)?);
+    let per_version = state_per_version(&require_semantics(k.semantics(), key.kind)?);
     let ct = k.encrypt(b"x", b"").await.ctx("encrypt")?;
     c.fx.disable(&key).await.ctx("fixture disable")?;
     let (k, ct) = (&k, &ct);
@@ -302,7 +301,7 @@ pub(crate) async fn disabled_key<F: Fixture>(c: Ctx<F>) -> CaseResult {
 pub(crate) async fn key_wrap_disabled_key<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.fresh_key(TestKeyKind::KeyWrap).await?;
     let kw = c.key_wrap(&key.uri).ctx("open")?;
-    let per_version = state_per_version(&c.semantics_or_caps(kw.semantics(), key.kind)?);
+    let per_version = state_per_version(&require_semantics(kw.semantics(), key.kind)?);
     kw.wrap_key(&[7; 32]).await.ctx("wrap_key")?;
     c.fx.disable(&key).await.ctx("fixture disable")?;
     let kw = &kw;
@@ -355,7 +354,7 @@ pub(crate) fn ensure_version_disabled(
 pub(crate) async fn disabled_version<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.fresh_key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let per_version = state_per_version(&c.semantics_or_caps(k.semantics(), key.kind)?);
+    let per_version = state_per_version(&require_semantics(k.semantics(), key.kind)?);
     let v1 = current_version(&k).await?;
     let ct1 = k.encrypt(b"old", b"").await.ctx("encrypt v1")?;
     c.fx.rotate(&key).await.ctx("fixture rotate")?;
@@ -404,7 +403,7 @@ pub(crate) async fn disabled_version<F: Fixture>(c: Ctx<F>) -> CaseResult {
 pub(crate) async fn disabled_primary_version<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.fresh_key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let per_version = state_per_version(&c.semantics_or_caps(k.semantics(), key.kind)?);
+    let per_version = state_per_version(&require_semantics(k.semantics(), key.kind)?);
     let v = current_version(&k).await?;
     c.fx.disable_version(&key, &v)
         .await
@@ -466,7 +465,7 @@ pub(crate) async fn ciphertext_version<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let ct = k.encrypt(b"x", b"").await.ctx("encrypt")?;
     // Provided trait methods must be forwarded through the dyn layer, not defaulted to None.
     let v = k.ciphertext_version(&ct).ctx("ciphertext_version")?;
-    let sem = c.semantics_or_caps(k.semantics(), key.kind)?;
+    let sem = require_semantics(k.semantics(), key.kind)?;
     if !sem.ciphertext_reveals_version() {
         ensure!(
             v.is_none(),
@@ -521,9 +520,7 @@ pub(crate) async fn decrypt_with_info<F: Fixture>(c: Ctx<F>) -> CaseResult {
             d.key_version()
         );
     }
-    if c.semantics_or_caps(k.semantics(), key.kind)?
-        .reports_used_primary()
-    {
+    if require_semantics(k.semantics(), key.kind)?.reports_used_primary() {
         ensure!(
             d.used_primary() == Some(true),
             "used_primary {:?} for a ciphertext on the primary version",
@@ -657,7 +654,7 @@ pub(crate) async fn datakey_roundtrip<F: Fixture>(c: Ctx<F>) -> CaseResult {
 pub(crate) async fn datakey_aad<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let aad = data_key_aad(&c.semantics_or_caps(k.semantics(), key.kind)?)?;
+    let aad = data_key_aad(&require_semantics(k.semantics(), key.kind)?)?;
     let r = k.generate_data_key(DataKeySpec::Aes256, b"ctx").await;
     if aad_refused(aad, &r) {
         expect_kind(r, ErrorKind::Unsupported, "generate_data_key with AAD")?;

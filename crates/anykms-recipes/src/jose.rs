@@ -187,7 +187,7 @@ pub fn to_jwk(key: &PublicKey, kid: &str, alg: SignatureAlgorithm) -> Result<Val
             if raw.len() != 1 + 2 * n || raw[0] != 0x04 {
                 return Err(invalid(op, "expected an uncompressed EC point"));
             }
-            json!({"kty": "EC", "crv": crv, "x": URL.encode(&raw[1..1 + n]), "y": URL.encode(&raw[1 + n..])})
+            json!({"kty": "EC", "crv": crv, "x": URL.encode(&raw[1..=n]), "y": URL.encode(&raw[1 + n..])})
         }
         AsymmetricKeyType::Ed25519 => json!({"kty": "OKP", "crv": "Ed25519", "x": URL.encode(raw)}),
         AsymmetricKeyType::Rsa { .. } => {
@@ -349,7 +349,7 @@ fn signing_input(header: &JwsHeader, alg: SignatureAlgorithm, payload: &[u8]) ->
     Ok(format!("{}.{}", header.encode(alg)?, URL.encode(payload)))
 }
 
-fn compact(input: String, sig: &Signature) -> Result<String> {
+fn compact(input: &str, sig: &Signature) -> Result<String> {
     Ok(format!("{input}.{}", URL.encode(jws_signature_bytes(sig)?)))
 }
 
@@ -372,7 +372,7 @@ pub async fn sign_jws_with<S: DigestSigner + ?Sized>(
 ) -> Result<String> {
     let input = signing_input(header, signer.signature_algorithm(), payload)?;
     let sig = hashed::sign_message_hashed(signer, input.as_bytes()).await?;
-    compact(input, &sig)
+    compact(&input, &sig)
 }
 
 /// Compact JWS signed by an Ed25519 KMS key (`alg: EdDSA`), with header `{alg, kid}`.
@@ -392,7 +392,7 @@ pub async fn sign_jws_message_with<S: MessageSigner + ?Sized>(
 ) -> Result<String> {
     let input = signing_input(header, signer.signature_algorithm(), payload)?;
     let sig = signer.sign_message(input.as_bytes()).await?;
-    compact(input, &sig)
+    compact(&input, &sig)
 }
 
 /// How [`JwtSigner`] and [`sign_jwt`] build a token around the claims.
@@ -405,6 +405,12 @@ pub struct JwtOptions {
     ttl: Option<Duration>,
     without_expiry: bool,
     issued_at: bool,
+    /// `None`: the default `"JWT"`; `Some(typ)`: what [`with_typ`](Self::with_typ) was given.
+    #[allow(
+        clippy::option_option,
+        reason = "outer None is the default `typ`, inner None (from `with_typ(None)`) omits it; \
+                  keeps the derived Default and Debug"
+    )]
     typ: Option<Option<String>>,
     fully_specified_alg: bool,
     fields: Map<String, Value>,
@@ -474,7 +480,7 @@ impl JwtOptions {
         if self.fully_specified_alg {
             h = h.fully_specified_alg();
         }
-        h.extra = self.fields.clone();
+        h.extra.clone_from(&self.fields);
         h
     }
 
@@ -521,11 +527,17 @@ struct KidCache(std::sync::Arc<Mutex<Option<String>>>);
 
 impl KidCache {
     fn get(&self) -> Option<String> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn set(&self, kid: String) {
-        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(kid);
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kid);
     }
 
     /// The cached kid, or the current public key's ([`kid_for`]).
@@ -574,7 +586,7 @@ async fn sign_jwt_digest<S: DigestSigner + PublicKeys + ?Sized>(
         let input = signing_input(&options.header(&kid), alg, &payload)?;
         let sig = hashed::sign_message_hashed(signer, input.as_bytes()).await?;
         match cache.settle(key_name, &kid, &sig) {
-            None => return compact(input, &sig),
+            None => return compact(&input, &sig),
             Some(actual) => kid = actual,
         }
     }
@@ -595,7 +607,7 @@ async fn sign_jwt_message_inner<S: MessageSigner + PublicKeys + ?Sized>(
         let input = signing_input(&options.header(&kid), alg, &payload)?;
         let sig = signer.sign_message(input.as_bytes()).await?;
         match cache.settle(key_name, &kid, &sig) {
-            None => return compact(input, &sig),
+            None => return compact(&input, &sig),
             Some(actual) => kid = actual,
         }
     }

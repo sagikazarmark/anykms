@@ -78,7 +78,14 @@ where
 /// §1.2). A case covers one key family; cases that would branch on a feature are split instead,
 /// so a case that did not run is never reported as passed.
 pub(crate) fn all<F: Fixture>() -> Vec<Case<F>> {
-    use Feature::*;
+    use Feature::{
+        Aead, BackendInfo, DataKeys, Describe, DescribeVersionState, Disable, DisableVersion,
+        EmptyMessage, EmptyPlaintext, Extension, KeyWrap, KeyWrapPublicKeys, KeyWrapRewrap, Mac,
+        MacInputLimit, MessageInputLimit, MinDecryptionVersion, NativeCiphertext,
+        OversizePlaintext, PreflightState, RequestCount, Rewrap, RewrapWithAad, Rotate,
+        RotateKeyWrap, RotateMac, RotateSigning, ServerErrorMessages, Signing, Throttle,
+        UnauthorizedProvider, UsedPrimary, WrappedDataKeys,
+    };
     use TestKeyKind::{Aead as AeadKey, KeyWrap as KeyWrapKey};
     // Cases whose expected error kinds the backend derives from server error messages.
     const MSG: Feature = ServerErrorMessages;

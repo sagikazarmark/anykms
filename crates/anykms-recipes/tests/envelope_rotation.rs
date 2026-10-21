@@ -29,6 +29,10 @@ fn kek_without_rewrap(ks: &LocalKeyset, name: &str) -> KeyWrapKey {
     KeyWrapKey::new("local", Arc::new(ks.aead_key(name).into_key_wrap()))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "builds the Option<KeyVersion> that assertions compare against"
+)]
 fn v(n: u64) -> Option<KeyVersion> {
     Some(KeyVersion::from_u64(n))
 }

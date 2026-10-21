@@ -13,6 +13,8 @@
 //! Two more server- or configuration-supplied values get the same treatment: request ids
 //! ([`request_id`]) and URLs in `Debug` output ([`url_origin`]).
 
+use std::fmt::Write as _;
+
 use anykms_core::ServerMessage;
 use hmac::Mac as _;
 
@@ -46,7 +48,10 @@ pub fn fingerprint(message: &str) -> ServerMessage {
         .expect("any key length");
     mac.update(message.as_bytes());
     let h = mac.finalize().into_bytes();
-    let fp: String = h[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let fp = h[..6].iter().fold(String::with_capacity(12), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
     ServerMessage::redacted(message.len(), fp)
 }
 
@@ -106,10 +111,13 @@ mod tests {
         assert_eq!(fp("echo: abc").len(), 12);
         // Not the unkeyed SHA-256 prefix.
         use sha2::Digest as _;
-        let unkeyed: String = sha2::Sha256::digest(b"echo: abc")[..6]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let unkeyed =
+            sha2::Sha256::digest(b"echo: abc")[..6]
+                .iter()
+                .fold(String::new(), |mut s, b| {
+                    write!(s, "{b:02x}").unwrap();
+                    s
+                });
         assert_ne!(fp("echo: abc"), unkeyed);
     }
 

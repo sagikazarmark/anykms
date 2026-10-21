@@ -6,15 +6,15 @@ const POLY: u32 = 0x82F6_3B78;
 
 const TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
-    let mut i = 0;
+    let mut i: u32 = 0;
     while i < 256 {
-        let mut c = i as u32;
+        let mut c = i;
         let mut k = 0;
         while k < 8 {
             c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
             k += 1;
         }
-        table[i] = c;
+        table[i as usize] = c;
         i += 1;
     }
     table
@@ -51,6 +51,6 @@ mod tests {
             0x00, 0x00, 0x00, 0x18, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        assert_eq!(crc32c(&pdu), 0xD9963A56);
+        assert_eq!(crc32c(&pdu), 0xD996_3A56);
     }
 }

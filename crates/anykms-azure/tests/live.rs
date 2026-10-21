@@ -17,8 +17,8 @@ use anykms_core::prelude::*;
 use anykms_core::{Digest, ErrorKind, KeyUri, OpenOptions, Provider, Registry, SignatureAlgorithm};
 use common::{AzureFixture, Spec};
 
-async fn fixture() -> Option<AzureFixture> {
-    match AzureFixture::live(false).await {
+fn fixture() -> Option<AzureFixture> {
+    match AzureFixture::live(false) {
         Ok(f) => Some(f),
         Err(e) if !common::require_fixture() => {
             eprintln!("skipped: {e}");
@@ -38,7 +38,7 @@ async fn key(fx: &AzureFixture, var: &str, spec: Spec) -> KeyUri {
 
 #[tokio::test]
 async fn live_key_wrap_envelope_and_data_keys() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let uri = key(&fx, "ANYKMS_AZURE_KEK_URI", Spec::RsaWrap(2048)).await;
     let registry = Registry::builder()
         .provider(fx.provider_ref().clone())
@@ -69,7 +69,7 @@ async fn live_key_wrap_envelope_and_data_keys() {
 
 #[tokio::test]
 async fn live_signing() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let p = fx.provider_ref();
     for (var, spec, alg) in [
         (
@@ -111,7 +111,7 @@ async fn live_signing() {
 
 #[tokio::test]
 async fn live_missing_key_is_not_found() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let e = fx
         .provider_ref()
         .describe(&fx.uri("anykms-does-not-exist"), &OpenOptions::new())

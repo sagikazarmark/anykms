@@ -75,7 +75,13 @@ pub struct AzureProviderBuilder {
 impl std::fmt::Debug for AzureProviderBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AzureProviderBuilder")
-            .field("credential", &self.credential.as_ref().map(|c| c.kind()))
+            .field(
+                "credential",
+                &self
+                    .credential
+                    .as_ref()
+                    .map(super::credential::AzureCredential::kind),
+            )
             .field("policy", &self.policy)
             .field("api_version", &self.api_version)
             .field("proxy", &self.proxy)
@@ -390,7 +396,7 @@ impl AzureProvider {
     /// Resolves a URI to a key context: syntax, then the host allowlist. No I/O.
     fn resolve(&self, uri: impl IntoKeyUri, check: KeyTypeCheck) -> Result<KeyCtx> {
         let uri = uri.into_key_uri()?;
-        let written = uri.without_query().to_owned();
+        let written = uri.without_query().clone();
         let parsed = AzureKeyRef::parse(&uri).map_err(|e| e.with_resource(&*written))?;
         let resource: Arc<str> = parsed.to_string().into();
         let target = self.policy.resolve(parsed.host()).ok_or_else(|| {

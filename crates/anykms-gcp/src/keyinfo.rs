@@ -207,7 +207,7 @@ pub struct GcpKeyInfo {
 }
 
 impl GcpKeyInfo {
-    pub(crate) fn new(key: KeyJson, versions: Vec<VersionJson>, requested: Option<u64>) -> Self {
+    pub(crate) fn new(key: KeyJson, versions: &[VersionJson], requested: Option<u64>) -> Self {
         let mut versions: Vec<GcpVersionInfo> = versions
             .iter()
             .filter_map(GcpVersionInfo::from_json)
@@ -345,7 +345,12 @@ impl GcpKeyInfo {
             .with_mac_algorithm(mac)
             .with_state(None)
             .with_primary_version(primary)
-            .with_versions(self.versions.iter().map(|v| v.to_portable()).collect())
+            .with_versions(
+                self.versions
+                    .iter()
+                    .map(GcpVersionInfo::to_portable)
+                    .collect(),
+            )
             .with_backend_info(self.clone())
     }
 }
@@ -381,7 +386,7 @@ mod tests {
             v(1, "DESTROY_SCHEDULED", "GOOGLE_SYMMETRIC_ENCRYPTION"),
             v(3, "PENDING_GENERATION", "GOOGLE_SYMMETRIC_ENCRYPTION"),
         ];
-        let g = GcpKeyInfo::new(key, versions, None);
+        let g = GcpKeyInfo::new(key, &versions, None);
         assert_eq!(g.primary(), Some(2));
         assert_eq!(g.protection_level(), Some("HSM"));
         let i = g.to_key_info();
@@ -417,7 +422,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let g = GcpKeyInfo::new(key, vec![v(1, "ENABLED", "EC_SIGN_P256_SHA256")], Some(1));
+        let g = GcpKeyInfo::new(key, &[v(1, "ENABLED", "EC_SIGN_P256_SHA256")], Some(1));
         let i = g.to_key_info();
         assert_eq!(i.backend_key_type(), "EC_SIGN_P256_SHA256");
         assert_eq!(
@@ -435,7 +440,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let i = GcpKeyInfo::new(key, vec![], None).to_key_info();
+        let i = GcpKeyInfo::new(key, &[], None).to_key_info();
         assert_eq!(i.mac_algorithm(), Some(MacAlgorithm::HmacSha512));
         assert_eq!(i.capabilities(), Capabilities::MAC);
 
@@ -444,9 +449,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            GcpKeyInfo::new(key, vec![], None)
-                .to_key_info()
-                .capabilities(),
+            GcpKeyInfo::new(key, &[], None).to_key_info().capabilities(),
             Capabilities::NONE
         );
     }

@@ -153,7 +153,7 @@ impl TransitKeyRef {
             for pair in q.split('&') {
                 match pair.split_once('=') {
                     Some(("namespace", v)) if namespace_ok(v) && namespace.is_none() => {
-                        namespace = Some(v.to_owned())
+                        namespace = Some(v.to_owned());
                     }
                     _ => {
                         return Err(bad(

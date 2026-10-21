@@ -257,7 +257,7 @@ async fn jwt_login(fx: Arc<TransitFixture>) {
         .build()
         .unwrap();
     let name = fx.create("aes256-gcm96").await.unwrap();
-    let k = p.aead_key(fx.uri(&name)).unwrap();
+    let k = p.aead_key(TransitFixture::uri(&name)).unwrap();
     let ct = k.encrypt(b"logged in", b"").await.unwrap();
     assert_eq!(&*k.decrypt(&ct, b"").await.unwrap(), b"logged in");
 
@@ -272,7 +272,7 @@ async fn jwt_login(fx: Arc<TransitFixture>) {
         .build()
         .unwrap();
     let e = wrong
-        .aead_key(fx.uri(&name))
+        .aead_key(TransitFixture::uri(&name))
         .unwrap()
         .encrypt(b"x", b"")
         .await

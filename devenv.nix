@@ -6,8 +6,8 @@
   packages = with pkgs; [
     just
     jq
-    # `just wasm`: wasm-bindgen-test-runner runs the wasm32 tests under Node.
-    nodejs
+
+    lld
 
     cargo-audit
     cargo-deny
@@ -24,7 +24,13 @@
       # `just wasm`: the transport-free crates on a JS host.
       targets = [ "wasm32-unknown-unknown" ];
 
-      lld.enable = true;
+      # lld.enable = true;
+    };
+
+    javascript = {
+      enable = true;
+
+      npm.enable = true;
     };
   };
 
@@ -37,12 +43,6 @@
     # The MSRV (rust-version in Cargo.toml): devenv --profile msrv shell
     msrv.module = {
       languages.rust.version = "1.91.0";
-    };
-
-    # wasm32 (`just wasm`): devenv --profile wasm shell. lld sets `RUSTFLAGS=-C link-arg=-fuse-ld=lld`,
-    # which rust-lld rejects when linking wasm; without it the workflow's RUSTFLAGS apply as well.
-    wasm.module = {
-      languages.rust.lld.enable = lib.mkForce false;
     };
   };
 

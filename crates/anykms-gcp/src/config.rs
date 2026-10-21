@@ -85,7 +85,6 @@ impl Endpoint {
             ));
         }
         match url.scheme() {
-            "https" => {}
             "http" if !is_loopback_ip(&url) => {
                 return Err(config_err(
                     "plain http:// is only allowed for literal loopback IPs (127.0.0.0/8, ::1); \
@@ -97,7 +96,7 @@ impl Endpoint {
                     "plain http:// requires GcpProviderBuilder::allow_loopback_http()",
                 ));
             }
-            "http" => {}
+            "https" | "http" => {}
             _ => return Err(config_err("the custom endpoint must use https://")),
         }
         Ok(url)

@@ -15,6 +15,8 @@
 
 #![cfg(feature = "tracing")]
 
+use std::fmt::Write as _;
+
 use anykms_azure::{
     AzureCredential, AzureProvider, ClientSecret, ManagedIdentity, StaticToken, TestHost,
     WorkloadIdentity, framing,
@@ -52,7 +54,7 @@ fn render(e: &anykms_core::Error, key_error: bool) -> String {
     let mut out = format!("{e}\n{e:?}\n");
     let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     while let Some(s) = src {
-        out.push_str(&format!("{s}\n{s:?}\n"));
+        writeln!(out, "{s}\n{s:?}").unwrap();
         src = s.source();
     }
     out
@@ -151,7 +153,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .and(path("/t/oauth2/v2.0/token"))
         .and(wiremock::matchers::body_string_contains("client_assertion="))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "error": "invalid_client", "error_description": format!("bad assertion {FEDERATED}"), "error_codes": [700016]
+            "error": "invalid_client", "error_description": format!("bad assertion {FEDERATED}"), "error_codes": [700_016]
         })))
         .mount(&server)
         .await;
@@ -247,16 +249,16 @@ async fn trace_output_and_errors_never_contain_secrets() {
         &*aes.decrypt(&ct, AAD.as_bytes()).await.unwrap(),
         PT.as_bytes()
     );
-    errors.push_str(&format!("{ct:?}"));
+    write!(errors, "{ct:?}").unwrap();
 
     // Client secret, workload identity, managed identity.
     let cs = ClientSecret::new("t", "c", SECRET)
         .unwrap()
         .authority_host(&server.uri())
         .unwrap();
-    errors.push_str(&format!("{cs:?}"));
+    write!(errors, "{cs:?}").unwrap();
     let t = cs.token(SCOPE).await.unwrap();
-    errors.push_str(&format!("{t:?}"));
+    write!(errors, "{t:?}").unwrap();
     let dir = std::env::temp_dir().join(format!("anykms-azure-hygiene-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("token");
@@ -266,7 +268,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .authority_host(&server.uri())
         .unwrap();
     errors.push_str(&render(&wi.token(SCOPE).await.unwrap_err(), false));
-    errors.push_str(&format!("{wi:?}"));
+    write!(errors, "{wi:?}").unwrap();
     let mi = ManagedIdentity::client_id(MI_CLIENT)
         .unwrap()
         .imds_endpoint(&format!("{}/metadata/identity/oauth2/token", server.uri()))
@@ -284,7 +286,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .test_host(th())
         .build()
         .unwrap();
-    errors.push_str(&format!("{sp:?}"));
+    write!(errors, "{sp:?}").unwrap();
     sp.key_wrap_key(uri("kek").as_str())
         .unwrap()
         .wrap_key(DEK)
@@ -569,6 +571,6 @@ async fn azure_identity_tokens_never_appear_in_trace_output_or_errors() {
     let mut all = capture.text();
     anykms_testkit::assert_token_schema(capture.spans(), "azure");
     all.push_str(&render(&e, false));
-    all.push_str(&format!("{ok:?}\n{k:?}\n{failing:?}\n"));
+    writeln!(all, "{ok:?}\n{k:?}\n{failing:?}").unwrap();
     assert!(!all.contains(SDK_TOKEN), "the SDK token leaked:\n{all}");
 }

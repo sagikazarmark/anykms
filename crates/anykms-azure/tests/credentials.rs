@@ -3,6 +3,7 @@
 //! tokens, and the environment-driven selection (in child processes, since the environment is
 //! process-wide).
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -65,7 +66,7 @@ async fn workload_identity_reads_the_token_file_at_each_exchange() {
     assert_eq!(cred.tenant_id(), Some("my-tenant"));
     let t = cred.token(SCOPE).await.unwrap();
     assert_eq!(t.secret(), "at-1");
-    assert!(t.expires_at().unwrap() > SystemTime::now() + Duration::from_secs(3000));
+    assert!(t.expires_at().unwrap() > SystemTime::now() + Duration::from_mins(50));
     std::fs::write(&file, "assertion-two").unwrap();
     assert_eq!(cred.token(SCOPE).await.unwrap().secret(), "at-2");
     // A missing file is retryable, its contents never shown.
@@ -106,7 +107,7 @@ async fn token_endpoint_errors() {
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
             "error": "invalid_client",
             "error_description": "AADSTS7000215: Invalid client secret provided for app 1234-SECRET-ID.",
-            "error_codes": [7000215]
+            "error_codes": [7_000_215]
         })))
         .mount(&server)
         .await;
@@ -331,7 +332,7 @@ fn env_child() {
                     .block_on(other.unwrap().describe())
                     .expect_err("no credential");
                 assert!(e.to_string().contains("AZURE_CLIENT_SECRET"), "{e}");
-                r.push_str(&format!(",use=error:{}", e.kind().as_str()));
+                write!(r, ",use=error:{}", e.kind().as_str()).unwrap();
             }
             r
         }
@@ -492,7 +493,7 @@ mod sdk {
             self.scopes
                 .lock()
                 .unwrap()
-                .extend(scopes.iter().map(|s| s.to_string()));
+                .extend(scopes.iter().map(std::string::ToString::to_string));
             (self.make)()
         }
     }

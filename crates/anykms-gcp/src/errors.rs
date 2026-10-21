@@ -156,7 +156,7 @@ struct StatusBody {
 #[derive(Debug, Default)]
 pub(crate) struct Status {
     /// The canonical code name (`"FAILED_PRECONDITION"`), when the body had one.
-    pub(crate) status: Option<String>,
+    pub(crate) code: Option<String>,
     pub(crate) message: Option<String>,
     /// `google.rpc.ErrorInfo.reason` values.
     pub(crate) reasons: Vec<String>,
@@ -196,7 +196,7 @@ impl Status {
             return Self::default();
         };
         let mut s = Status {
-            status: e.status,
+            code: e.status,
             message: e.message,
             json: true,
             ..Self::default()
@@ -270,6 +270,7 @@ fn status_for_http(http: u16) -> &'static str {
 }
 
 /// Context of a failed request.
+#[derive(Clone, Copy)]
 pub(crate) struct Failure<'a> {
     pub(crate) http: u16,
     pub(crate) body: &'a [u8],
@@ -286,7 +287,7 @@ pub(crate) struct Failure<'a> {
 pub(crate) fn classify(f: Failure<'_>) -> Error {
     use ErrorKind as K;
     let s = Status::parse(f.body);
-    let code: &str = match &s.status {
+    let code: &str = match &s.code {
         Some(c) if !c.is_empty() => c.as_str(),
         _ => status_for_http(f.http),
     };

@@ -18,8 +18,8 @@ use anykms_core::{
 };
 use common::{AzureFixture, Spec};
 
-async fn fixture() -> Option<AzureFixture> {
-    match AzureFixture::lowkey().await {
+fn fixture() -> Option<AzureFixture> {
+    match AzureFixture::lowkey() {
         Ok(f) => Some(f),
         Err(e) if !common::require_fixture() => {
             eprintln!("skipped: {e}");
@@ -31,7 +31,7 @@ async fn fixture() -> Option<AzureFixture> {
 
 #[tokio::test]
 async fn rsa_oaep_256_interoperates_and_frames() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let (_, uri) = fx.create(Spec::RsaWrap(2048)).await.unwrap();
     let p = fx.provider_ref();
     let kek = p.key_wrap_key(&uri).unwrap();
@@ -83,7 +83,7 @@ async fn rsa_oaep_256_interoperates_and_frames() {
 /// `docs/azure-ciphertext.md`), then unwrapped by the vault.
 #[tokio::test]
 async fn kek_public_keys_wrap_offline() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let (_, uri) = fx.create(Spec::RsaWrap(2048)).await.unwrap();
     let registry = Registry::builder()
         .provider(fx.provider_ref().clone())
@@ -120,7 +120,7 @@ async fn kek_public_keys_wrap_offline() {
 
 #[tokio::test]
 async fn envelopes_and_data_keys_over_an_azure_kek() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let (name, uri) = fx.create(Spec::RsaWrap(3072)).await.unwrap();
     let registry = Registry::builder()
         .provider(fx.provider_ref().clone())
@@ -160,7 +160,7 @@ async fn envelopes_and_data_keys_over_an_azure_kek() {
 
 #[tokio::test]
 async fn signing_with_server_and_local_verification() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let p = fx.provider_ref();
     for (spec, algs) in [
         (
@@ -222,7 +222,7 @@ async fn signing_with_server_and_local_verification() {
 
 #[tokio::test]
 async fn describe_lists_versions_and_states() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let (name, uri) = fx.create(Spec::Ec("P-256")).await.unwrap();
     let v2 = fx.admin().rotate(&name).await.unwrap();
     let v1 = fx
@@ -273,7 +273,7 @@ async fn describe_lists_versions_and_states() {
 
 #[tokio::test]
 async fn errors_that_do_not_depend_on_emulator_messages() {
-    let Some(fx) = fixture().await else { return };
+    let Some(fx) = fixture() else { return };
     let p = fx.provider_ref();
     // A missing key.
     let missing = fx.uri("anykms-does-not-exist");

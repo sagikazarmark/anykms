@@ -63,7 +63,7 @@ pub fn json_body<T: serde::Serialize + ?Sized>(
 pub fn read_file(path: &std::path::Path, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
-    let hint = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let hint = file.metadata().map_or(0, |m| m.len());
     let mut buf = Zeroizing::new(Vec::with_capacity(
         usize::try_from(hint).unwrap_or(limit).min(limit),
     ));

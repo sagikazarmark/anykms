@@ -195,7 +195,7 @@ pub fn encode(alg: FrameAlg, version: &str, body: &[u8]) -> Result<Vec<u8>, Fram
     out.extend_from_slice(MAGIC);
     out.push(FORMAT_V1);
     out.push(alg.code());
-    out.push(version.len() as u8);
+    out.push(u8::try_from(version.len()).map_err(|_| FrameError::BadVersion)?);
     out.extend_from_slice(version.as_bytes());
     out.extend_from_slice(body);
     // Round-trip check: the body must satisfy the algorithm's size rules.

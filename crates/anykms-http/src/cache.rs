@@ -225,7 +225,7 @@ mod tests {
         for _ in 0..200 {
             let t = jittered_ttl(ttl);
             assert!(
-                t >= Duration::from_secs(540) && t <= Duration::from_secs(660),
+                t >= Duration::from_secs(540) && t <= Duration::from_mins(11),
                 "{t:?}"
             );
             seen.insert(t);

@@ -100,7 +100,7 @@ impl CredentialSource for DefaultChain {
             let chosen = self
                 .chosen
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(s) = chosen {
                 return s.credentials(cx).await;
@@ -114,7 +114,10 @@ impl CredentialSource for DefaultChain {
             );
             match source.credentials(cx).await {
                 Ok(c) => {
-                    *self.chosen.lock().unwrap_or_else(|p| p.into_inner()) = Some(source);
+                    *self
+                        .chosen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
                     Ok(c)
                 }
                 Err(e) if imds && e.kind() != ErrorKind::Unauthenticated => {

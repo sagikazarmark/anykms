@@ -178,7 +178,7 @@ pub mod __fuzz {
     /// Error-body parsing and classification.
     pub fn classify(status: u16, body: &[u8]) -> anykms_core::ErrorKind {
         let b = crate::errors::ErrorBody::parse(body);
-        crate::errors::classify(crate::errors::Failure {
+        crate::errors::classify(&crate::errors::Failure {
             status,
             body: &b,
             retry_after: None,

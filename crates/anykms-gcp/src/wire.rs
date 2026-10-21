@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(p(r#"{"c":"123"}"#).unwrap(), Some(123));
         assert_eq!(p(r#"{"c":123}"#).unwrap(), Some(123));
         assert_eq!(p(r#"{"c":"4294967295"}"#).unwrap(), Some(4_294_967_295));
-        assert_eq!(p(r#"{}"#).unwrap(), None);
+        assert_eq!(p(r"{}").unwrap(), None);
         assert_eq!(p(r#"{"c":null}"#).unwrap(), None);
         assert!(p(r#"{"c":"4294967296"}"#).is_err());
         assert!(p(r#"{"c":"-1"}"#).is_err());

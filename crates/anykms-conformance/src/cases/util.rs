@@ -30,7 +30,6 @@ pub(crate) fn marker(label: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("MARKER{label}{n:x}")
 }

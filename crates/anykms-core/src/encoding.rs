@@ -23,8 +23,8 @@
 use crate::error::{Error, ErrorKind, Operation, Result};
 use crate::types::{KeyVersion, MacAlgorithm, Signature, SignatureAlgorithm, Tag};
 
-const SIG_MAGIC: &[u8; 3] = b"AKS";
-const TAG_MAGIC: &[u8; 3] = b"AKT";
+const SIG_MAGIC: [u8; 3] = *b"AKS";
+const TAG_MAGIC: [u8; 3] = *b"AKT";
 const FORMAT_V1: u8 = 1;
 
 fn err(op: Operation, m: &'static str) -> Error {
@@ -32,37 +32,37 @@ fn err(op: Operation, m: &'static str) -> Error {
 }
 
 fn encode_parts(
-    magic: &[u8; 3],
+    magic: [u8; 3],
     op: Operation,
     code: u8,
     version: Option<&KeyVersion>,
     value: &[u8],
 ) -> Result<Vec<u8>> {
     let v = version.map(|v| v.as_str().as_bytes()).unwrap_or_default();
-    if v.len() > 255 {
+    let Ok(vlen) = u8::try_from(v.len()) else {
         return Err(Error::new(
             ErrorKind::InvalidArgument,
             "encoding",
             op,
             "key version is longer than 255 bytes",
         ));
-    }
+    };
     let mut out = Vec::with_capacity(6 + v.len() + value.len());
-    out.extend_from_slice(magic);
+    out.extend_from_slice(&magic);
     out.push(FORMAT_V1);
     out.push(code);
-    out.push(v.len() as u8);
+    out.push(vlen);
     out.extend_from_slice(v);
     out.extend_from_slice(value);
     Ok(out)
 }
 
-fn decode_parts<'a>(
-    magic: &[u8; 3],
+fn decode_parts(
+    magic: [u8; 3],
     op: Operation,
-    bytes: &'a [u8],
-) -> Result<(u8, Option<KeyVersion>, &'a [u8])> {
-    if bytes.len() < 6 || &bytes[..3] != magic {
+    bytes: &[u8],
+) -> Result<(u8, Option<KeyVersion>, &[u8])> {
+    if bytes.len() < 6 || bytes[..3] != magic {
         return Err(err(op, "not an anykms-encoded value"));
     }
     if bytes[3] != FORMAT_V1 {

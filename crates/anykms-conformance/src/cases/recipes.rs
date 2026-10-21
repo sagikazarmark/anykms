@@ -280,34 +280,31 @@ pub(crate) async fn envelope_rewrap_to_and_keyring<F: Fixture>(
     let ct = old.encrypt(b"migrate me", b"aad").await.ctx("encrypt")?;
     // Both ways of holding a KEK where the key is an AEAD key: a key-wrapping key and an AEAD
     // key adapted explicitly.
-    let (moved, ring) = match kind {
-        TestKeyKind::Aead => {
-            let new = EnvelopeAead::new("new", c.aead(&k2.uri).ctx("open")?.into_key_wrap())
-                .ctx("envelope")?;
-            let moved = old.rewrap_to(&ct, &new).await.ctx("rewrap_to")?;
-            ensure!(
-                *new.decrypt(&moved, b"aad").await.ctx("decrypt moved")? == *b"migrate me",
-                "wrong plaintext"
-            );
-            let ring = EnvelopeKeyring::new("old", c.key_wrap(&k1.uri).ctx("open")?)
-                .ctx("envelope")?
-                .with_kek("new", c.aead(&k2.uri).ctx("open")?.into_key_wrap())
-                .ctx("add KEK")?;
-            (moved, ring)
-        }
-        _ => {
-            let new = EnvelopeAead::new("new", c.key_wrap(&k2.uri).ctx("open")?).ctx("envelope")?;
-            let moved = old.rewrap_to(&ct, &new).await.ctx("rewrap_to")?;
-            ensure!(
-                *new.decrypt(&moved, b"aad").await.ctx("decrypt moved")? == *b"migrate me",
-                "wrong plaintext"
-            );
-            let ring = EnvelopeKeyring::new("old", c.key_wrap(&k1.uri).ctx("open")?)
-                .ctx("envelope")?
-                .with_kek("new", c.key_wrap(&k2.uri).ctx("open")?)
-                .ctx("add KEK")?;
-            (moved, ring)
-        }
+    let (moved, ring) = if kind == TestKeyKind::Aead {
+        let new = EnvelopeAead::new("new", c.aead(&k2.uri).ctx("open")?.into_key_wrap())
+            .ctx("envelope")?;
+        let moved = old.rewrap_to(&ct, &new).await.ctx("rewrap_to")?;
+        ensure!(
+            *new.decrypt(&moved, b"aad").await.ctx("decrypt moved")? == *b"migrate me",
+            "wrong plaintext"
+        );
+        let ring = EnvelopeKeyring::new("old", c.key_wrap(&k1.uri).ctx("open")?)
+            .ctx("envelope")?
+            .with_kek("new", c.aead(&k2.uri).ctx("open")?.into_key_wrap())
+            .ctx("add KEK")?;
+        (moved, ring)
+    } else {
+        let new = EnvelopeAead::new("new", c.key_wrap(&k2.uri).ctx("open")?).ctx("envelope")?;
+        let moved = old.rewrap_to(&ct, &new).await.ctx("rewrap_to")?;
+        ensure!(
+            *new.decrypt(&moved, b"aad").await.ctx("decrypt moved")? == *b"migrate me",
+            "wrong plaintext"
+        );
+        let ring = EnvelopeKeyring::new("old", c.key_wrap(&k1.uri).ctx("open")?)
+            .ctx("envelope")?
+            .with_kek("new", c.key_wrap(&k2.uri).ctx("open")?)
+            .ctx("add KEK")?;
+        (moved, ring)
     };
     expect_kind(
         old.decrypt(&moved, b"aad").await,
@@ -345,7 +342,8 @@ pub(crate) async fn envelope_rewrap_to_and_keyring<F: Fixture>(
     relabeled.push(3);
     relabeled.extend_from_slice(b"old");
     let w = env.wrapped_dek();
-    relabeled.extend_from_slice(&(w.len() as u16).to_be_bytes());
+    let w_len = u16::try_from(w.len()).expect("a parsed wrapped DEK has a u16 length prefix");
+    relabeled.extend_from_slice(&w_len.to_be_bytes());
     relabeled.extend_from_slice(w.as_bytes());
     relabeled.extend_from_slice(env.payload());
     expect_kind(

@@ -110,7 +110,14 @@ impl Aead for ToyAeadKey {
                 },
             )
             .map_err(|_| self.err(ErrorKind::Backend, Operation::Encrypt, "encryption failed"))?;
-        let mut out = (versions.len() as u32).to_be_bytes().to_vec();
+        let version = u32::try_from(versions.len()).map_err(|_| {
+            self.err(
+                ErrorKind::Backend,
+                Operation::Encrypt,
+                "too many key versions",
+            )
+        })?;
+        let mut out = version.to_be_bytes().to_vec();
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&body);
         Ok(Ciphertext::from_bytes(out))
@@ -255,13 +262,20 @@ struct MinimalFixture {
 }
 
 impl Fixture for MinimalFixture {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "minimal"
     }
 
     /// Every feature is declared: supported, or absent by design with the reason.
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, BackendInfo, DataKeys, Describe, DescribeVersionState, Disable, DisableVersion,
+            EmptyMessage, EmptyPlaintext, Extension, KeyWrap, KeyWrapPublicKeys, KeyWrapRewrap,
+            Mac, MacInputLimit, MessageInputLimit, MinDecryptionVersion, NativeCiphertext,
+            OversizePlaintext, PreflightState, RequestCount, Rewrap, RewrapWithAad, Rotate,
+            RotateKeyWrap, RotateMac, RotateSigning, ServerErrorMessages, Signing, Throttle,
+            UnauthorizedProvider, UsedPrimary, WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .supports_all(&[Aead, Describe, Rotate, EmptyPlaintext])
             .not_applicable_all(

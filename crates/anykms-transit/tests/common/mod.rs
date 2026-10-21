@@ -254,7 +254,7 @@ impl TransitFixture {
         })
     }
 
-    pub fn uri(&self, name: &str) -> KeyUri {
+    pub fn uri(name: &str) -> KeyUri {
         format!("hashivault:///transit/keys/{name}")
             .parse()
             .expect("valid URI")
@@ -316,7 +316,12 @@ impl Fixture for TransitFixture {
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, DisableVersion, EmptyMessage, EmptyPlaintext, Extension,
+            KeyWrap, KeyWrapRewrap, Mac, MacInputLimit, MessageInputLimit, MinDecryptionVersion,
+            NativeCiphertext, RequestCount, Rewrap, Rotate, RotateKeyWrap, RotateMac,
+            RotateSigning, ServerErrorMessages, Throttle, UnauthorizedProvider, WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .not_applicable(Feature::KeyWrapPublicKeys, "no RSA key-wrapping keys")
             .supports(Feature::BackendInfo)
@@ -394,7 +399,7 @@ impl Fixture for TransitFixture {
     /// Every key is fresh: dev-server keys are cheap.
     async fn create_key(&self, kind: TestKeyKind, _: KeyUse) -> Result<TestKey> {
         let name = self.create(key_type(kind)?).await?;
-        Ok(TestKey::new(self.uri(&name), name, kind))
+        Ok(TestKey::new(Self::uri(&name), name, kind))
     }
 
     async fn rotate(&self, key: &TestKey) -> Result<TestKey> {
@@ -495,7 +500,7 @@ impl Fixture for TransitFixture {
     }
 
     fn missing_key_uri(&self, _: TestKeyKind) -> KeyUri {
-        self.uri(&format!("missing-{}", self.run_id))
+        Self::uri(&format!("missing-{}", self.run_id))
     }
 
     fn provider(&self) -> Arc<dyn Provider> {

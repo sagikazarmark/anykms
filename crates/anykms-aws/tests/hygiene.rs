@@ -19,6 +19,8 @@
 
 mod support;
 
+use std::fmt::Write as _;
+
 use anykms_aws::credentials::{SourceContext, WebIdentityCredentials};
 use anykms_aws::{
     AwsProvider, CredentialSource, Credentials, EncryptionContext, EncryptionContextAead,
@@ -51,7 +53,10 @@ fn markers() -> Vec<String> {
     vec![
         PT.into(),
         AAD.into(),
-        AAD.bytes().map(|b| format!("{b:02x}")).collect(),
+        AAD.bytes().fold(String::new(), |mut s, b| {
+            write!(s, "{b:02x}").unwrap();
+            s
+        }),
         std.encode(PT),
         CTX.into(),
         String::from_utf8(DEK.to_vec()).unwrap(),
@@ -70,7 +75,7 @@ fn render(e: &anykms_core::Error) -> String {
     let mut out = format!("{e}\n{e:?}\n");
     let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     while let Some(s) = src {
-        out.push_str(&format!("{s}\n{s:?}\n"));
+        writeln!(out, "{s}\n{s:?}").unwrap();
         src = s.source();
     }
     out
@@ -298,9 +303,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
             assert!(r.starts_with("aws-kms://arn:"), "{r}");
         }
     }
-    all.push_str(&format!(
-        "{p:?}\n{opts:?}\n{aead:?}\n{s:?}\n{mac:?}\n{ctx:?}\n"
-    ));
+    writeln!(all, "{p:?}\n{opts:?}\n{aead:?}\n{s:?}\n{mac:?}\n{ctx:?}").unwrap();
     for m in markers() {
         assert!(!all.contains(&m), "marker {m} leaked:\n{all}");
     }
@@ -466,7 +469,7 @@ async fn sdk_credentials_never_appear_in_trace_output_or_errors() {
     assert!(all.contains("anykms.aws"), "spans were not recorded");
     anykms_testkit::assert_token_schema(capture.spans(), "aws");
     all.push_str(&render(&e));
-    all.push_str(&format!("{ok:?}\n{k:?}\n{failing:?}\n"));
+    writeln!(all, "{ok:?}\n{k:?}\n{failing:?}").unwrap();
     for m in [SDK_SECRET, SDK_TOKEN, PT] {
         assert!(!all.contains(m), "marker {m} leaked:\n{all}");
     }

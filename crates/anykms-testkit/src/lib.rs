@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub use anykms_http::span::{REQUEST_FIELDS, TOKEN_FIELDS};
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A shared, growable byte buffer: an [`io::Write`] sink and a `tracing_subscriber` writer.
@@ -249,9 +249,11 @@ fn assert_known_spans(rec: &SpanRecorder, backend: &str) {
     let (request, token) = names(backend);
     let prefix = format!("{request}.");
     for s in rec.spans() {
-        if s.name.starts_with(&prefix) && s.name != token {
-            panic!("span {} is not in the schema: {s:?}", s.name);
-        }
+        assert!(
+            !(s.name.starts_with(&prefix) && s.name != token),
+            "span {} is not in the schema: {s:?}",
+            s.name
+        );
     }
 }
 
@@ -454,7 +456,7 @@ mod tests {
     fn debug_redaction() {
         assert_debug_redacts(&Leaky { token: "public" }, &["SECRET"]);
         let r = std::panic::catch_unwind(|| {
-            assert_debug_redacts(&Leaky { token: "SECRET" }, &["SECRET"])
+            assert_debug_redacts(&Leaky { token: "SECRET" }, &["SECRET"]);
         });
         assert!(r.is_err());
     }

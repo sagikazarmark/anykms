@@ -11,7 +11,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "doy is in 0..=365 and mp in 0..=11, so the day is in 1..=31"
+    )]
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "mp is in 0..=11, so the month is in 1..=12"
+    )]
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
@@ -30,8 +40,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// Seconds since the epoch, saturating at zero for times before it.
 fn epoch_secs(t: SystemTime) -> i64 {
     t.duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// `YYYYMMDDTHHMMSSZ` (the SigV4 `X-Amz-Date`).
@@ -100,6 +109,11 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<SystemTime> {
 }
 
 /// Seconds since the epoch (possibly fractional, as KMS sends `CreationDate`) as whole seconds.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "v is checked to be in 0.0..1e15 (non-negative, fits u64); dropping the fraction is intended"
+)]
 pub(crate) fn epoch_number(v: f64) -> Option<u64> {
     (0.0..1e15).contains(&v).then_some(v as u64)
 }

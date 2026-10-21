@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::dynamic::*;
+use crate::dynamic::{
+    AeadKey, DataKeysKey, DescribeKey, DigestSignerKey, DigestVerifierKey, KeyWrapKey, Layer,
+    MacKey, MessageSignerKey, MessageVerifierKey, OpaqueHandle, PublicKeysKey,
+};
 use crate::error::{Error, ErrorKind, Operation, Result};
 use crate::types::{KeyVersion, MacAlgorithm, SignatureAlgorithm};
 use crate::uri::{IntoKeyUri, KeyUri};
@@ -547,30 +550,28 @@ impl Registry {
 
     /// The provider of `uri`'s scheme; an error labeled with the URI if none is registered.
     fn route(&self, uri: &KeyUri) -> Result<&dyn Provider> {
-        match self.providers.get(uri.scheme()) {
-            Some(p) => Ok(&**p),
-            None => {
-                let registered: Vec<_> = self.schemes().collect();
-                Err(label(
-                    Error::new(
-                        ErrorKind::Configuration,
-                        "registry",
-                        Operation::Open,
-                        format!(
-                            "no provider registered for scheme {:?} (registered: {}){}",
-                            uri.scheme(),
-                            if registered.is_empty() {
-                                "none".to_owned()
-                            } else {
-                                registered.join(", ")
-                            },
-                            foreign_uri_hint(uri).unwrap_or_default(),
-                        ),
+        let Some(p) = self.providers.get(uri.scheme()) else {
+            let registered: Vec<_> = self.schemes().collect();
+            return Err(label(
+                Error::new(
+                    ErrorKind::Configuration,
+                    "registry",
+                    Operation::Open,
+                    format!(
+                        "no provider registered for scheme {:?} (registered: {}){}",
+                        uri.scheme(),
+                        if registered.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            registered.join(", ")
+                        },
+                        foreign_uri_hint(uri).unwrap_or_default(),
                     ),
-                    uri,
-                ))
-            }
-        }
+                ),
+                uri,
+            ));
+        };
+        Ok(&**p)
     }
 
     /// For configuration: the URI naming exactly `version` of the key at `uri`, from the
@@ -688,6 +689,7 @@ fn label(e: Error, uri: &KeyUri) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dynamic::{LayerCx, Part};
 
     struct P(&'static [&'static str]);
     impl Provider for P {
@@ -797,7 +799,7 @@ mod tests {
     /// Fails every open with its own error, through `forward_provider!`'s body form.
     struct Refusing;
     impl Refusing {
-        fn refuse<T>(&self, uri: &KeyUri) -> Result<T> {
+        fn refuse<T>(uri: &KeyUri) -> Result<T> {
             Err(Error::app(ErrorKind::KeyMismatch, format!("refused {uri}")))
         }
     }
@@ -805,7 +807,7 @@ mod tests {
         fn schemes(&self) -> &[&'static str] {
             &["r"]
         }
-        crate::forward_provider!(self, uri => self.refuse(uri));
+        crate::forward_provider!(self, uri => Self::refuse(uri));
     }
 
     /// Delegates through `forward_provider!`'s target form.

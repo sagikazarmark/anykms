@@ -78,7 +78,7 @@ impl Call<'_> {
         };
         let mut url = self.base.clone();
         url.path_segments_mut()
-            .map_err(|_| config_err("invalid request path"))?
+            .map_err(|()| config_err("invalid request path"))?
             .pop_if_empty()
             .push("v1")
             .extend(segs)
@@ -94,7 +94,7 @@ impl Call<'_> {
 pub(crate) type Response = (StatusCode, reqwest::header::HeaderMap, Zeroizing<Vec<u8>>);
 
 impl Client {
-    async fn send(&self, call: &Call<'_>, token: &Option<Token>) -> Result<Response> {
+    async fn send(&self, call: &Call<'_>, token: Option<&Token>) -> Result<Response> {
         let url = call.url()?;
         let mut req = self.http.request(call.method.clone(), url);
         if let Some(t) = token {
@@ -171,7 +171,7 @@ impl Client {
             .await
             .map_err(|e| e.with_operation(call.op))?;
         anykms_http::span::record_attempt(1);
-        let (mut status, mut headers, mut body) = self.send(call, &token).await?;
+        let (mut status, mut headers, mut body) = self.send(call, token.as_ref()).await?;
         if status == StatusCode::UNAUTHORIZED
             && let Some(rejected) = &token
         {
@@ -187,7 +187,7 @@ impl Client {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(reason = "token refreshed after 401", "retrying once");
                     anykms_http::span::record_attempt(2);
-                    (status, headers, body) = self.send(call, &fresh).await?;
+                    (status, headers, body) = self.send(call, fresh.as_ref()).await?;
                 }
             }
         }

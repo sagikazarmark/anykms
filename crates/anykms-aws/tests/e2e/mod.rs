@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -365,7 +366,13 @@ impl Fixture for AwsFixture {
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, Disable, DisableVersion, EmptyMessage, EmptyPlaintext,
+            Extension, KeyWrap, KeyWrapRewrap, Mac, MinDecryptionVersion, NativeCiphertext,
+            PreflightState, RequestCount, Rewrap, RewrapWithAad, Rotate, RotateKeyWrap, RotateMac,
+            RotateSigning, ServerErrorMessages, Signing, Throttle, UnauthorizedProvider,
+            WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .supports(Feature::BackendInfo)
             .supports(Feature::KeyWrapPublicKeys)
@@ -458,15 +465,14 @@ impl Fixture for AwsFixture {
             if let Some(k) = shared.get(&label) {
                 return Ok(k.clone());
             }
-            let arn = match (self.mode, env(pool_var(kind))) {
-                (Mode::Live, Some(arn)) => arn,
-                _ => {
-                    let arn = self.create(kind, "shared").await?;
-                    if self.mode == Mode::Live {
-                        self.fresh.push(arn.clone());
-                    }
-                    arn
+            let arn = if let (Mode::Live, Some(arn)) = (self.mode, env(pool_var(kind))) {
+                arn
+            } else {
+                let arn = self.create(kind, "shared").await?;
+                if self.mode == Mode::Live {
+                    self.fresh.push(arn.clone());
                 }
+                arn
             };
             let k = TestKey::new(Self::uri_of(&arn), arn, kind);
             shared.insert(label, k.clone());
@@ -533,7 +539,10 @@ impl Fixture for AwsFixture {
     fn missing_key_uri(&self, _: TestKeyKind) -> KeyUri {
         let mut b = [0u8; 16];
         getrandom::fill(&mut b).expect("rng");
-        let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        let h = b.iter().fold(String::new(), |mut s, x| {
+            write!(s, "{x:02x}").unwrap();
+            s
+        });
         Self::uri_of(&format!(
             "arn:aws:kms:{}:{}:key/{}-{}-{}-{}-{}",
             self.region,

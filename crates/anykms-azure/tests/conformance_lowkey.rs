@@ -9,5 +9,5 @@
 mod common;
 
 fn main() -> std::process::ExitCode {
-    anykms_conformance::run_or_skip(common::AzureFixture::lowkey)
+    anykms_conformance::run_or_skip(async || common::AzureFixture::lowkey())
 }

@@ -56,7 +56,9 @@ impl<T> Default for Flight<T> {
 
 impl<T: Clone> Flight<T> {
     fn lock(&self) -> MutexGuard<'_, FlightState<T>> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn finish(&self, done: Option<T>) {
@@ -294,7 +296,7 @@ impl<P> Clone for CachedVerifier<P> {
 
 impl<P> std::fmt::Debug for CachedVerifier<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.state.lock().map(|s| s.entries.len()).unwrap_or(0);
+        let n = self.state.lock().map_or(0, |s| s.entries.len());
         f.debug_struct("CachedVerifier")
             .field("algorithm", &self.alg)
             .field("ttl", &self.ttl)
@@ -499,7 +501,9 @@ fn observe_latest(st: &mut State, pk: &PublicKey) {
 
 impl<P> CachedVerifier<P> {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Gives this verifier its own, empty cache if it shares one with clones: called by every
@@ -968,7 +972,8 @@ mod tests {
         }
 
         fn signing_key(epoch: u64, v: u64) -> p256::ecdsa::SigningKey {
-            p256::ecdsa::SigningKey::from_slice(&[(epoch * 100 + v) as u8; 32]).unwrap()
+            p256::ecdsa::SigningKey::from_slice(&[u8::try_from(epoch * 100 + v).unwrap(); 32])
+                .unwrap()
         }
 
         fn pk(&self, v: u64) -> PublicKey {
@@ -1008,7 +1013,7 @@ mod tests {
                 Poll::Pending
             }
         })
-        .await
+        .await;
     }
 
     impl PublicKeys for Source {
@@ -1104,7 +1109,7 @@ mod tests {
         let d = Digest::sha256(b"m");
         let sig = signed(1, &d);
         let all = futures_join_all((0..16).map(|_| cv.verify_digest(&d, &sig))).await;
-        assert!(all.iter().all(|r| r.is_ok()));
+        assert!(all.iter().all(std::result::Result::is_ok));
         assert_eq!(cv.source.versions(), 1);
         // Cached afterwards.
         cv.verify_digest(&d, &sig).await.unwrap();
@@ -1494,7 +1499,7 @@ mod tests {
         let d = Digest::sha256(b"m");
         let sig = signed(1, &d);
         let all = futures_join_all((0..16).map(|_| cv.verify_digest(&d, &sig))).await;
-        assert!(all.iter().all(|r| r.is_ok()));
+        assert!(all.iter().all(std::result::Result::is_ok));
         assert_eq!(cv.source.latests(), 1);
     }
 

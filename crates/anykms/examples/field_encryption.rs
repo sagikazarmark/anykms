@@ -37,19 +37,16 @@ async fn main() -> anykms::Result<()> {
     assert!(envelope.decrypt(&ct, b"users/43/ssn").await.is_err());
 
     // Rotate the KEK: new envelopes and rewraps use the new primary version.
-    let rotated = match anykms::local::parse_local_uri(&uri) {
-        Ok((_, name)) => {
-            keyset.rotate(name)?;
-            println!("rotated local KEK {name:?}");
-            true
-        }
-        Err(_) => {
-            println!(
-                "not rotating {uri}: transit rotation needs an admin token \
-                 (vault write -f transit/keys/<name>/rotate)"
-            );
-            false
-        }
+    let rotated = if let Ok((_, name)) = anykms::local::parse_local_uri(&uri) {
+        keyset.rotate(name)?;
+        println!("rotated local KEK {name:?}");
+        true
+    } else {
+        println!(
+            "not rotating {uri}: transit rotation needs an admin token \
+             (vault write -f transit/keys/<name>/rotate)"
+        );
+        false
     };
 
     // Move the data key to the KEK's primary version; the payload is untouched. `rewrap_current`

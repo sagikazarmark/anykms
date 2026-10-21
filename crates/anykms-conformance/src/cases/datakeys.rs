@@ -6,7 +6,7 @@ use anykms_core::{Capabilities, Ciphertext, DataKeySpec, ErrorKind, Zeroizing};
 use anykms_recipes::KeyWrapDataKeys;
 
 use super::aead::{aad_refused, data_key_aad};
-use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind};
+use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind, require_semantics};
 use crate::fixture::{Feature, Fixture, TestKeyKind};
 
 /// A wrapped-only data key is a 32-byte key wrapped like a `DataKeys` ciphertext: it decrypts
@@ -40,7 +40,7 @@ pub(crate) async fn wrapped_only<F: Fixture>(c: Ctx<F>) -> CaseResult {
 pub(crate) async fn wrapped_only_aad<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let key = c.key(TestKeyKind::Aead).await?;
     let k = c.aead(&key.uri).ctx("open")?;
-    let aad = data_key_aad(&c.semantics_or_caps(k.semantics(), key.kind)?)?;
+    let aad = data_key_aad(&require_semantics(k.semantics(), key.kind)?)?;
     let r = k
         .generate_wrapped_data_key(DataKeySpec::Aes256, b"ctx")
         .await;
@@ -140,7 +140,7 @@ pub(crate) async fn source_aad<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let kind = source_kind(&c);
     let key = c.key(kind).await?;
     let src = c.data_keys(&key.uri).ctx("open data_keys")?;
-    let aad = data_key_aad(&c.semantics_or_caps(src.semantics(), kind)?)?;
+    let aad = data_key_aad(&require_semantics(src.semantics(), kind)?)?;
     let r = src.generate_data_key(DataKeySpec::Aes256, b"ctx").await;
     if aad_refused(aad, &r) {
         expect_kind(r, ErrorKind::Unsupported, "generate_data_key with AAD")?;

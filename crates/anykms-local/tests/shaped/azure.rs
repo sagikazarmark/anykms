@@ -11,6 +11,7 @@
 //! - Handles declare the Azure vault row of the semantics table for unversioned URIs
 //!   (architecture plan §3.2). Versioned URIs (and so `Provider::pin`) are not modelled.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anykms_conformance::{
@@ -38,12 +39,13 @@ const VERSION_LEN: usize = 32;
 /// The opaque version of local version `n` of key `name`.
 fn opaque(name: &str, n: u64) -> String {
     let h = Sha256::digest(format!("{name}:{n}").as_bytes());
+    // Two hex characters per byte.
     h.iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-        .chars()
-        .take(VERSION_LEN)
-        .collect()
+        .take(VERSION_LEN / 2)
+        .fold(String::with_capacity(VERSION_LEN), |mut s, b| {
+            write!(s, "{b:02x}").expect("writing to a String cannot fail");
+            s
+        })
 }
 
 fn is_opaque(v: &str) -> bool {
@@ -251,7 +253,7 @@ impl AzSign {
         self.t.ks.digest_signing_key(&self.t.name, self.alg)
     }
 
-    fn relabel_pk(&self, pk: PublicKey) -> PublicKey {
+    fn relabel_pk(&self, pk: &PublicKey) -> PublicKey {
         let v = pk.key_version().map(|v| self.t.version(v));
         PublicKey::new(pk.key_type(), pk.spki_der().to_vec(), v)
     }
@@ -305,13 +307,14 @@ impl DigestVerifier for AzSign {
 
 impl PublicKeys for AzSign {
     async fn public_key(&self) -> Result<PublicKey> {
-        Ok(self.relabel_pk(self.local().public_key().await?))
+        Ok(self.relabel_pk(&self.local().public_key().await?))
     }
 
     async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey> {
         let n = self.t.local_version(version, Operation::PublicKey).await?;
         Ok(self.relabel_pk(
-            self.local()
+            &self
+                .local()
                 .public_key_version(&KeyVersion::from_u64(n))
                 .await?,
         ))
@@ -516,12 +519,18 @@ fn fixture_err(msg: &'static str) -> anykms_core::Error {
 }
 
 impl Fixture for AzFixture {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "azure-shaped"
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, Disable, DisableVersion, EmptyMessage, EmptyPlaintext,
+            Extension, KeyWrap, KeyWrapRewrap, Mac, MacInputLimit, MessageInputLimit,
+            MinDecryptionVersion, NativeCiphertext, OversizePlaintext, PreflightState,
+            RequestCount, Rewrap, Rotate, RotateKeyWrap, RotateMac, RotateSigning, Signing,
+            Throttle, UnauthorizedProvider, WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .not_applicable(Feature::BackendInfo, "local keys carry no backend metadata")
             .not_applicable(Feature::KeyWrapPublicKeys, "no RSA key-wrapping keys")

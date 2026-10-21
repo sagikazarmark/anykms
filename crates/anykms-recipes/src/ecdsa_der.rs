@@ -103,14 +103,12 @@ pub fn der_to_fixed(der: &[u8], scalar_len: usize) -> Result<Vec<u8>> {
 }
 
 fn push_len(out: &mut Vec<u8>, len: usize) {
-    if len < 0x80 {
-        out.push(len as u8);
-    } else {
-        // `check_scalar_len` bounds every length to at most 2 * (2 + MAX_SCALAR_LEN + 1) = 138.
-        assert!(len <= 0xff, "DER length exceeds one length byte");
+    // `check_scalar_len` bounds every length to at most 2 * (2 + MAX_SCALAR_LEN + 1) = 138.
+    let len = u8::try_from(len).expect("DER length exceeds one length byte");
+    if len >= 0x80 {
         out.push(0x81);
-        out.push(len as u8);
     }
+    out.push(len);
 }
 
 fn push_integer(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -121,7 +119,7 @@ fn push_integer(out: &mut Vec<u8>, bytes: &[u8]) {
     let int = &bytes[first_nonzero..];
     let pad = int[0] & 0x80 != 0;
     out.push(0x02);
-    push_len(out, int.len() + pad as usize);
+    push_len(out, int.len() + usize::from(pad));
     if pad {
         out.push(0);
     }

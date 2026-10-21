@@ -92,7 +92,7 @@ impl<T: AzureCredential + ?Sized> AzureCredential for Arc<T> {
         (**self).token(scope)
     }
     fn invalidate(&self, scope: &str, rejected: &AccessToken) {
-        (**self).invalidate(scope, rejected)
+        (**self).invalidate(scope, rejected);
     }
     fn kind(&self) -> &'static str {
         (**self).kind()
@@ -170,7 +170,7 @@ impl Tokens {
     fn cache(&self, scope: &str) -> Arc<CredentialCache<Arc<AccessToken>>> {
         self.caches
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(scope.to_owned())
             .or_insert_with(|| Arc::new(CredentialCache::new()))
             .clone()
@@ -284,7 +284,10 @@ impl LazyClient {
     }
 
     pub(crate) fn get(&self) -> Result<reqwest::Client> {
-        let mut c = self.client.lock().unwrap_or_else(|p| p.into_inner());
+        let mut c = self
+            .client
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(c) = &*c {
             return Ok(c.clone());
         }

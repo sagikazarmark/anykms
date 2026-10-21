@@ -120,7 +120,7 @@ impl Login {
     /// The auth mount path (default `kubernetes` or `jwt`), e.g. `k8s-prod` for
     /// `auth/k8s-prod/login`.
     pub fn mount(mut self, mount: impl Into<String>) -> Self {
-        self.mount = mount.into().trim_matches('/').to_owned();
+        mount.into().trim_matches('/').clone_into(&mut self.mount);
         self
     }
 
@@ -157,18 +157,18 @@ impl Login {
 /// A token from a login or renewal.
 struct Lease {
     token: Token,
-    lease: Duration,
+    duration: Duration,
     renewable: bool,
     obtained: Instant,
 }
 
 impl Lease {
     fn refresh_due(&self, now: Instant) -> bool {
-        !self.lease.is_zero() && now >= self.obtained + self.lease * 2 / 3
+        !self.duration.is_zero() && now >= self.obtained + self.duration * 2 / 3
     }
 
     fn expired(&self, now: Instant) -> bool {
-        !self.lease.is_zero() && now >= self.obtained + self.lease
+        !self.duration.is_zero() && now >= self.obtained + self.duration
     }
 }
 
@@ -189,7 +189,7 @@ pub(crate) struct LoginSource {
 
 /// Leases longer than this are clamped, so lease arithmetic cannot overflow on a hostile or
 /// misconfigured server's `lease_duration`.
-const MAX_LEASE: Duration = Duration::from_secs(10 * 365 * 24 * 3600);
+const MAX_LEASE: Duration = Duration::from_hours(10 * 365 * 24);
 /// After a failed refresh while the current token is still valid, requests keep using that token
 /// for this long before the next attempt, instead of each retrying the login in turn.
 const REFRESH_BACKOFF: Duration = Duration::from_secs(5);
@@ -337,7 +337,7 @@ impl LoginSource {
             Ok(l) => (Ok(l), false),
             Err((e, file)) => (Err(e), file),
         };
-        let expires = r.as_ref().ok().map(|l| l.lease).filter(|d| !d.is_zero());
+        let expires = r.as_ref().ok().map(|l| l.duration).filter(|d| !d.is_zero());
         anykms_http::span::finish_token(&span, started, expires, &r);
         #[cfg(feature = "tracing")]
         span.in_scope(|| match &r {
@@ -346,7 +346,7 @@ impl LoginSource {
                 server_alias = %self.alias,
                 method = self.login.method.as_str(),
                 mount = %self.login.mount,
-                lease_secs = l.lease.as_secs(),
+                lease_secs = l.duration.as_secs(),
                 renewable = l.renewable,
                 "{what} succeeded"
             ),
@@ -418,7 +418,7 @@ impl LoginSource {
     ) -> Result<Lease> {
         let mut url = self.base.clone();
         url.path_segments_mut()
-            .map_err(|_| Error::new(ErrorKind::Configuration, BACKEND, OP, "invalid login path"))?
+            .map_err(|()| Error::new(ErrorKind::Configuration, BACKEND, OP, "invalid login path"))?
             .pop_if_empty()
             .push("v1")
             .extend(segments);
@@ -459,7 +459,7 @@ impl LoginSource {
             let messages = serde_json::from_slice::<ErrorBody>(&buf)
                 .map(|b| b.errors)
                 .unwrap_or_default();
-            let e = crate::errors::classify(crate::errors::Failure {
+            let e = crate::errors::classify(&crate::errors::Failure {
                 status: status.as_u16(),
                 messages: &messages,
                 retry_after: None,
@@ -499,7 +499,7 @@ impl LoginSource {
             })?;
         Ok(Lease {
             token: Token::new(auth.client_token),
-            lease: Duration::from_secs(auth.lease_duration).min(MAX_LEASE),
+            duration: Duration::from_secs(auth.lease_duration).min(MAX_LEASE),
             renewable: auth.renewable,
             obtained: Instant::now(),
         })
@@ -551,7 +551,7 @@ impl TokenSource for LoginSource {
                         // Renewal near the max TTL returns only the remaining time: once that
                         // is under half the previous lease, log in again below instead of
                         // renewing into ever shorter leases.
-                        Ok(new) if new.lease >= l.lease / 2 => {
+                        Ok(new) if new.duration >= l.duration / 2 => {
                             let token = new.token.clone();
                             state.lease = Some(new);
                             state.retry_at = None;

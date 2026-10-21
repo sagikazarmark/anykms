@@ -252,7 +252,7 @@ impl Digest {
         Ok(Self {
             alg,
             bytes: buf,
-            len: bytes.len() as u8,
+            len: u8::try_from(bytes.len()).expect("a digest is at most 64 bytes: it fits `buf`"),
         })
     }
 
@@ -369,12 +369,17 @@ impl SignatureAlgorithm {
 
     /// The hash the algorithm signs, or `None` for Ed25519 (message signing).
     pub fn hash(&self) -> Option<HashAlgorithm> {
-        use SignatureAlgorithm::*;
         match self {
-            EcdsaP256Sha256 | RsaPssSha256 | RsaPkcs1v15Sha256 => Some(HashAlgorithm::Sha256),
-            EcdsaP384Sha384 | RsaPssSha384 | RsaPkcs1v15Sha384 => Some(HashAlgorithm::Sha384),
-            EcdsaP521Sha512 | RsaPssSha512 | RsaPkcs1v15Sha512 => Some(HashAlgorithm::Sha512),
-            Ed25519 => None,
+            Self::EcdsaP256Sha256 | Self::RsaPssSha256 | Self::RsaPkcs1v15Sha256 => {
+                Some(HashAlgorithm::Sha256)
+            }
+            Self::EcdsaP384Sha384 | Self::RsaPssSha384 | Self::RsaPkcs1v15Sha384 => {
+                Some(HashAlgorithm::Sha384)
+            }
+            Self::EcdsaP521Sha512 | Self::RsaPssSha512 | Self::RsaPkcs1v15Sha512 => {
+                Some(HashAlgorithm::Sha512)
+            }
+            Self::Ed25519 => None,
         }
     }
 
@@ -416,48 +421,49 @@ impl SignatureAlgorithm {
 
     /// Whether a key of type `key_type` can produce signatures of this algorithm.
     pub fn is_compatible_with(&self, key_type: &AsymmetricKeyType) -> bool {
-        use SignatureAlgorithm::*;
         match self {
-            EcdsaP256Sha256 => *key_type == AsymmetricKeyType::EcP256,
-            EcdsaP384Sha384 => *key_type == AsymmetricKeyType::EcP384,
-            EcdsaP521Sha512 => *key_type == AsymmetricKeyType::EcP521,
-            RsaPssSha256 | RsaPssSha384 | RsaPssSha512 | RsaPkcs1v15Sha256 | RsaPkcs1v15Sha384
-            | RsaPkcs1v15Sha512 => matches!(key_type, AsymmetricKeyType::Rsa { .. }),
-            Ed25519 => *key_type == AsymmetricKeyType::Ed25519,
+            Self::EcdsaP256Sha256 => *key_type == AsymmetricKeyType::EcP256,
+            Self::EcdsaP384Sha384 => *key_type == AsymmetricKeyType::EcP384,
+            Self::EcdsaP521Sha512 => *key_type == AsymmetricKeyType::EcP521,
+            Self::RsaPssSha256
+            | Self::RsaPssSha384
+            | Self::RsaPssSha512
+            | Self::RsaPkcs1v15Sha256
+            | Self::RsaPkcs1v15Sha384
+            | Self::RsaPkcs1v15Sha512 => matches!(key_type, AsymmetricKeyType::Rsa { .. }),
+            Self::Ed25519 => *key_type == AsymmetricKeyType::Ed25519,
         }
     }
 
     /// The JOSE `alg` value, where one exists.
     pub fn jws_alg(&self) -> Option<&'static str> {
-        use SignatureAlgorithm::*;
         Some(match self {
-            EcdsaP256Sha256 => "ES256",
-            EcdsaP384Sha384 => "ES384",
-            EcdsaP521Sha512 => "ES512",
-            RsaPssSha256 => "PS256",
-            RsaPssSha384 => "PS384",
-            RsaPssSha512 => "PS512",
-            RsaPkcs1v15Sha256 => "RS256",
-            RsaPkcs1v15Sha384 => "RS384",
-            RsaPkcs1v15Sha512 => "RS512",
-            Ed25519 => "EdDSA",
+            Self::EcdsaP256Sha256 => "ES256",
+            Self::EcdsaP384Sha384 => "ES384",
+            Self::EcdsaP521Sha512 => "ES512",
+            Self::RsaPssSha256 => "PS256",
+            Self::RsaPssSha384 => "PS384",
+            Self::RsaPssSha512 => "PS512",
+            Self::RsaPkcs1v15Sha256 => "RS256",
+            Self::RsaPkcs1v15Sha384 => "RS384",
+            Self::RsaPkcs1v15Sha512 => "RS512",
+            Self::Ed25519 => "EdDSA",
         })
     }
 
     /// Stable lowercase name (`"ecdsa-p256-sha256"`).
     pub fn as_str(&self) -> &'static str {
-        use SignatureAlgorithm::*;
         match self {
-            EcdsaP256Sha256 => "ecdsa-p256-sha256",
-            EcdsaP384Sha384 => "ecdsa-p384-sha384",
-            EcdsaP521Sha512 => "ecdsa-p521-sha512",
-            RsaPssSha256 => "rsa-pss-sha256",
-            RsaPssSha384 => "rsa-pss-sha384",
-            RsaPssSha512 => "rsa-pss-sha512",
-            RsaPkcs1v15Sha256 => "rsa-pkcs1v15-sha256",
-            RsaPkcs1v15Sha384 => "rsa-pkcs1v15-sha384",
-            RsaPkcs1v15Sha512 => "rsa-pkcs1v15-sha512",
-            Ed25519 => "ed25519",
+            Self::EcdsaP256Sha256 => "ecdsa-p256-sha256",
+            Self::EcdsaP384Sha384 => "ecdsa-p384-sha384",
+            Self::EcdsaP521Sha512 => "ecdsa-p521-sha512",
+            Self::RsaPssSha256 => "rsa-pss-sha256",
+            Self::RsaPssSha384 => "rsa-pss-sha384",
+            Self::RsaPssSha512 => "rsa-pss-sha512",
+            Self::RsaPkcs1v15Sha256 => "rsa-pkcs1v15-sha256",
+            Self::RsaPkcs1v15Sha384 => "rsa-pkcs1v15-sha384",
+            Self::RsaPkcs1v15Sha512 => "rsa-pkcs1v15-sha512",
+            Self::Ed25519 => "ed25519",
         }
     }
 
@@ -477,19 +483,18 @@ impl SignatureAlgorithm {
 
     /// The storage code (see [`crate::encoding`]). Codes are explicit, stable and never reused:
     /// a new variant gets the next unused code, wherever it is declared.
-    pub(crate) fn code(&self) -> u8 {
-        use SignatureAlgorithm::*;
+    pub(crate) fn code(self) -> u8 {
         match self {
-            EcdsaP256Sha256 => 1,
-            EcdsaP384Sha384 => 2,
-            EcdsaP521Sha512 => 3,
-            RsaPssSha256 => 4,
-            RsaPssSha384 => 5,
-            RsaPssSha512 => 6,
-            RsaPkcs1v15Sha256 => 7,
-            RsaPkcs1v15Sha384 => 8,
-            RsaPkcs1v15Sha512 => 9,
-            Ed25519 => 10,
+            Self::EcdsaP256Sha256 => 1,
+            Self::EcdsaP384Sha384 => 2,
+            Self::EcdsaP521Sha512 => 3,
+            Self::RsaPssSha256 => 4,
+            Self::RsaPssSha384 => 5,
+            Self::RsaPssSha512 => 6,
+            Self::RsaPkcs1v15Sha256 => 7,
+            Self::RsaPkcs1v15Sha384 => 8,
+            Self::RsaPkcs1v15Sha512 => 9,
+            Self::Ed25519 => 10,
         }
     }
 
@@ -572,7 +577,7 @@ impl MacAlgorithm {
     }
 
     /// The storage code (see [`crate::encoding`]); explicit, stable and never reused.
-    pub(crate) fn code(&self) -> u8 {
+    pub(crate) fn code(self) -> u8 {
         match self {
             MacAlgorithm::HmacSha256 => 1,
             MacAlgorithm::HmacSha384 => 2,

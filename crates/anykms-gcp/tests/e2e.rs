@@ -26,10 +26,11 @@ async fn aead_roundtrip_rotation_and_used_primary() {
     let name = fake.create_key("GOOGLE_SYMMETRIC_ENCRYPTION");
     let p = provider(&fake);
     let k = p.aead_key(uri(&name)).unwrap();
+    let big = vec![7u8; 65536];
     for (pt, aad) in [
         (&b"hello"[..], &b""[..]),
         (b"x", b"users/42"),
-        (&[7u8; 65536], b"a"),
+        (&big[..], b"a"),
     ] {
         let ct = k.encrypt(pt, aad).await.unwrap();
         assert_eq!(&*k.decrypt(&ct, aad).await.unwrap(), pt);
@@ -78,7 +79,7 @@ async fn aead_roundtrip_rotation_and_used_primary() {
     );
     // Over 64 KiB: InvalidArgument before any request.
     let before = fake.requests();
-    let e = k.encrypt(&[0; 65537], b"").await.unwrap_err();
+    let e = k.encrypt(&vec![0; 65537], b"").await.unwrap_err();
     assert_eq!(e.kind(), ErrorKind::InvalidArgument);
     assert_eq!(fake.requests(), before);
 }
@@ -245,7 +246,7 @@ async fn ed25519_and_mac() {
         ErrorKind::VerificationFailed
     );
     assert_eq!(
-        k.sign_message(&[0; 65537]).await.unwrap_err().kind(),
+        k.sign_message(&vec![0; 65537]).await.unwrap_err().kind(),
         ErrorKind::InvalidArgument
     );
 
@@ -394,8 +395,9 @@ async fn rsa_key_wrapping_and_envelopes() {
             .unwrap(),
     ] {
         let env = anykms_recipes::EnvelopeAead::new("kek", kek).unwrap();
-        let ct = env.encrypt(&[1; 100_000], b"row-7").await.unwrap();
-        assert_eq!(&*env.decrypt(&ct, b"row-7").await.unwrap(), &[1; 100_000]);
+        let pt = vec![1; 100_000];
+        let ct = env.encrypt(&pt, b"row-7").await.unwrap();
+        assert_eq!(&*env.decrypt(&ct, b"row-7").await.unwrap(), &pt[..]);
     }
     // A signing key version is not a KEK.
     let p256 = fake.create_key("EC_SIGN_P256_SHA256");

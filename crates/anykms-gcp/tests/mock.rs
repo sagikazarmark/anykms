@@ -834,12 +834,13 @@ async fn local_validation_happens_before_any_request() {
         .await;
     let p = provider(&server);
     let k = p.aead_key(format!("gcp-kms://{KEY}")).unwrap();
+    let big = vec![0; 65537];
     assert_eq!(
-        k.encrypt(&[0; 65537], b"").await.unwrap_err().kind(),
+        k.encrypt(&big, b"").await.unwrap_err().kind(),
         ErrorKind::InvalidArgument
     );
     assert_eq!(
-        k.encrypt(b"x", &[0; 65537]).await.unwrap_err().kind(),
+        k.encrypt(b"x", &big).await.unwrap_err().kind(),
         ErrorKind::InvalidArgument
     );
     let v = format!("gcp-kms://{KEY}/cryptoKeyVersions/1");
@@ -862,7 +863,7 @@ async fn local_validation_happens_before_any_request() {
     );
     let m = p.mac_key(&v, MacAlgorithm::HmacSha256).unwrap();
     assert_eq!(
-        m.mac(&[0; 65537]).await.unwrap_err().kind(),
+        m.mac(&big).await.unwrap_err().kind(),
         ErrorKind::InvalidArgument
     );
     let other = Tag::from_parts(

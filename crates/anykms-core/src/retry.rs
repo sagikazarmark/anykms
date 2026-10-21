@@ -84,11 +84,19 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::around::{Around, Call, CallCx, CallOutput};
-use crate::dynamic::*;
+#[cfg(doc)]
+use crate::dynamic::{AeadKey, Layer};
+use crate::dynamic::{BoxFuture, Part};
 use crate::error::{Error, ErrorKind, Result};
 use crate::time::Instant;
-use crate::traits::*;
-use crate::types::*;
+use crate::traits::{
+    Aead, DataKeys, Describe, DigestSigner, DigestVerifier, ExtensionCalls, KeyWrap, Mac,
+    MessageSigner, MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, WrappedDataKeys,
+};
+use crate::types::{
+    Ciphertext, DataKey, DataKeySpec, Decrypted, Digest, KeyInfo, KeyVersion, MacAlgorithm,
+    PublicKey, Signature, SignatureAlgorithm, Tag,
+};
 
 /// Sleeps for the given duration (e.g. `tokio::time::sleep`).
 pub type SleepFn = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -115,7 +123,7 @@ pub fn std_clock() -> ClockFn {
 
 /// Retry-After values and retry hints above this are treated as this (and then exceed any sane
 /// cap).
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_RETRY_AFTER: Duration = Duration::from_hours(24);
 
 /// Retry limits.
 #[non_exhaustive]
@@ -290,7 +298,10 @@ impl RetryBudget {
     }
 
     fn tokens(&self) -> std::sync::MutexGuard<'_, f64> {
-        self.inner.tokens.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn deposit(&self) {
@@ -579,15 +590,21 @@ impl<T> Retry<T> {
                 error_kind = e.kind().as_str(),
                 backend = e.backend(),
                 op = e.operation().as_str(),
-                retry_after_ms = e.retry_after().map(|d| d.as_millis() as u64),
-                retry_hint_ms = hint.map(|d| d.as_millis() as u64),
-                delay_ms = delay.as_millis() as u64,
+                retry_after_ms = e.retry_after().map(saturating_millis),
+                retry_hint_ms = hint.map(saturating_millis),
+                delay_ms = saturating_millis(delay),
                 "anykms retry"
             );
             (self.cfg.sleep)(delay).await;
             attempt += 1;
         }
     }
+}
+
+/// `d` in whole milliseconds, saturating at `u64::MAX` (for log fields).
+#[cfg(feature = "tracing")]
+fn saturating_millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// `d * f` for `f` in `[0, 1)`, never more than `d` and never panicking.
@@ -605,6 +622,10 @@ fn fraction_of(d: Duration, f: f64) -> Duration {
 /// sequence and retry in lockstep. The counter separates calls within a process and `now` (the
 /// layer's clock, which differs between clients by when they started and failed) separates
 /// processes.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "both operands are at most 2^53, so they are exactly representable in an f64"
+)]
 fn random_fraction(salt: u32, now: Duration) -> f64 {
     static CALLS: AtomicU64 = AtomicU64::new(0);
     let mut h = std::hash::RandomState::new().build_hasher();
@@ -924,13 +945,13 @@ mod tests {
                 .with_retry_after(Duration::from_secs(secs))
                 .with_detail(BackendDetail::new().with_http_status(503))
         }
-        fn check(e: Error, secs: u64) {
+        fn check(e: &Error, secs: u64) {
             assert_eq!(e.kind(), ErrorKind::Throttled);
             assert_eq!(e.retry_after(), Some(Duration::from_secs(secs)));
             assert_eq!(e.operation(), Operation::Decrypt);
             assert_eq!(e.backend(), "t");
             assert_eq!(e.detail().and_then(|d| d.http_status), Some(503));
-            let src = std::error::Error::source(&e)
+            let src = std::error::Error::source(e)
                 .and_then(|s| s.downcast_ref::<Error>())
                 .expect("original error kept as source");
             assert_eq!(src.kind(), ErrorKind::Unavailable);
@@ -939,7 +960,7 @@ mod tests {
         // Above the cap (5 s).
         let (s, log) = recorded();
         let r = retry(flaky(1, || unavailable_after(30)), s);
-        check(r.encrypt(b"", b"").await.unwrap_err(), 30);
+        check(&r.encrypt(b"", b"").await.unwrap_err(), 30);
         assert_eq!(r.inner().calls.load(Ordering::SeqCst), 1);
         assert!(log.lock().unwrap().is_empty());
 
@@ -950,7 +971,7 @@ mod tests {
             s,
             RetryPolicy::default().with_deadline(Duration::from_secs(1)),
         );
-        check(r.encrypt(b"", b"").await.unwrap_err(), 3);
+        check(&r.encrypt(b"", b"").await.unwrap_err(), 3);
         assert_eq!(r.inner().calls.load(Ordering::SeqCst), 1);
         assert!(log.lock().unwrap().is_empty());
 
@@ -1336,7 +1357,7 @@ mod tests {
         {
             let log = log.lock().unwrap();
             assert_eq!(log.len(), 5);
-            assert!(log.iter().all(|d| d.is_zero()));
+            assert!(log.iter().all(Duration::is_zero));
         }
         // The budget does not get in the way of a test hammering one handle.
         let r = retry_with(

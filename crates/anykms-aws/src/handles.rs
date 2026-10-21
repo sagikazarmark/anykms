@@ -192,9 +192,8 @@ fn check_version_form(v: Option<&KeyVersion>, op: Operation) -> Result<()> {
 /// A wire encryption context.
 type Wire<'a> = BTreeMap<&'a str, &'a str>;
 
-fn wire_of_aad(m: &Option<AadContext>) -> Option<Wire<'_>> {
-    m.as_ref()
-        .map(|m| m.iter().map(|(k, v)| (*k, v.as_str())).collect())
+fn wire_of_aad(m: Option<&AadContext>) -> Option<Wire<'_>> {
+    m.map(|m| m.iter().map(|(k, v)| (*k, v.as_str())).collect())
 }
 
 fn wire_of_ctx(c: &EncryptionContext) -> Option<Wire<'_>> {
@@ -202,9 +201,8 @@ fn wire_of_ctx(c: &EncryptionContext) -> Option<Wire<'_>> {
         .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
 }
 
-fn ctx_len(w: &Option<Wire<'_>>) -> usize {
-    w.as_ref()
-        .map_or(0, |m| m.iter().map(|(k, v)| k.len() + v.len() + 8).sum())
+fn ctx_len(w: Option<&Wire<'_>>) -> usize {
+    w.map_or(0, |m| m.iter().map(|(k, v)| k.len() + v.len() + 8).sum())
 }
 
 #[derive(Serialize)]
@@ -423,7 +421,7 @@ impl KeyCtx {
         .then(|| {
             self.resolved
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         })
         .flatten();
@@ -458,7 +456,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.key.arn);
     }
 
@@ -467,7 +465,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.key.arn)
             .filter(|(exp, _)| now < *exp)
             .map(|(_, i)| i.clone())
@@ -506,7 +504,11 @@ impl KeyCtx {
         let info = self.describe_key(Origin::Handle, self.arn(), op).await?;
         let now = Instant::now();
         {
-            let mut c = self.cache.entries.lock().unwrap_or_else(|p| p.into_inner());
+            let mut c = self
+                .cache
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             c.retain(|_, (exp, _)| now < *exp);
             c.insert(
                 self.key.arn.clone(),
@@ -523,29 +525,31 @@ impl KeyCtx {
     /// The cached or fresh metadata. Concurrent misses for the key share one `DescribeKey` and
     /// its result, a failure included (R-34).
     async fn info(&self, op: Operation) -> Result<Arc<AwsKeyInfo>> {
-        let i = match self.cached() {
-            Some(i) => i,
-            None => {
-                let flight = (
-                    self.key.arn.clone(),
-                    self.grant_tokens.as_ref().map_or(0, GrantTokens::identity),
-                );
-                self.cache
-                    .flights
-                    .run(&flight, || async {
-                        // A flight that landed after the miss above has filled the cache.
-                        match self.cached() {
-                            Some(i) => Ok(i),
-                            None => self.describe(op).await,
-                        }
-                    })
-                    .await
-                    // The flight may have been another operation's.
-                    .map_err(|e| e.with_operation(op))?
-            }
+        let i = if let Some(i) = self.cached() {
+            i
+        } else {
+            let flight = (
+                self.key.arn.clone(),
+                self.grant_tokens.as_ref().map_or(0, GrantTokens::identity),
+            );
+            self.cache
+                .flights
+                .run(&flight, || async {
+                    // A flight that landed after the miss above has filled the cache.
+                    match self.cached() {
+                        Some(i) => Ok(i),
+                        None => self.describe(op).await,
+                    }
+                })
+                .await
+                // The flight may have been another operation's.
+                .map_err(|e| e.with_operation(op))?
         };
         // A response may have resolved an alias more recently than the cached metadata.
-        let mut r = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
+        let mut r = self
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if r.is_none() {
             *r = Some(i.arn.clone());
         }
@@ -578,7 +582,10 @@ impl KeyCtx {
     /// Records the key ARN an alias resolves to (a change is logged; the old ARN stops being
     /// accepted as a version).
     fn note_resolved(&self, arn: &str) {
-        let mut r = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
+        let mut r = self
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if r.as_deref() != Some(arn) {
             #[cfg(feature = "tracing")]
             if r.is_some() {
@@ -635,7 +642,7 @@ impl KeyCtx {
         if let Some(r) = self
             .resolved
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
         {
             return Ok(r);
@@ -677,7 +684,7 @@ impl KeyCtx {
     ) -> Result<Ciphertext> {
         check_plaintext(plaintext, op)?;
         let pt = b64(plaintext);
-        let hint = pt.len() + ctx_len(&ctx);
+        let hint = pt.len() + ctx_len(ctx.as_ref());
         let req = EncryptReq {
             key_id: self.arn(),
             plaintext: &pt,
@@ -699,7 +706,7 @@ impl KeyCtx {
     ) -> Result<Zeroizing<Vec<u8>>> {
         check_ciphertext(ct, op)?;
         let blob = B64.encode(ct.as_bytes());
-        let hint = blob.len() + ctx_len(&ctx);
+        let hint = blob.len() + ctx_len(ctx.as_ref());
         let req = DecryptReq {
             key_id: self.arn(),
             ciphertext_blob: &blob,
@@ -722,7 +729,7 @@ impl KeyCtx {
     ) -> Result<Ciphertext> {
         check_ciphertext(ct, op)?;
         let blob = B64.encode(ct.as_bytes());
-        let hint = blob.len() + ctx_len(&from) + ctx_len(&to);
+        let hint = blob.len() + ctx_len(from.as_ref()) + ctx_len(to.as_ref());
         let req = ReEncryptReq {
             ciphertext_blob: &blob,
             source_key_id: self.arn(),
@@ -995,7 +1002,7 @@ impl Aead for AwsAeadKey {
                 let ctx = aad_context(aad, op)?;
                 self.k.ensure(op, AwsKeyInfo::check_aead).await?;
                 self.k
-                    .encrypt_raw(plaintext, wire_of_aad(&ctx), None, op)
+                    .encrypt_raw(plaintext, wire_of_aad(ctx.as_ref()), None, op)
                     .await
             })
             .await
@@ -1009,7 +1016,9 @@ impl Aead for AwsAeadKey {
                 // Not capped: the cap binds the operations that produce a ciphertext.
                 let ctx = decrypt_aad_context(aad);
                 self.k.ensure(op, AwsKeyInfo::check_aead).await?;
-                self.k.decrypt_raw(ct, wire_of_aad(&ctx), None, op).await
+                self.k
+                    .decrypt_raw(ct, wire_of_aad(ctx.as_ref()), None, op)
+                    .await
             })
             .await
     }
@@ -1025,7 +1034,7 @@ impl Rewrap for AwsAeadKey {
                 check_ciphertext(ct, op)?;
                 let ctx = aad_context(aad, op)?;
                 self.k.ensure(op, AwsKeyInfo::check_aead).await?;
-                let w = wire_of_aad(&ctx);
+                let w = wire_of_aad(ctx.as_ref());
                 self.k.reencrypt_raw(ct, w.clone(), w, None, op).await
             })
             .await
@@ -1041,7 +1050,7 @@ impl DataKeys for AwsAeadKey {
                 aws_data_key_spec(spec, op)?;
                 let ctx = aad_context(aad, op)?;
                 self.k.ensure(op, AwsKeyInfo::check_aead).await?;
-                self.k.data_key_raw(spec, wire_of_aad(&ctx)).await
+                self.k.data_key_raw(spec, wire_of_aad(ctx.as_ref())).await
             })
             .await
     }
@@ -1056,7 +1065,9 @@ impl WrappedDataKeys for AwsAeadKey {
                 aws_data_key_spec(spec, op)?;
                 let ctx = aad_context(aad, op)?;
                 self.k.ensure(op, AwsKeyInfo::check_aead).await?;
-                self.k.wrapped_data_key_raw(spec, wire_of_aad(&ctx)).await
+                self.k
+                    .wrapped_data_key_raw(spec, wire_of_aad(ctx.as_ref()))
+                    .await
             })
             .await
     }
@@ -1127,7 +1138,7 @@ impl AwsKeyWrapKey {
             .k
             .public_keys
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&arn)
         {
             return Ok(p.clone());
@@ -1150,7 +1161,7 @@ impl AwsKeyWrapKey {
         self.k
             .public_keys
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(arn, der.clone());
         Ok(der)
     }
@@ -1732,16 +1743,12 @@ pub(crate) fn fuzz_decode_success(which: u8, body: &[u8]) -> bool {
             .and_then(|r| decode_secret(r.plaintext, op).ok())
             .is_some(),
         3 => serde_json::from_slice::<SignResp>(body)
-            .ok()
-            .is_some_and(|r| is_key_arn(&r.key_id) && decode_blob(&r.signature, op).is_ok()),
+            .is_ok_and(|r| is_key_arn(&r.key_id) && decode_blob(&r.signature, op).is_ok()),
         4 => serde_json::from_slice::<VerifyResp>(body).is_ok(),
-        5 => serde_json::from_slice::<MacResp>(body)
-            .ok()
-            .is_some_and(|r| decode_blob(&r.mac, op).is_ok()),
+        5 => serde_json::from_slice::<MacResp>(body).is_ok_and(|r| decode_blob(&r.mac, op).is_ok()),
         6 => serde_json::from_slice::<VerifyMacResp>(body).is_ok(),
         7 => serde_json::from_slice::<PublicKeyResp>(body)
-            .ok()
-            .is_some_and(|r| decode_blob(&r.public_key, op).is_ok()),
+            .is_ok_and(|r| decode_blob(&r.public_key, op).is_ok()),
         _ => AwsKeyInfo::parse(body)
             .map(|i| drop(i.to_key_info()))
             .is_ok(),

@@ -72,7 +72,13 @@ pub struct AwsProviderBuilder {
 impl fmt::Debug for AwsProviderBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AwsProviderBuilder")
-            .field("credentials", &self.credentials.as_ref().map(|c| c.kind()))
+            .field(
+                "credentials",
+                &self
+                    .credentials
+                    .as_ref()
+                    .map(super::credentials::CredentialSource::kind),
+            )
             .field("allowed_accounts", &self.allowed_accounts)
             .field("allowed_regions", &self.allowed_regions)
             // Endpoints are only validated by `build`: never print userinfo or queries.

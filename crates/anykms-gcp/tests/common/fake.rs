@@ -429,7 +429,12 @@ impl Respond for Responder {
         };
         // Token endpoints.
         if path == "/computeMetadata/v1/instance/service-accounts/default/token" {
-            if req.headers.get("Metadata-Flavor").map(|v| v.as_bytes()) != Some(b"Google") {
+            if req
+                .headers
+                .get("Metadata-Flavor")
+                .map(wiremock::http::HeaderValue::as_bytes)
+                != Some(b"Google")
+            {
                 return ResponseTemplate::new(403);
             }
             return st.issue(true);
@@ -506,7 +511,7 @@ impl Respond for Responder {
             )
             .insert_header("Retry-After", "1");
         }
-        st.dispatch(&method, r, &body, req)
+        st.dispatch(&method, &r, &body, req)
     }
 }
 
@@ -573,7 +578,7 @@ impl State {
     fn dispatch(
         &mut self,
         method: &str,
-        r: Route,
+        r: &Route,
         body: &Value,
         req: &Request,
     ) -> ResponseTemplate {
@@ -723,7 +728,7 @@ impl State {
                         if !matches!(state, "ENABLED" | "DISABLED") {
                             return invalid("state must be ENABLED or DISABLED");
                         }
-                        key.versions.get_mut(&n).unwrap().state = state.to_owned();
+                        state.clone_into(&mut key.versions.get_mut(&n).unwrap().state);
                         ok(key.version_json(&name, n))
                     }
                     ("POST", Some("destroy")) => {
@@ -795,7 +800,8 @@ fn encrypt(name: &str, key: &Key, body: &Value) -> ResponseTemplate {
             &mut buf,
         )
         .unwrap();
-    let mut ct = (p as u32).to_be_bytes().to_vec();
+    let p32 = u32::try_from(p).expect("fake version numbers fit the 4-byte ciphertext prefix");
+    let mut ct = p32.to_be_bytes().to_vec();
     ct.extend_from_slice(&nonce);
     ct.extend_from_slice(&buf);
     ok(json!({
@@ -1108,13 +1114,16 @@ impl FakeKms {
     /// Sets a version's state (`ENABLED`, `DISABLED`, `DESTROYED`, `PENDING_GENERATION`, ...).
     pub fn set_state(&self, name: &str, version: u64, state: &str) {
         let mut st = self.state.lock().unwrap();
-        st.keys
-            .get_mut(name)
-            .expect("known key")
-            .versions
-            .get_mut(&version)
-            .expect("known version")
-            .state = state.to_owned();
+        state.clone_into(
+            &mut st
+                .keys
+                .get_mut(name)
+                .expect("known key")
+                .versions
+                .get_mut(&version)
+                .expect("known version")
+                .state,
+        );
     }
 
     /// Throttles (or stops throttling) every request on `name`.

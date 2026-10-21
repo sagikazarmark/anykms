@@ -236,8 +236,10 @@ impl ZeroizeStrings for serde_json::Value {
     fn zeroize_strings(&mut self) {
         match self {
             serde_json::Value::String(s) => s.zeroize(),
-            serde_json::Value::Array(a) => a.iter_mut().for_each(|v| v.zeroize_strings()),
-            serde_json::Value::Object(o) => o.values_mut().for_each(|v| v.zeroize_strings()),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(ZeroizeStrings::zeroize_strings),
+            serde_json::Value::Object(o) => {
+                o.values_mut().for_each(ZeroizeStrings::zeroize_strings);
+            }
             _ => {}
         }
     }
@@ -280,8 +282,9 @@ impl Fetch for ExternalAccount {
             }
             let body = oauth::form(&pairs);
             drop(subject);
-            let resp =
-                oauth::send(WHAT, oauth::post_form(&self.http, &self.token_url, body)).await?;
+            let req = oauth::post_form(&self.http, &self.token_url, &body);
+            drop(body);
+            let resp = oauth::send(WHAT, req).await?;
             let federated = oauth::parse_oauth_token(WHAT, &resp)?;
             drop(resp);
             match &self.impersonation_url {

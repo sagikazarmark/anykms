@@ -101,8 +101,8 @@ fn body<T: Serialize>(value: &T, hint: usize) -> Zeroizing<Vec<u8>> {
 }
 
 /// Length of an optional base64 field.
-fn opt_len(s: &Option<Zeroizing<String>>) -> usize {
-    s.as_ref().map_or(0, |s| s.len())
+fn opt_len(s: Option<&Zeroizing<String>>) -> usize {
+    s.map_or(0, |s| s.len())
 }
 
 /// Parses `vault:v<N>:<b64>`.
@@ -238,7 +238,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&*self.cache_key)
             .filter(|(expires, _, _)| now < *expires)
             .map(|(_, t, d)| (t.clone(), *d))
@@ -253,7 +253,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&*self.cache_key);
     }
 
@@ -306,7 +306,11 @@ impl KeyCtx {
             }
         })?;
         let now = std::time::Instant::now();
-        let mut cache = self.cache.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self
+            .cache
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.retain(|_, (expires, _, _)| now < *expires);
         cache.insert(
             self.cache_key.clone(),
@@ -497,7 +501,7 @@ fn encrypt_body(plaintext: &[u8], aad: &[u8]) -> Zeroizing<Vec<u8>> {
         plaintext: &pt,
         associated_data: ad.as_deref().map(String::as_str),
     };
-    body(&req, pt.len() + opt_len(&ad))
+    body(&req, pt.len() + opt_len(ad.as_ref()))
 }
 
 #[derive(Serialize)]
@@ -626,7 +630,7 @@ impl Aead for TransitAeadKey {
                 let mut call = self.k.call(
                     Method::POST,
                     self.k.path("decrypt"),
-                    Some(body(&req, ct.len() + opt_len(&ad))),
+                    Some(body(&req, ct.len() + opt_len(ad.as_ref()))),
                     op,
                 );
                 call.key_version = ct_version(ct);
@@ -738,7 +742,7 @@ impl TransitAeadKey {
                 self.k.call(
                     Method::POST,
                     self.k.segs(&["datakey", kind, &self.k.name]),
-                    Some(body(&req, opt_len(&ad))),
+                    Some(body(&req, opt_len(ad.as_ref()))),
                     op,
                 ),
                 Origin::Handle,
@@ -824,7 +828,10 @@ struct SignReq<'a> {
 
 impl<'a> SignReq<'a> {
     fn new(alg: SignatureAlgorithm, input: &'a str, op: Operation) -> Result<Self> {
-        use SignatureAlgorithm::*;
+        use SignatureAlgorithm::{
+            EcdsaP256Sha256, EcdsaP384Sha384, EcdsaP521Sha512, RsaPkcs1v15Sha256,
+            RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256, RsaPssSha384, RsaPssSha512,
+        };
         let digest = !alg.is_message_signing();
         let (sig_alg, salt) = match alg {
             RsaPssSha256 | RsaPssSha384 | RsaPssSha512 => (Some("pss"), Some("hash")),
@@ -857,7 +864,7 @@ struct ValidResp {
 
 /// Cheap structural check that a signature fits its algorithm's family.
 fn signature_shape_ok(alg: SignatureAlgorithm, sig: &[u8]) -> bool {
-    use SignatureAlgorithm::*;
+    use SignatureAlgorithm::{EcdsaP256Sha256, EcdsaP384Sha384, EcdsaP521Sha512, Ed25519};
     // DER ECDSA length bounds per curve (sequence of two integers of at most n+1 bytes). Shorter
     // signatures of a larger curve occur with negligible probability (~2^-100), so the bands
     // separate curves in practice.

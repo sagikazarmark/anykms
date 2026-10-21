@@ -28,7 +28,7 @@ impl SelfSignedJwt {
     pub(crate) fn new(
         email: String,
         key_id: Option<String>,
-        pem: Secret,
+        pem: &Secret,
         quota_project: Option<String>,
     ) -> Result<Self> {
         let der = anykms_http::tls::private_key_from_pem(crate::BACKEND, pem.0.as_bytes())
@@ -98,7 +98,7 @@ impl Fetch for SelfSignedJwt {
             // A minute of slack against clock skew between here and Google.
             Ok(Fetched::valid_for(
                 self.sign()?,
-                LIFETIME - Duration::from_secs(60),
+                LIFETIME.checked_sub(Duration::from_secs(60)).unwrap(),
             ))
         })
     }

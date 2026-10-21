@@ -103,7 +103,7 @@ impl Aead for TestKek {
         Ok(ct
             .as_bytes()
             .get(9)
-            .map(|d| KeyVersion::from_u64((d - b'0') as u64)))
+            .map(|d| KeyVersion::from_u64(u64::from(d - b'0'))))
     }
 }
 
@@ -186,9 +186,9 @@ fn seal_payload(enc_key: &[u8; 32], header: &[u8], pt: &[u8], aad: &[u8]) -> Vec
 /// Encryption step 7: `header || kek_id_len || kek_id || wrapped_dek_len || wrapped_dek || payload`.
 fn envelope(header: &[u8], kek_id: &[u8], wrapped: &[u8], payload: &[u8]) -> Vec<u8> {
     let mut out = header.to_vec();
-    out.push(kek_id.len() as u8);
+    out.push(u8::try_from(kek_id.len()).unwrap());
     out.extend_from_slice(kek_id);
-    out.extend_from_slice(&(wrapped.len() as u16).to_be_bytes());
+    out.extend_from_slice(&u16::try_from(wrapped.len()).unwrap().to_be_bytes());
     out.extend_from_slice(wrapped);
     out.extend_from_slice(payload);
     out
@@ -464,7 +464,7 @@ async fn vectors_decrypt() {
         let name = c["name"].as_str().unwrap();
         let (kek_name, versions) = (
             c["kek"].as_str().unwrap(),
-            c["kek_versions"].as_u64().unwrap() as u8,
+            u8::try_from(c["kek_versions"].as_u64().unwrap()).unwrap(),
         );
         let (bytes, aad) = (unhex(&c["envelope"]), unhex(&c["aad"]));
         let env =

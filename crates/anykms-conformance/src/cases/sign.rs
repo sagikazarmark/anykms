@@ -141,7 +141,8 @@ pub(crate) async fn malformed<F: Fixture>(c: Ctx<F>, alg: SignatureAlgorithm) ->
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            x as u8
+            // The low byte of the state.
+            x.to_le_bytes()[0]
         })
         .collect();
     let candidates: [(&str, Vec<u8>); 3] = [
@@ -353,14 +354,12 @@ pub(crate) async fn rejected_before_io<F: Fixture>(
     Ok(())
 }
 
-/// An algorithm of a different key family than `alg`.
+/// An algorithm of a different key family than `alg` (another curve for P-384 and P-521, ECDSA
+/// P-256 for everything else).
 fn other_alg(alg: SignatureAlgorithm) -> SignatureAlgorithm {
-    use SignatureAlgorithm::*;
+    use SignatureAlgorithm::{EcdsaP256Sha256, EcdsaP384Sha384};
     match alg {
         EcdsaP256Sha256 => EcdsaP384Sha384,
-        EcdsaP384Sha384 | EcdsaP521Sha512 => EcdsaP256Sha256,
-        RsaPssSha256 | RsaPssSha384 | RsaPssSha512 | RsaPkcs1v15Sha256 | RsaPkcs1v15Sha384
-        | RsaPkcs1v15Sha512 => EcdsaP256Sha256,
         _ => EcdsaP256Sha256,
     }
 }
@@ -840,10 +839,11 @@ pub(crate) async fn version_algorithms<F: Fixture>(c: Ctx<F>) -> CaseResult {
     let reported: Vec<_> = info
         .versions()
         .iter()
-        .map(|v| v.signature_algorithm())
+        .map(anykms_core::KeyVersionInfo::signature_algorithm)
         .collect();
     ensure!(
-        reported.iter().all(|a| a.is_none()) || reported.iter().all(|a| *a == Some(alg)),
+        reported.iter().all(std::option::Option::is_none)
+            || reported.iter().all(|a| *a == Some(alg)),
         "{alg} key versions report the signature algorithms {reported:?}"
     );
     ensure!(

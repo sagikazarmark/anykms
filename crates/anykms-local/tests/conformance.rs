@@ -54,12 +54,17 @@ struct LocalFixture {
 }
 
 impl Fixture for LocalFixture {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "local"
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, Disable, DisableVersion, EmptyMessage, EmptyPlaintext,
+            Extension, KeyWrap, KeyWrapRewrap, Mac, MacInputLimit, MessageInputLimit,
+            MinDecryptionVersion, PreflightState, Rewrap, RewrapWithAad, Rotate, RotateKeyWrap,
+            RotateMac, RotateSigning, ServerErrorMessages, Throttle, WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .not_applicable(Feature::BackendInfo, "local keys carry no backend metadata")
             .not_applicable(Feature::KeyWrapPublicKeys, "no RSA key-wrapping keys")
