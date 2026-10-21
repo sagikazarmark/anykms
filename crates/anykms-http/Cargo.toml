@@ -32,6 +32,13 @@ rustls-aws-lc-rs = ["rustls", "rustls/aws-lc-rs"]
 tracing = ["dep:tracing"]
 # Allow HTTP/2 in `ReqwestTransport` (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
 http2 = ["reqwest?/http2"]
+# `TowerTransport<S>`: any tower `Service` over `http::Request<Full<Bytes>>` as a transport
+# (a tower stack around the built-in client through `ReqwestTransport::into_service`, or a
+# `fetch`-based service on Cloudflare Workers). Off by default; adds no dependency when off.
+tower = ["dep:tower-service", "dep:http-body", "dep:http-body-util", "dep:bytes"]
+# `wasm32-unknown-unknown` on a JS host: the clocks (`anykms_core::time`) and RNG read the host.
+# Only meaningful with a transport that runs there (`tower` over a `fetch` service).
+js = ["anykms-core/js", "getrandom/wasm_js"]
 
 [dependencies]
 anykms-core.workspace = true
@@ -43,6 +50,10 @@ base64.workspace = true
 http.workspace = true
 url.workspace = true
 reqwest = { workspace = true, optional = true }
+tower-service = { workspace = true, optional = true }
+http-body = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 httpdate = "1"
 # Keyed fingerprints of server messages (`redact`).
 hmac.workspace = true
@@ -58,6 +69,8 @@ tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# `ServiceBuilder` layers for the `TowerTransport` tests.
+tower = { workspace = true, features = ["util", "limit", "timeout"] }
 
 [lints]
 workspace = true

@@ -20,6 +20,11 @@
 //!   ([`ReqwestTransport`]), reqwest over a preconfigured rustls configuration, never following
 //!   redirects. It owns TLS trust and client certificates, the crypto provider, timeouts, proxying
 //!   and the HTTP version ([`ReqwestTransportBuilder`]); the backends know none of these.
+//! - [`tower`](mod@tower) (feature `tower`): [`TowerTransport`], any tower `Service` as a
+//!   transport: a tower stack around the built-in client
+//!   (`ReqwestTransport::into_service`), or a `fetch`-based service where reqwest cannot run
+//!   (Cloudflare Workers). It sets `content-length`, reads bodies through [`BodyBuffer`], has no
+//!   timeout of its own and cannot control redirects: the inner service must not follow them.
 //! - [`tls`] (feature `rustls`): the rustls crypto provider precedence ([`select_provider`]:
 //!   configured → process default → aws-lc-rs → ring) and the client TLS configuration
 //!   ([`TlsOptions`]); the provider is never installed process-wide. [`is_missing_system_roots`]
@@ -54,10 +59,23 @@
 //! | `rustls-ring` | | ring as the fallback provider (opt-in, with `default-features = false`); `ReqwestTransport`-only |
 //! | `tracing` | | a debug event naming the provider chosen; the [`span`] schema (no-ops without it) |
 //! | `http2` | | [`ReqwestTransportBuilder::http2`] may negotiate HTTP/2; `ReqwestTransport`-only |
+//! | `tower` | | [`TowerTransport`], any tower `Service` as a transport; `ReqwestTransport::into_service` with `reqwest` |
+//! | `js` | | `wasm32-unknown-unknown` on a JS host: the clocks (`anykms_core::time`) and RNG read the host; pair it with `tower` over a `fetch` service |
 //!
 //! aws-lc-rs builds C and assembly (aws-lc-sys), so the default build needs a C compiler.
 //!
-//! Backends forward their own `reqwest`, `rustls-*`, `tracing` and `http2` features to these.
+//! Backends forward their own `reqwest`, `rustls-*`, `tracing`, `http2`, `tower` and `js`
+//! features to these.
+//!
+//! # `Send`
+//!
+//! [`HttpTransport`] is `Send + Sync` and its future is `Send` on every target, wasm32 included.
+//! The backends' futures are `Send` (`anykms_core::BoxFuture`), so they can live in shared state
+//! and run inside `Send`-requiring frameworks (tower, axum, workers-rs handlers); making the
+//! transport conditionally `Send` would make the backends conditionally `Send` too, which those
+//! frameworks reject. JS futures (`fetch`) are not `Send`, but a JS host without the `atomics`
+//! target feature is single-threaded: a transport over a JS API wraps them (a `SendWrapper`) on
+//! its side of the seam, as `tower-worker-fetch` does; anykms itself has no such wrapper.
 //!
 //! [`select_provider`]: tls::select_provider
 //! [`TlsOptions`]: tls::TlsOptions
@@ -90,6 +108,9 @@ pub mod span;
 #[cfg(feature = "rustls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rustls")))]
 pub mod tls;
+#[cfg(feature = "tower")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
+pub mod tower;
 pub mod transport;
 pub mod zbuf;
 
@@ -97,6 +118,8 @@ pub use transport::{BodyBuffer, HttpTransport, RequestTimeout, SendError, defaul
 
 #[cfg(feature = "reqwest")]
 pub use self::reqwest::{ReqwestTransport, ReqwestTransportBuilder};
+#[cfg(feature = "tower")]
+pub use self::tower::TowerTransport;
 
 /// The `http` types in [`HttpTransport`]'s signature.
 pub use http;

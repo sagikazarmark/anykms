@@ -66,6 +66,16 @@ azure = ["dep:anykms-azure", "dep:anykms-http"]
 azure-identity = ["azure", "anykms-azure/azure-identity"]
 # Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`).
 http2 = ["anykms-transit?/http2", "anykms-aws?/http2", "anykms-gcp?/http2", "anykms-azure?/http2"]
+# `anykms_http::TowerTransport`: any tower `Service` as the HTTP backends' transport
+# (`.http_transport(..)`): a tower stack around the built-in client
+# (`ReqwestTransport::into_service`, with `reqwest`), or a `fetch`-based service on Cloudflare
+# Workers (with `default-features = false`). See docs/guide.md.
+tower = ["anykms-http?/tower", "anykms-transit?/tower", "anykms-aws?/tower", "anykms-gcp?/tower", "anykms-azure?/tower"]
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): every clock read
+# and the RNG go through the host (`anykms_core::time`, `getrandom`'s JS backend). With
+# `default-features = false`, a backend feature and `tower`, the HTTP backends run there over a
+# `fetch`-based service. See docs/guarantees.md.
+js = ["anykms-core/js", "anykms-recipes?/js", "anykms-local?/js", "anykms-http?/js", "anykms-transit?/js", "anykms-aws?/js", "anykms-gcp?/js", "anykms-azure?/js"]
 local = ["dep:anykms-local"]
 tracing = ["dep:tracing", "anykms-core/tracing", "anykms-transit?/tracing", "anykms-aws?/tracing", "anykms-gcp?/tracing", "anykms-azure?/tracing"]
 # `Serialize`/`Deserialize` for `Ciphertext`, `Signature` and `Tag` (see anykms-core).
@@ -92,6 +102,8 @@ tracing = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
+# Layers for examples/tower_transport.rs and the guide's tower snippet.
+tower = { workspace = true, features = ["util", "limit"] }
 
 # Verify the tokens of examples/jwt_signing.rs (jsonwebtoken) and
 # examples/jwt_signing_jwt_simple.rs (jwt-simple, its default BoringSSL build needs cmake;
@@ -116,7 +128,7 @@ required-features = ["recipes", "local", "tokio"]
 
 [[test]]
 name = "doc_snippets"
-required-features = ["recipes", "local", "tokio", "transit", "aws-sdk-credentials", "gcp-google-cloud-auth", "azure-identity"]
+required-features = ["recipes", "local", "tokio", "transit", "tower", "aws-sdk-credentials", "gcp-google-cloud-auth", "azure-identity"]
 
 [[example]]
 name = "field_encryption"
@@ -133,6 +145,11 @@ required-features = ["recipes", "local", "tokio"]
 [[example]]
 name = "hmac_tokens"
 required-features = ["local", "tokio"]
+
+# Runs against Vault or OpenBao only (VAULT_ADDR / BAO_ADDR): it is about the transport.
+[[example]]
+name = "tower_transport"
+required-features = ["transit", "tower", "reqwest", "tokio"]
 
 [package.metadata.docs.rs]
 all-features = true

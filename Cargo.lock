@@ -145,6 +145,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -275,9 +276,12 @@ version = "0.1.0"
 dependencies = [
  "anykms-core",
  "base64 0.23.1",
+ "bytes",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
  "httpdate",
  "reqwest",
  "rustls",
@@ -287,6 +291,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tokio",
+ "tower",
+ "tower-service",
  "tracing",
  "url",
  "zeroize",
@@ -387,12 +393,18 @@ dependencies = [
 name = "anykms-wasm-tests"
 version = "0.1.0"
 dependencies = [
+ "anykms-aws",
  "anykms-core",
+ "anykms-http",
  "anykms-local",
  "anykms-recipes",
  "base64 0.23.1",
+ "bytes",
+ "http-body 1.1.0",
+ "http-body-util",
  "js-sys",
  "serde_json",
+ "tower-service",
  "wasm-bindgen-test",
 ]
 
@@ -3800,8 +3812,10 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

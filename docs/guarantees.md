@@ -31,6 +31,13 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   (`anykms_http::SendError`): a rejected or mismatched certificate is `Configuration` and not
   retried; DNS, connection, handshake and body failures are `Unavailable`; a timeout (the
   transport's, or a per-request `RequestTimeout` the metadata probes set) is `Timeout`.
+  `TowerTransport` (feature `tower`) adapts any tower `Service`: it sets `content-length`,
+  reads the body into the same bounded zeroizing buffer and passes a boxed `SendError` from the
+  service through unchanged (anything else is `Unavailable`). It has **no timeout of its own**
+  and **cannot control redirects**: the inner service must be configured not to follow them,
+  and a 3xx that comes back is an error for the backend, as always. With the built-in client at
+  the bottom (`ReqwestTransport::into_service`) both are the client's, and its failure classes
+  are kept.
 - **FIPS scope.** KMS operations (encrypt, decrypt, unwrap, sign, MAC) run in the KMS, under its
   own validation. TLS follows a FIPS provider only when one is configured
   (`ReqwestTransportBuilder::crypto_provider`) or installed process-wide through the re-exported
@@ -79,11 +86,29 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   drives `anykms_conformance::run_async` on its own executor and reports the `Report`. Cloudflare
   Workers advance both clocks only across I/O. Without `js`, the target behaves as before (the
   std clock panics on first use); WASI targets have a working clock and never need it. The HTTP
-  backends are **not** supported there yet: the built-in transport needs TLS control the host
-  does not offer. With the `reqwest` feature off (and the `rustls-*` provider features with it)
-  their dependency tree holds no reqwest, hyper or rustls (CI checks this), so a host-specific
-  `HttpTransport` (a `fetch`-based one, say) is the way there; it is tracked in the issue
-  tracker.
+  backends (transit, aws, gcp, azure) and anykms-http have the same `js` feature: with it their
+  clock reads (SigV4 signing time and skew, token and key-metadata expiry, the credential cache)
+  go through `anykms_core::time` too, and with the `reqwest` feature off (and the `rustls-*`
+  provider features with it) their dependency tree holds no reqwest, hyper or rustls. CI checks
+  both, and runs `anykms-aws` over a `TowerTransport` under Node: a signed `Encrypt` on the JS
+  clock. What they need on the host is a transport that runs there: the built-in one needs TLS
+  control the host does not offer, so bring a `fetch`-based tower service (below). The one tokio
+  dependency that remains is its `sync` and `time` types (no runtime), which build for the target.
+- **Cloudflare Workers.** The shape is `TowerTransport::new(tower_worker_fetch::FetchService::new())`,
+  or that service under layers, with `default-features = false`, a backend feature, `tower` and
+  `js`: anykms ships no Workers transport and depends on no Workers crate. Supported **once
+  redirect control ships in `tower-worker-fetch`** (its issue #3): until a Worker's outbound
+  `fetch` can use `redirect: "manual"`, a signed or bearer-authenticated request can be silently
+  redirected, which the built-in transport never allows. What holds on a Worker regardless: TLS
+  is the host's (Cloudflare's edge, the public CAs), so the public cloud KMS endpoints (AWS, GCP,
+  Azure) are reachable, and Vault or OpenBao behind a private CA or client certificates is
+  **not**. Only static or explicitly provided credentials make sense: the metadata servers
+  (IMDS, the GCP metadata server, Azure IMDS) are not reachable from a Worker, so configure
+  credentials explicitly (`AwsProviderBuilder::credentials` with `StaticCredentials`,
+  `Credentials::from_json` or `static_token` for GCP, a `ClientSecret` for Azure) rather than
+  letting a default chain probe them.
+  `TowerTransport` has no timeout, so add one at the service: a `map_request` layer that inserts
+  `tower_worker_fetch::Timeout` (an `AbortSignal.timeout`), which also bounds such a probe.
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
   `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its

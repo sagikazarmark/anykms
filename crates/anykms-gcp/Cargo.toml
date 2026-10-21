@@ -35,6 +35,11 @@ service-account-key = ["dep:aws-lc-rs"]
 tracing = ["dep:tracing", "anykms-http/tracing"]
 # Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
 http2 = ["anykms-http/http2"]
+# `anykms_http::TowerTransport`: any tower `Service` as the transport (`.http_transport(..)`).
+tower = ["anykms-http/tower"]
+# `wasm32-unknown-unknown` on a JS host (Cloudflare Workers): clocks and RNG read the host. Pair it
+# with a transport that runs there (`tower` over a `fetch` service).
+js = ["anykms-core/js", "anykms-http/js", "anykms-recipes/js"]
 # Credentials from Google's official auth library (`Credentials::google_cloud_auth` over a
 # `google_cloud_auth::credentials::AccessTokenCredentials`): AWS- and executable-sourced
 # workload identity federation, `external_account_authorized_user` and whatever else it supports.

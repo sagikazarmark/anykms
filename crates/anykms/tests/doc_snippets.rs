@@ -139,6 +139,26 @@ async fn env_config() -> anyhow::Result<()> {
 }
 
 #[rustfmt::skip]
+async fn tower_stack() -> anyhow::Result<()> {
+    // snippet: docs/guide.md
+    use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
+    use anykms::transit::{EnvConfig, TransitProvider};
+    use tower::ServiceBuilder;
+
+    let service = ServiceBuilder::new()
+        .concurrency_limit(4)
+        .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
+    let server = EnvConfig::vault()
+        .load()?
+        .http_transport(TowerTransport::new(service));
+    let registry = anykms::Registry::builder()
+        .provider(TransitProvider::builder().server("default", server).build()?)
+        .build()?;
+    // end snippet
+    Ok(())
+}
+
+#[rustfmt::skip]
 async fn typed_handles() -> anyhow::Result<()> {
     // snippet: docs/guide.md
     use anykms::transit::TransitProvider;

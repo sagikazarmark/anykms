@@ -101,6 +101,43 @@ never mixed), refuses `*_SKIP_VERIFY`, and accepts `*_CACERT` (a PEM file) or `*
 directory of PEM files). See the [`anykms-transit` docs](https://docs.rs/anykms-transit) for every
 variable.
 
+## A tower stack as the transport
+
+With the `tower` feature, any tower `Service` over `http::Request<Full<Bytes>>` is a transport
+(`anykms_http::TowerTransport`). A service that already has a tower stack puts the built-in
+client at the bottom of it and its own layers (a concurrency limit, a rate limit, instrumentation)
+on top; the backend sends every request, credential fetches included, through the stack:
+
+```rust
+use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
+use anykms::transit::{EnvConfig, TransitProvider};
+use tower::ServiceBuilder;
+
+let service = ServiceBuilder::new()
+    .concurrency_limit(4)
+    .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
+let server = EnvConfig::vault()
+    .load()?
+    .http_transport(TowerTransport::new(service));
+let registry = anykms::Registry::builder()
+    .provider(TransitProvider::builder().server("default", server).build()?)
+    .build()?;
+```
+
+The adapter sets `content-length`, reads the response into the same bounded zeroizing buffer as
+the built-in transport, and keeps the client's failure classes. It has **no timeout of its own**
+(`tower::timeout` is a layer you add; a `map_err` layer that boxes a `SendError::Timeout` keeps
+the class) and **cannot control redirects**: when the service is not the built-in client, configure
+it not to follow them. A request's `RequestTimeout` extension reaches the service, which may
+honour it (the built-in client does).
+
+The same adapter is how anykms runs where reqwest cannot, such as Cloudflare Workers: with
+`default-features = false`, a backend feature, `tower` and `js` (the host's clocks and RNG), the
+dependency tree holds no reqwest, hyper or rustls, and
+`TowerTransport::new(tower_worker_fetch::FetchService::new())` carries the requests over the
+host's `fetch`. See [guarantees](guarantees.md) for what holds on a Worker (host TLS, explicit
+credentials, and what the support still waits on).
+
 ## Typed handles
 
 Typed handles give compile-time capabilities:
