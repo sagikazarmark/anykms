@@ -4,10 +4,10 @@ use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anykms_core::{Error, ErrorKind, Operation, Result};
-use zeroize::Zeroizing;
+use anykms_http::HttpTransport;
+use anykms_http::url::Url;
 
 use crate::BACKEND;
 use crate::auth::Login;
@@ -25,45 +25,6 @@ pub enum Flavor {
     OpenBao,
 }
 
-/// HTTP protocol version.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HttpVersion {
-    /// HTTP/1.1 (default). Spreads connections across nodes behind a load balancer.
-    #[default]
-    Http1,
-    /// HTTP/2. Multiplexes every request over one connection, so behind a load balancer all
-    /// traffic sticks to one node. Requires the `http2` feature.
-    ///
-    /// HTTP/2 is negotiated with TLS ALPN, so it applies to `https://` servers only. A plain
-    /// `http://` loopback server (see [`ServerConfig::allow_loopback_http`]) is always spoken to
-    /// over HTTP/1.1: anykms does not use cleartext HTTP/2 (h2c prior knowledge), which agents
-    /// and proxies commonly do not accept.
-    Http2,
-}
-
-/// Proxy configuration. Environment proxies (`HTTPS_PROXY`, ...) are ignored unless configured
-/// explicitly.
-#[non_exhaustive]
-#[derive(Clone, Default, PartialEq, Eq)]
-pub enum Proxy {
-    /// Connect directly.
-    #[default]
-    None,
-    /// Use this proxy for all requests (refused for `http://` servers).
-    Url(String),
-}
-
-impl fmt::Debug for Proxy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Proxy::None => f.write_str("None"),
-            // Proxy URLs may carry credentials; print only scheme, host and port.
-            Proxy::Url(u) => write!(f, "Url({})", anykms_http::redact::url_origin(u)),
-        }
-    }
-}
-
 /// One Vault or OpenBao server.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -74,15 +35,7 @@ pub struct ServerConfig {
     pub(crate) namespace: Option<String>,
     pub(crate) allowed_namespaces: Vec<String>,
     pub(crate) allowed_mounts: Option<Vec<String>>,
-    pub(crate) ca_pem: Option<Vec<u8>>,
-    pub(crate) client_identity: Option<(Vec<u8>, Zeroizing<Vec<u8>>)>,
-    pub(crate) crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
-    pub(crate) connect_timeout: Duration,
-    pub(crate) request_timeout: Duration,
-    pub(crate) pool_idle_timeout: Duration,
-    pub(crate) tcp_keepalive: Duration,
-    pub(crate) http_version: HttpVersion,
-    pub(crate) proxy: Proxy,
+    pub(crate) http_transport: Option<Arc<dyn HttpTransport>>,
     pub(crate) allow_loopback_http: bool,
     pub(crate) max_response_bytes: usize,
 }
@@ -97,13 +50,9 @@ impl fmt::Debug for ServerConfig {
             .field("namespace", &self.namespace)
             .field("allowed_namespaces", &self.allowed_namespaces)
             .field("allowed_mounts", &self.allowed_mounts)
-            .field("ca_pem", &self.ca_pem.is_some())
-            .field("client_identity", &self.client_identity.is_some())
-            .field("crypto_provider", &self.crypto_provider.is_some())
-            .field("connect_timeout", &self.connect_timeout)
-            .field("request_timeout", &self.request_timeout)
-            .field("http_version", &self.http_version)
-            .field("proxy", &self.proxy)
+            .field("http_transport", &self.http_transport.is_some())
+            .field("allow_loopback_http", &self.allow_loopback_http)
+            .field("max_response_bytes", &self.max_response_bytes)
             .finish()
     }
 }
@@ -145,15 +94,7 @@ impl ServerConfig {
             namespace: None,
             allowed_namespaces: Vec::new(),
             allowed_mounts: None,
-            ca_pem: None,
-            client_identity: None,
-            crypto_provider: None,
-            connect_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(10),
-            pool_idle_timeout: Duration::from_secs(50),
-            tcp_keepalive: Duration::from_secs(30),
-            http_version: HttpVersion::Http1,
-            proxy: Proxy::None,
+            http_transport: None,
             allow_loopback_http: false,
             max_response_bytes: 32 * 1024 * 1024,
         }
@@ -222,82 +163,22 @@ impl ServerConfig {
         self
     }
 
-    /// Trusted CA certificates (PEM). **Replaces** the system roots; there is no skip-verify.
-    pub fn ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.ca_pem = Some(pem.into());
+    /// The HTTP transport this server is reached through. It owns TLS trust and client
+    /// certificates, the crypto provider, timeouts, proxying and the HTTP version: configure them
+    /// on [`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder) (the built-in
+    /// transport, feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
+    /// `ReqwestTransport` is built; without the `reqwest` feature, building the provider fails
+    /// with `Configuration`. One transport may be shared by several servers and providers.
+    pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
+        self.http_transport = Some(Arc::new(transport));
         self
     }
 
-    /// Reads trusted CA certificates (PEM) from a file now, like `VAULT_CACERT` in
-    /// [`EnvConfig`], and uses them as [`ca_pem`](Self::ca_pem) does. A file that cannot be read
-    /// fails with `Configuration`, naming the path and the reason; the certificates are parsed
-    /// when the provider is built.
-    pub fn ca_file(self, path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(self.ca_pem(read_ca_file(path.as_ref(), "ca_file")?))
-    }
-
-    /// Client certificate chain and private key (PEM) for mTLS. The key may be PKCS#8
-    /// (`PRIVATE KEY`), PKCS#1 (`RSA PRIVATE KEY`) or SEC1 (`EC PRIVATE KEY`); encrypted keys are
-    /// refused.
-    ///
-    /// The PEM is kept in a zeroizing buffer and decoded into zeroizing buffers; rustls wipes the
-    /// DER after loading it. The parsed signing key then lives inside the crypto provider: aws-lc
-    /// clears it when freed, ring does not. Pass an owned `Vec` (not a slice) so no unwiped copy
-    /// is made here.
-    pub fn client_identity(
-        mut self,
-        cert_pem: impl Into<Vec<u8>>,
-        key_pem: impl Into<Vec<u8>>,
-    ) -> Self {
-        self.client_identity = Some((cert_pem.into(), Zeroizing::new(key_pem.into())));
-        self
-    }
-
-    /// The rustls crypto provider for this server's TLS connections. Overrides every other
-    /// source: without it, the process default
-    /// ([`CryptoProvider::install_default`](rustls::crypto::CryptoProvider::install_default)) is
-    /// used, then aws-lc-rs with `rustls-aws-lc-rs`, then ring with `rustls-ring` (the default).
-    /// Without any of these, building the provider fails with `Configuration`.
-    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
-        self.crypto_provider = Some(provider);
-        self
-    }
-
-    /// TCP connect timeout (default 2 s).
-    pub fn connect_timeout(mut self, d: Duration) -> Self {
-        self.connect_timeout = d;
-        self
-    }
-
-    /// Per-attempt request timeout (default 10 s).
-    pub fn request_timeout(mut self, d: Duration) -> Self {
-        self.request_timeout = d;
-        self
-    }
-
-    /// Idle pooled connections are closed after this (default 50 s, below common LB idle timeouts).
-    pub fn pool_idle_timeout(mut self, d: Duration) -> Self {
-        self.pool_idle_timeout = d;
-        self
-    }
-
-    /// TCP keepalive interval (default 30 s).
-    pub fn tcp_keepalive(mut self, d: Duration) -> Self {
-        self.tcp_keepalive = d;
-        self
-    }
-
-    /// HTTP version (default HTTP/1.1). [`HttpVersion::Http2`] only takes effect over `https://`;
-    /// plain-HTTP loopback servers always use HTTP/1.1.
-    pub fn http_version(mut self, v: HttpVersion) -> Self {
-        self.http_version = v;
-        self
-    }
-
-    /// Proxy (default: none, environment ignored).
-    pub fn proxy(mut self, p: Proxy) -> Self {
-        self.proxy = p;
-        self
+    /// Whether a transport is set ([`http_transport`](Self::http_transport), or one [`EnvConfig`]
+    /// built from the TLS variables). Without one the server builds a default `ReqwestTransport`;
+    /// an application that shares one transport across providers sets it only then.
+    pub fn has_http_transport(&self) -> bool {
+        self.http_transport.is_some()
     }
 
     /// Allows plain `http://` for literal loopback addresses (`127.0.0.0/8`, `::1`), e.g. a
@@ -324,8 +205,8 @@ impl ServerConfig {
         self.flavor
     }
 
-    pub(crate) fn validate(&self) -> Result<reqwest::Url> {
-        let url = reqwest::Url::parse(&self.address)
+    pub(crate) fn validate(&self) -> Result<Url> {
+        let url = Url::parse(&self.address)
             .map_err(|_| config_err("server address is not a valid URL"))?;
         if !url.username().is_empty() || url.password().is_some() {
             return Err(config_err("server address must not contain credentials"));
@@ -337,8 +218,8 @@ impl ServerConfig {
             "https" => {}
             "http" => {
                 let loopback = match url.host() {
-                    Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-                    Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
+                    Some(anykms_http::url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
+                    Some(anykms_http::url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
                     _ => false,
                 };
                 if !loopback {
@@ -349,11 +230,6 @@ impl ServerConfig {
                 if !self.allow_loopback_http {
                     return Err(config_err(
                         "plain http:// requires ServerConfig::allow_loopback_http()",
-                    ));
-                }
-                if self.proxy != Proxy::None {
-                    return Err(config_err(
-                        "a proxy cannot be used with a plain http:// server",
                     ));
                 }
             }
@@ -380,24 +256,14 @@ impl ServerConfig {
                 ));
             }
         }
-        // Zero would make every request fail (or every response too large) with a transient-
-        // looking error; refuse it up front instead.
         if let Some(l) = &self.login {
             l.validate()?;
         }
-        if self.connect_timeout.is_zero() || self.request_timeout.is_zero() {
-            return Err(config_err(
-                "connect_timeout and request_timeout must be greater than zero",
-            ));
-        }
+        // Zero would make every response too large with a transient-looking error; refuse it up
+        // front instead.
         if self.max_response_bytes < anykms_http::client::MIN_RESPONSE_BYTES {
             return Err(config_err(
                 "max_response_bytes must be at least 64 KiB (anykms_http::client::MIN_RESPONSE_BYTES)",
-            ));
-        }
-        if self.http_version == HttpVersion::Http2 && !cfg!(feature = "http2") {
-            return Err(config_err(
-                "HttpVersion::Http2 requires the `http2` feature",
             ));
         }
         Ok(url)
@@ -486,7 +352,7 @@ fn flag(v: Option<String>) -> bool {
     v.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-/// Reads a `*_CACERT` (or [`ServerConfig::ca_file`]) PEM file; `var` names the setting in errors.
+/// Reads a `*_CACERT` PEM file; `var` names the setting in errors.
 fn read_ca_file(path: &std::path::Path, var: &str) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| file_err("CA certificate file", var, path, e))
 }
@@ -742,12 +608,38 @@ impl EnvConfig {
             c = c.namespace(ns);
         }
         // As in the Vault CLI, CACERT takes precedence over CAPATH.
-        if let Some(path) = var("CACERT") {
-            c = c.ca_pem(read_ca_file(path.as_ref(), &format!("{prefix}_CACERT"))?);
-        } else if let Some(dir) = var("CAPATH") {
-            c = c.ca_pem(read_ca_dir(&dir, &format!("{prefix}_CAPATH"))?);
+        let tls = EnvTls::load(prefix, &var)?;
+        if let Some(tls) = tls {
+            c.http_transport = Some(tls.transport()?);
         }
-        match (var("CLIENT_CERT"), var("CLIENT_KEY")) {
+        // Scheme from the parsed URL (case-insensitive); validate() still enforces loopback-only.
+        if Url::parse(&c.address).is_ok_and(|u| u.scheme() == "http") {
+            c = c.allow_loopback_http();
+        }
+        c.validate()?;
+        Ok(c)
+    }
+}
+
+/// The TLS settings `EnvConfig` reads (`*_CACERT` or `*_CAPATH`, `*_CLIENT_CERT` with
+/// `*_CLIENT_KEY`), which configure the built-in transport.
+#[cfg_attr(not(feature = "reqwest"), allow(dead_code))]
+struct EnvTls {
+    ca_pem: Option<Vec<u8>>,
+    client_identity: Option<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>)>,
+}
+
+impl EnvTls {
+    /// `None` when no TLS variable is set (the default transport then applies).
+    fn load(prefix: &str, var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+        let ca_pem = if let Some(path) = var("CACERT") {
+            Some(read_ca_file(path.as_ref(), &format!("{prefix}_CACERT"))?)
+        } else if let Some(dir) = var("CAPATH") {
+            Some(read_ca_dir(&dir, &format!("{prefix}_CAPATH"))?)
+        } else {
+            None
+        };
+        let client_identity = match (var("CLIENT_CERT"), var("CLIENT_KEY")) {
             (Some(cert), Some(key)) => {
                 let cert = std::fs::read(&cert).map_err(|e| {
                     file_err(
@@ -767,21 +659,48 @@ impl EnvConfig {
                             e,
                         )
                     })?;
-                c.client_identity = Some((cert, key));
+                Some((cert, key))
             }
-            (None, None) => {}
+            (None, None) => None,
             _ => {
                 return Err(config_err(format!(
                     "set both {prefix}_CLIENT_CERT and {prefix}_CLIENT_KEY, or neither"
                 )));
             }
+        };
+        Ok(match (ca_pem, client_identity) {
+            (None, None) => None,
+            (ca_pem, client_identity) => Some(Self {
+                ca_pem,
+                client_identity,
+            }),
+        })
+    }
+
+    /// The built-in transport with these settings (feature `reqwest`); without the feature,
+    /// `Configuration`: TLS settings belong to the transport the application injects.
+    fn transport(self) -> Result<Arc<dyn HttpTransport>> {
+        #[cfg(feature = "reqwest")]
+        {
+            let mut b = anykms_http::ReqwestTransport::builder();
+            if let Some(pem) = self.ca_pem {
+                b = b.ca_pem(pem);
+            }
+            if let Some((cert, mut key)) = self.client_identity {
+                // The key moves out of its zeroizing buffer into the builder's.
+                b = b.client_identity(cert, std::mem::take(&mut *key));
+            }
+            Ok(Arc::new(b.build()?))
         }
-        // Scheme from the parsed URL (case-insensitive); validate() still enforces loopback-only.
-        if reqwest::Url::parse(&c.address).is_ok_and(|u| u.scheme() == "http") {
-            c = c.allow_loopback_http();
+        #[cfg(not(feature = "reqwest"))]
+        {
+            let Self { .. } = self;
+            Err(config_err(
+                "TLS variables (*_CACERT, *_CAPATH, *_CLIENT_CERT, *_CLIENT_KEY) configure the \
+                 built-in transport, which needs the `reqwest` feature; configure TLS on the \
+                 transport passed to ServerConfig::http_transport instead",
+            ))
         }
-        c.validate()?;
-        Ok(c)
     }
 }
 
@@ -929,8 +848,6 @@ mod tests {
         let base = || ServerConfig::new("https://vault.example:8200", Flavor::Vault);
         assert!(base().validate().is_ok());
         for (c, what) in [
-            (base().connect_timeout(Duration::ZERO), "connect_timeout"),
-            (base().request_timeout(Duration::ZERO), "request_timeout"),
             (base().max_response_bytes(0), "max_response_bytes"),
             (
                 base().max_response_bytes(64 * 1024 - 1),
@@ -1109,9 +1026,45 @@ mod tests {
     // A self-signed certificate (CN=anykms test CA), used only as test data.
     const TEST_CA: &str = include_str!("../tests/data/ca.pem");
 
+    /// The CA PEM `EnvTls` would hand the transport, from `vars`.
+    fn env_ca_pem(vars: &[(&str, &str)]) -> Option<Vec<u8>> {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let get = |n: &str| vars.get(&format!("VAULT_{n}")).cloned();
+        EnvTls::load("VAULT", &get).unwrap().and_then(|t| t.ca_pem)
+    }
+
+    /// The TLS variables build a transport of their own, which a shared one must not replace;
+    /// without them the server has none and takes the default (or a shared one).
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn tls_variables_set_the_transport() {
+        let base = [
+            ("VAULT_ADDR", "https://vault.example:8200"),
+            ("VAULT_TOKEN", "t"),
+        ];
+        assert!(
+            !load(&EnvConfig::vault(), &base)
+                .unwrap()
+                .has_http_transport()
+        );
+        let dir = scratch("tls-vars");
+        let ca = dir.join("ca.pem");
+        write(&ca, TEST_CA.as_bytes());
+        let mut vars = base.to_vec();
+        vars.push(("VAULT_CACERT", ca.to_str().unwrap()));
+        assert!(
+            load(&EnvConfig::vault(), &vars)
+                .unwrap()
+                .has_http_transport()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn capath_loads_every_certificate_file() {
-        use rustls_pki_types::pem::PemObject as _;
         let base = [
             ("VAULT_ADDR", "https://vault.example:8200"),
             ("VAULT_TOKEN", "t"),
@@ -1122,10 +1075,11 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         let mut vars = base.to_vec();
         vars.push(("VAULT_CAPATH", dir.to_str().unwrap()));
-        let c = load(&EnvConfig::vault(), &vars).unwrap();
-        let pem = c.ca_pem.as_deref().unwrap();
+        load(&EnvConfig::vault(), &vars).unwrap();
+        let pem = env_ca_pem(&vars).unwrap();
+        use rustls_pki_types::pem::PemObject as _;
         assert_eq!(
-            rustls_pki_types::CertificateDer::pem_slice_iter(pem).count(),
+            rustls_pki_types::CertificateDer::pem_slice_iter(&pem).count(),
             2,
             "both files, subdirectory skipped"
         );
@@ -1139,8 +1093,8 @@ mod tests {
         // CACERT takes precedence (as in the Vault CLI).
         let ca = dir.join("a.pem");
         vars.push(("VAULT_CACERT", ca.to_str().unwrap()));
-        let c = load(&EnvConfig::vault(), &vars).unwrap();
-        assert_eq!(c.ca_pem.as_deref(), Some(TEST_CA.as_bytes()));
+        load(&EnvConfig::vault(), &vars).unwrap();
+        assert_eq!(env_ca_pem(&vars).as_deref(), Some(TEST_CA.as_bytes()));
 
         // Empty and missing directories fail.
         let empty = scratch("capath-empty");
@@ -1207,33 +1161,6 @@ mod tests {
             "{m}"
         );
         assert!(!m.contains("BEGIN"), "{m}");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn ca_file_reads_like_cacert() {
-        let dir = scratch("ca-file");
-        let ca = dir.join("ca.pem");
-        write(&ca, TEST_CA.as_bytes());
-        let c = ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-            .ca_file(&ca)
-            .unwrap();
-        assert_eq!(c.ca_pem.as_deref(), Some(TEST_CA.as_bytes()));
-
-        let missing = dir.join("missing.pem");
-        let e = ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-            .ca_file(&missing)
-            .unwrap_err();
-        assert_eq!(e.kind(), ErrorKind::Configuration);
-        let m = e.to_string();
-        assert!(
-            m.contains(&format!(
-                "cannot read the CA certificate file {} (ca_file): ",
-                missing.display()
-            )) && m.ends_with(": No such file or directory"),
-            "{m}"
-        );
-        assert!(std::error::Error::source(&e).is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

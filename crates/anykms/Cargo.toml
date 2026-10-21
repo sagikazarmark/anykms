@@ -14,7 +14,7 @@ categories = ["cryptography", "api-bindings"]
 exclude = ["tests/doc_snippets.rs"]
 
 [features]
-default = ["recipes", "rsa-aws-lc-rs", "tokio", "rustls-aws-lc-rs", "gcp-service-account-key"]
+default = ["recipes", "rsa-aws-lc-rs", "tokio", "reqwest", "rustls-aws-lc-rs", "gcp-service-account-key"]
 # Every recipe (envelope encryption, JOSE, emulated data keys, local verification). Depend on
 # anykms-recipes directly to pick its `jose` and `envelope` features one by one.
 recipes = ["dep:anykms-recipes", "anykms-recipes/jose", "anykms-recipes/envelope"]
@@ -25,10 +25,16 @@ recipes = ["dep:anykms-recipes", "anykms-recipes/jose", "anykms-recipes/envelope
 # `default-features = false, features = ["recipes", "rsa-rustcrypto", "tokio"]`.
 rsa-rustcrypto = ["recipes", "anykms-recipes/rsa-rustcrypto", "anykms-aws?/rsa-rustcrypto", "anykms-gcp?/rsa-rustcrypto", "anykms-azure?/rsa-rustcrypto"]
 rsa-aws-lc-rs = ["recipes", "anykms-recipes/rsa-aws-lc-rs", "anykms-aws?/rsa-aws-lc-rs", "anykms-gcp?/rsa-aws-lc-rs", "anykms-azure?/rsa-aws-lc-rs"]
-transit = ["dep:anykms-transit"]
+transit = ["dep:anykms-transit", "dep:anykms-http"]
 # AWS KMS (`aws-kms://` keys). Its RSA key-wrapping keys wrap locally with the RSA backend of
 # `rsa-aws-lc-rs` / `rsa-rustcrypto`.
 aws = ["dep:anykms-aws", "dep:anykms-http"]
+# The built-in HTTP transport of the HTTP backends (transit, aws, gcp, azure): reqwest over rustls
+# (`anykms_http::ReqwestTransport`). A default feature. Without it, every HTTP backend needs a
+# transport through its builder (`.http_transport(..)`), and `with_default_providers` skips the
+# HTTP backends; `default-features = false` with a backend feature yields a reqwest-free
+# dependency tree (a wasm32 build with its own transport, say).
+reqwest = ["anykms-http?/reqwest", "anykms-transit?/reqwest", "anykms-aws?/reqwest", "anykms-gcp?/reqwest", "anykms-azure?/reqwest"]
 # AWS SDK credentials for `aws` (`anykms-aws/sdk-credentials`: `credentials::SdkCredentials` over an
 # `aws-config` provider, for SSO, role chaining and `credential_process`).
 aws-sdk-credentials = ["aws", "anykms-aws/sdk-credentials"]
@@ -44,7 +50,8 @@ gcp-service-account-key = ["anykms-gcp?/service-account-key"]
 # google-cloud-auth credentials for `gcp` (`anykms-gcp/google-cloud-auth`:
 # `Credentials::google_cloud_auth`, for credential types not built in).
 gcp-google-cloud-auth = ["gcp", "anykms-gcp/google-cloud-auth"]
-# TLS crypto provider for the HTTP backends (transit, aws, gcp, azure; no effect without one).
+# TLS crypto provider of the built-in transport (`reqwest`) for the HTTP backends (transit, aws,
+# gcp, azure; no effect without one).
 # `rustls-aws-lc-rs` is a default feature (aws-lc-sys builds C and assembly: a C compiler is
 # needed); for ring: `default-features = false, features = ["transit", "rustls-ring"]` plus the
 # other features you need (`rsa-rustcrypto` rather than `rsa-aws-lc-rs` to leave aws-lc out
@@ -57,7 +64,7 @@ azure = ["dep:anykms-azure", "dep:anykms-http"]
 # Azure SDK credentials for `azure` (`anykms-azure/azure-identity`: `AzureIdentity` over an
 # `azure_identity` credential, e.g. the Azure CLI or a certificate).
 azure-identity = ["azure", "anykms-azure/azure-identity"]
-# Allow HTTP/2 (`HttpVersion::Http2`) on every HTTP backend that is enabled.
+# Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`).
 http2 = ["anykms-transit?/http2", "anykms-aws?/http2", "anykms-gcp?/http2", "anykms-azure?/http2"]
 local = ["dep:anykms-local"]
 tracing = ["dep:tracing", "anykms-core/tracing", "anykms-transit?/tracing", "anykms-aws?/tracing", "anykms-gcp?/tracing", "anykms-azure?/tracing"]
@@ -75,7 +82,8 @@ anykms-aws = { workspace = true, optional = true }
 anykms-gcp = { workspace = true, optional = true }
 anykms-azure = { workspace = true, optional = true }
 anykms-local = { workspace = true, optional = true }
-# Tells a cloud provider's empty system trust store from its other errors (`with_default_providers`).
+# The transport seam and the built-in transport the default providers share
+# (`with_default_providers`).
 anykms-http = { workspace = true, optional = true }
 # Not the workspace definition, which enables rt-multi-thread and macros for tests and binaries.
 tokio = { version = "1", default-features = false, features = ["time"], optional = true }

@@ -313,20 +313,23 @@ async fn trace_output_and_errors_never_contain_secrets() {
 /// secret access key, a session token, or anything but the origin of a configured URL.
 #[test]
 fn debug_output_redacts_proxies_secrets_and_tokens() {
+    use anykms_aws::AwsProviderBuilder;
+    use anykms_aws::anykms_http::ReqwestTransport;
     use anykms_aws::credentials::{
         ContainerCredentials, DefaultChain, EnvCredentials, ImdsCredentials, ProfileCredentials,
         StaticCredentials,
     };
-    use anykms_aws::{AwsProviderBuilder, Proxy};
     const USER: &str = "PROXYUSER";
     const PASS: &str = "PROXYPASS";
     const QUERY: &str = "URLQUERYSECRET";
     let with_userinfo = |host: &str| format!("https://{USER}:{PASS}@{host}/p?q={QUERY}");
+    // Proxies live on the transport: its builder redacts the URL's userinfo and query.
     let proxy = || {
-        Proxy::Url(format!(
+        ReqwestTransport::builder().proxy(Some(format!(
             "http://{USER}:{PASS}@proxy.example:3128/?t={QUERY}"
-        ))
+        )))
     };
+    let transport = || proxy().require_roots(false).build().unwrap();
     let secrets = [USER, PASS, QUERY, SECRET, TOKEN, JWT, GRANT];
     let env = |k: &str| -> Option<String> {
         match k {
@@ -343,19 +346,20 @@ fn debug_output_redacts_proxies_secrets_and_tokens() {
     let check = |v: &dyn std::fmt::Debug| anykms_testkit::assert_debug_redacts(v, &secrets);
 
     check(&proxy());
+    check(&transport());
     check(
         &AwsProvider::builder()
-            .proxy(proxy())
+            .http_transport(transport())
             .endpoint("eu-west-1", with_userinfo("vpce.example"))
             .endpoint_url(with_userinfo("kms.example"))
             .credentials(StaticCredentials::new(creds())),
     );
     let from_env = AwsProviderBuilder::from_env_with(env).unwrap();
     check(&from_env);
-    check(&from_env.proxy(proxy()).build().unwrap());
+    check(&from_env.http_transport(transport()).build().unwrap());
     check(
         &AwsProvider::builder()
-            .proxy(proxy())
+            .http_transport(transport())
             .endpoint_url("https://kms.example/base")
             .credentials(StaticCredentials::new(creds()))
             .build()

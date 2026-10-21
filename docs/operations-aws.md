@@ -251,15 +251,20 @@ process environment; the credential chain takes its variables from that lookup t
   `AWS_USE_DUALSTACK_ENDPOINT=true`).
 - VPC interface endpoints: `.endpoint("eu-west-1", "https://vpce-…")` per region, or
   `AWS_ENDPOINT_URL_KMS` for all. Requests are signed for the ARN's region either way.
-- TLS uses rustls with the system roots (or `AWS_CA_BUNDLE` / `ca_pem`); verification cannot be
-  disabled. The KMS client is built by `build()`, so missing roots, a bad `ca_pem` or no crypto
-  provider are `Configuration` errors there, not on the first request. Plain `http://` is accepted only for literal loopback IPs with
-  `allow_loopback_http()` (`ANYKMS_AWS_ALLOW_LOOPBACK_HTTP=1`), for emulators.
-- No proxy unless configured (`Proxy::Url`); proxy environment variables are ignored. Redirects
-  are never followed. Timeouts: 2 s connect, 10 s per request (`connect_timeout`,
-  `request_timeout`). Responses are capped at 256 KiB (`max_response_bytes`, at least 64 KiB).
-  `Debug` output of the configuration prints URLs (proxy, endpoints) as `scheme://host:port`
-  only.
+- Every request (KMS, STS, IMDS, the container endpoint) goes through one HTTP transport:
+  `AwsProviderBuilder::http_transport`, or a default `ReqwestTransport`. TLS trust (system roots,
+  or `ReqwestTransportBuilder::ca_pem`; `AWS_CA_BUNDLE` builds such a transport), the crypto
+  provider, proxying and timeouts are its settings; verification cannot be disabled. The default
+  transport is built by `build()`, so missing roots, a bad CA bundle or no crypto provider are
+  `Configuration` errors there, not on the first request. Plain `http://` is accepted only for
+  literal loopback IPs with `allow_loopback_http()` (`ANYKMS_AWS_ALLOW_LOOPBACK_HTTP=1`), for
+  emulators.
+- The built-in transport uses no proxy unless configured (`ReqwestTransportBuilder::proxy`), and
+  never for link-local hosts (IMDS, ECS); proxy environment variables are ignored. Redirects are
+  never followed. Timeouts: 2 s connect, 10 s per request (`connect_timeout`, `request_timeout`
+  on the transport builder); IMDS and the link-local container endpoint carry a 2 s per-request
+  timeout. Responses are capped at 256 KiB (`max_response_bytes`, at least 64 KiB). `Debug`
+  output of the configuration prints URLs (proxy, endpoints) as `scheme://host:port` only.
 
 ## Runbook: `ErrorKind` → AWS cause → action
 
@@ -271,7 +276,7 @@ process environment; the credential chain takes its variables from that lookup t
 | `VerificationFailed` | `KMSInvalidSignatureException`, `KMSInvalidMacException`, `SignatureValid=false` | Invalid input; do not retry |
 | `KeyStateInvalid` | `DisabledException`, `KMSInvalidStateException` (pending deletion or import, failed custom key store); public keys of a key whose `DescribeKey` state is not `Enabled` | Enable the key or cancel its deletion |
 | `Unavailable` | `KeyUnavailableException`, public keys of a key in state `Creating`, `Updating` or `Unavailable`, custom-key-store / XKS / CloudHSM exceptions, `KMSInternalException`, `DependencyTimeoutException`, 5xx, clock skew, unreachable credential endpoints | Retried by `Retry`; persistent: check the key store, network, NTP |
-| `Timeout` | client connect or request timeout | Network path, VPC endpoint, `request_timeout` |
+| `Timeout` | client connect or request timeout | Network path, VPC endpoint, the transport's `request_timeout` |
 | `Throttled` | `ThrottlingException` | Back off (`Retry`); reduce request rates; request a quota increase |
 | `Unauthenticated` | `UnrecognizedClientException`, `InvalidClientTokenId`, `ExpiredTokenException`, `InvalidSignatureException`, STS `InvalidIdentityToken` / `AccessDenied` | Check the credential source, the role trust policy, the clock |
 | `PermissionDenied` | `AccessDeniedException` | Grant the action in the key policy (see above) |

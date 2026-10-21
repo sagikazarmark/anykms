@@ -77,14 +77,15 @@ pub struct Admin {
 impl Admin {
     pub fn new(base: impl Into<String>, token: impl Into<String>) -> Self {
         Self {
-            http: anykms_http::client::ClientOptions::new()
-                .request_timeout(Duration::from_secs(60))
-                .build(
-                    "fixture",
+            // A test-side admin client (not the code under test).
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .use_preconfigured_tls(
                     anykms_http::tls::TlsOptions::new()
                         .build("fixture")
                         .expect("TLS"),
                 )
+                .build()
                 .expect("client"),
             base: base.into().trim_end_matches('/').to_owned(),
             token: token.into(),

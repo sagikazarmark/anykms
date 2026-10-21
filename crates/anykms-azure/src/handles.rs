@@ -15,8 +15,8 @@ use anykms_core::{
     KeyState, KeyTypeCheck, KeyVersion, KeyWrap, Operation, Preflight, PublicKey, PublicKeys,
     Result, Signature, SignatureAlgorithm,
 };
+use anykms_http::http::Method;
 use base64::Engine as _;
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -206,7 +206,7 @@ impl KeyCtx {
             .map(|(_, b)| b.clone())
     }
 
-    fn url(&self, version: Option<&str>, action: Option<&str>) -> Result<reqwest::Url> {
+    fn url(&self, version: Option<&str>, action: Option<&str>) -> Result<anykms_http::url::Url> {
         let mut segs = vec!["keys", self.uri.name()];
         segs.extend(version);
         segs.extend(action);
@@ -540,8 +540,12 @@ impl KeyCtx {
     }
 
     /// A `nextLink`, followed only on the same scheme, host and path (else the list ends).
-    fn next_link(&self, current: &reqwest::Url, next: &str) -> Option<reqwest::Url> {
-        let n = reqwest::Url::parse(next).ok()?;
+    fn next_link(
+        &self,
+        current: &anykms_http::url::Url,
+        next: &str,
+    ) -> Option<anykms_http::url::Url> {
+        let n = anykms_http::url::Url::parse(next).ok()?;
         let same = n.scheme() == current.scheme()
             && n.host_str() == current.host_str()
             && n.port_or_known_default() == current.port_or_known_default()

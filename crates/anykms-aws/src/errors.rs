@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use anykms_core::{BackendDetail, Error, ErrorKind, Operation, ServerMessage};
+use anykms_http::http::HeaderMap;
 use anykms_http::redact::Pinned;
-use reqwest::header::HeaderMap;
 
 use crate::BACKEND;
 

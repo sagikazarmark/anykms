@@ -426,24 +426,29 @@ async fn spans_follow_the_shared_schema() {
 /// secret or a token.
 #[test]
 fn debug_output_redacts_proxies_secrets_and_tokens() {
-    use anykms_azure::{AccessToken, AzureOptions, AzureProviderBuilder, Proxy};
+    use anykms_azure::anykms_http::ReqwestTransport;
+    use anykms_azure::{AccessToken, AzureOptions, AzureProviderBuilder};
     const USER: &str = "PROXYUSER";
     const PASS: &str = "PROXYPASS";
     const QUERY: &str = "URLQUERYSECRET";
     const HEADER: &str = "HYGIENE-IDENTITY-HEADER-0123456";
+    // Proxies live on the transport: its builder redacts the URL's userinfo and query.
     let proxy = || {
-        Proxy::Url(format!(
-            "http://{USER}:{PASS}@proxy.example:3128/?t={QUERY}"
-        ))
+        ReqwestTransport::builder()
+            .require_roots(false)
+            .proxy(Some(format!(
+                "http://{USER}:{PASS}@proxy.example:3128/?t={QUERY}"
+            )))
     };
     let secrets = [USER, PASS, QUERY, TOKEN, SECRET, FEDERATED, HEADER];
     let check = |v: &dyn std::fmt::Debug| anykms_testkit::assert_debug_redacts(v, &secrets);
 
     check(&proxy());
+    check(&proxy().build().unwrap());
     let builder = || {
         AzureProviderBuilder::default()
             .credential(StaticToken::new(TOKEN))
-            .proxy(proxy())
+            .http_transport(proxy().build().unwrap())
             .test_host(TestHost::loopback_http("127.0.0.1:8480", SCOPE))
     };
     check(&builder());

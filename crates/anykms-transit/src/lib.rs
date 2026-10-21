@@ -56,10 +56,16 @@
 //!   `ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE=1` (see [`FileToken`]).
 //! - **Key strength.** `aes128-gcm96` keys work as KEKs and for data keys but wrap 256-bit data
 //!   keys at 128-bit strength; prefer `aes256-gcm96` (see [`TransitAeadKey`]).
-//! - **Transport.** No redirects are followed (a standby's 307 would otherwise receive the token
-//!   and body). TLS uses rustls (see [TLS crypto provider](#tls-crypto-provider)); `ca_pem`
-//!   replaces the system roots and there is no way to skip verification. Plain `http://` is
-//!   allowed only for literal loopback IPs. A rejected server certificate (unknown issuer, name
+//! - **Transport.** Every request goes through one [`HttpTransport`](anykms_http::HttpTransport):
+//!   [`ServerConfig::http_transport`], or a default [`ReqwestTransport`](anykms_http::ReqwestTransport)
+//!   (feature `reqwest`). TLS trust, client certificates (mTLS), the crypto provider, proxying,
+//!   timeouts and the HTTP version are the transport's settings
+//!   ([`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder)); `EnvConfig` builds one
+//!   from `VAULT_CACERT`, `VAULT_CAPATH`, `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY`. The built-in
+//!   transport follows no redirects (a standby's 307 would otherwise receive the token and body),
+//!   uses rustls (see [TLS crypto provider](#tls-crypto-provider)), and `ca_pem` replaces the
+//!   system roots with no way to skip verification. Plain `http://` is allowed only for literal
+//!   loopback IPs. A rejected server certificate (unknown issuer, name
 //!   mismatch, expired) or client certificate is `Configuration`, not retryable; DNS failures
 //!   ("DNS lookup failed") and refused or reset connections are `Unavailable`.
 //! - **RSA-PSS salt length.** Signing and verification always send `salt_length=hash` (RFC 7518
@@ -81,48 +87,52 @@
 //!   [`FileToken`] name the path and the I/O reason, never the contents. Vault and OpenBao send
 //!   no request id with error responses (only success bodies carry `request_id`), so
 //!   [`BackendDetail::request_id`](anykms_core::BackendDetail) is never set by this crate.
-//! - **Runtime.** Requires a tokio runtime (reqwest); called outside one, an operation fails
-//!   with `Configuration` instead of panicking.
+//! - **Runtime.** The built-in transport requires a tokio runtime; called outside one, an
+//!   operation fails with `Configuration` instead of panicking, before the token source is asked.
 //!
 //! # TLS crypto provider
 //!
-//! rustls needs a crypto provider. Each server takes the first of:
+//! rustls needs a crypto provider. The built-in transport takes the first of:
 //!
-//! 1. [`ServerConfig::crypto_provider`], set per server;
+//! 1. [`ReqwestTransportBuilder::crypto_provider`](anykms_http::ReqwestTransportBuilder::crypto_provider);
 //! 2. the process default, installed by the application with
 //!    [`CryptoProvider::install_default`] (e.g. a FIPS build of aws-lc-rs);
 //! 3. aws-lc-rs, with the `rustls-aws-lc-rs` feature (default; also when `rustls-ring` is
 //!    enabled too: features unify, so this is not an error);
 //! 4. ring, with the `rustls-ring` feature.
 //!
-//! With none of these, building the server fails with `Configuration`. An installed process
+//! With none of these, building the transport fails with `Configuration`. An installed process
 //! default therefore always wins over a feature, including one enabled by default somewhere in
 //! the dependency graph. With the `tracing` feature a debug event names the provider chosen.
-//! The provider is chosen per server and never installed process-wide. reqwest is
+//! The provider is chosen per transport and never installed process-wide. reqwest is
 //! built with `rustls-no-provider`, so only the selected provider is linked: by default ring is
 //! not in the dependency tree. aws-lc-rs builds C and assembly (aws-lc-sys), so the default build
 //! needs a C compiler (and, on Windows, uses prebuilt NASM objects; CMake only for FIPS). For ring
-//! instead, use `default-features = false, features = ["rustls-ring"]`: aws-lc-sys is then not in
-//! the dependency tree. Through the `anykms` facade the same feature names apply
+//! instead, use `default-features = false, features = ["reqwest", "rustls-ring"]`: aws-lc-sys is
+//! then not in the dependency tree. Without the `reqwest` feature there is no built-in transport:
+//! every server needs [`ServerConfig::http_transport`], and reqwest, hyper and rustls leave the
+//! dependency tree. Through the `anykms` facade the same feature names apply
 //! (`rustls-aws-lc-rs` is one of its default features).
 //!
 //! # Zeroization limits
 //!
 //! Request and response bodies, decoded plaintexts, data keys, tokens and the mTLS key PEM are
 //! held in zeroizing buffers that grow without leaving unwiped copies. Copies outside anykms'
-//! control are not wiped: the body reqwest sends, the token in its `X-Vault-Token` header value,
+//! control are not wiped: with the built-in transport, the body reqwest sends and the token in its
+//! `X-Vault-Token` header value (another transport decides for itself);
 //! the process environment (`VAULT_TOKEN`), hyper/rustls buffers, kernel socket buffers, and the
 //! parsed mTLS signing key inside the crypto provider (aws-lc clears it when freed; ring does
 //! not).
 //!
 //! # Public dependencies
 //!
-//! [`rustls`] 0.23 is re-exported and appears in [`ServerConfig::crypto_provider`], so a
-//! caller-built `CryptoProvider` matches the rustls this crate links. rustls' major version is
-//! part of this crate's semver contract: moving to a new rustls major version is a breaking
-//! anykms-transit release.
+//! [`anykms_http`] is re-exported: its [`HttpTransport`](anykms_http::HttpTransport) appears in
+//! [`ServerConfig::http_transport`], and its `rustls` 0.23 re-export in
+//! `ReqwestTransportBuilder::crypto_provider`, so a caller-built `CryptoProvider` matches the
+//! rustls the built-in transport links. Their major versions are part of this crate's semver
+//! contract: moving to a new rustls major version is a breaking anykms-transit release.
 //!
-//! [`CryptoProvider::install_default`]: rustls::crypto::CryptoProvider::install_default
+//! [`CryptoProvider::install_default`]: anykms_http::rustls::crypto::CryptoProvider::install_default
 //! [`KeyTypeCheck::TrustCaller`]: anykms_core::KeyTypeCheck::TrustCaller
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -141,13 +151,14 @@ mod uri;
 
 pub(crate) const BACKEND: &str = "transit";
 
+/// The HTTP plumbing: the [`HttpTransport`](anykms_http::HttpTransport) seam and the built-in
+/// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`ServerConfig::http_transport`].
+pub use anykms_http;
 pub use auth::{KUBERNETES_SERVICE_ACCOUNT_TOKEN, Login};
-pub use config::{EnvConfig, Flavor, HttpVersion, Proxy, ServerConfig};
+pub use config::{EnvConfig, Flavor, ServerConfig};
 pub use handles::{TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey};
 pub use keyinfo::{TransitKeyInfo, TransitKeyType};
 pub use provider::{TransitProvider, TransitProviderBuilder};
-/// The rustls version used for TLS, for [`ServerConfig::crypto_provider`].
-pub use rustls;
 pub use token::{EnvToken, FileToken, NoToken, StaticToken, Token, TokenSource};
 pub use uri::{SCHEMES, TransitKeyRef};
 

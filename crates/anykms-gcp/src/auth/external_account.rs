@@ -4,10 +4,15 @@
 //! which is then optionally exchanged for a service account's token (impersonation).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anykms_core::{BoxFuture, ErrorKind, Result};
+use anykms_http::HttpTransport;
 use anykms_http::credentials::Expiring;
+use anykms_http::http::Method;
+use anykms_http::http::header::{HeaderMap, HeaderName, HeaderValue};
+use anykms_http::url::Url;
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -42,20 +47,17 @@ enum SubjectFormat {
 
 enum Subject {
     File(std::path::PathBuf),
-    Url {
-        url: url::Url,
-        headers: reqwest::header::HeaderMap,
-    },
+    Url { url: Url, headers: HeaderMap },
 }
 
 pub(crate) struct ExternalAccount {
-    http: reqwest::Client,
+    http: Arc<dyn HttpTransport>,
     subject: Subject,
     format: SubjectFormat,
     audience: String,
     subject_token_type: String,
-    token_url: url::Url,
-    impersonation_url: Option<url::Url>,
+    token_url: Url,
+    impersonation_url: Option<Url>,
     lifetime: Duration,
     user_project: Option<String>,
     quota_project: Option<String>,
@@ -102,7 +104,7 @@ pub(crate) fn from_file(f: CredFile, ctx: &AuthCtx) -> Result<Cached<ExternalAcc
     let subject = match (cs.file, cs.url) {
         (Some(p), None) => Subject::File(p.into()),
         (None, Some(u)) => {
-            let url = url::Url::parse(&u).map_err(|_| {
+            let url = Url::parse(&u).map_err(|_| {
                 config_err("external_account credential_source.url is not a valid URL")
             })?;
             if !matches!(url.scheme(), "http" | "https") {
@@ -110,12 +112,12 @@ pub(crate) fn from_file(f: CredFile, ctx: &AuthCtx) -> Result<Cached<ExternalAcc
                     "external_account credential_source.url must be http:// or https://",
                 ));
             }
-            let mut headers = reqwest::header::HeaderMap::new();
+            let mut headers = HeaderMap::new();
             for (k, v) in cs.headers {
-                let name = reqwest::header::HeaderName::from_bytes(k.as_bytes()).map_err(|_| {
+                let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| {
                     config_err("external_account credential_source.headers has an invalid name")
                 })?;
-                let mut value = reqwest::header::HeaderValue::from_str(&v).map_err(|_| {
+                let mut value = HeaderValue::from_str(&v).map_err(|_| {
                     config_err("external_account credential_source.headers has an invalid value")
                 })?;
                 value.set_sensitive(true);
@@ -190,8 +192,15 @@ impl ExternalAccount {
                 (raw, Some(p))
             }
             Subject::Url { url, headers } => {
-                let req = self.http.get(url.clone()).headers(headers.clone());
-                (oauth::send("subject token URL", req).await?, None)
+                let mut req = anykms_http::client::request(Method::GET, url);
+                if let Some(h) = req.headers_mut() {
+                    h.extend(headers.clone());
+                }
+                let req = req.body(anykms_http::client::empty());
+                (
+                    oauth::send("subject token URL", &*self.http, req).await?,
+                    None,
+                )
             }
         };
         let unusable = |what: &str| match file {
@@ -282,16 +291,16 @@ impl Fetch for ExternalAccount {
             }
             let body = oauth::form(&pairs);
             drop(subject);
-            let req = oauth::post_form(&self.http, &self.token_url, &body);
+            let req = oauth::post_form(&self.token_url, &body);
             drop(body);
-            let resp = oauth::send(WHAT, req).await?;
+            let resp = oauth::send(WHAT, &*self.http, req).await?;
             let federated = oauth::parse_oauth_token(WHAT, &resp)?;
             drop(resp);
             match &self.impersonation_url {
                 None => Ok(federated),
                 Some(url) => {
                     impersonated::exchange(
-                        &self.http,
+                        &*self.http,
                         url,
                         federated.value().secret(),
                         &[],

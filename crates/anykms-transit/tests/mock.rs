@@ -506,6 +506,8 @@ async fn malformed_returned_ciphertexts_are_refused() {
     assert_eq!(e.kind(), ErrorKind::Backend, "{e}");
 }
 
+/// The per-request timeout lives on the transport.
+#[cfg(feature = "reqwest")]
 #[tokio::test]
 async fn slow_server_times_out() {
     let server = MockServer::start().await;
@@ -519,7 +521,13 @@ async fn slow_server_times_out() {
         ServerConfig::new(server.uri(), Flavor::Vault)
             .token("t")
             .allow_loopback_http()
-            .request_timeout(Duration::from_millis(300)),
+            .http_transport(
+                anykms_transit::anykms_http::ReqwestTransport::builder()
+                    .require_roots(false)
+                    .request_timeout(Duration::from_millis(300))
+                    .build()
+                    .unwrap(),
+            ),
     );
     let e = p
         .aead_key(uri("k"))
@@ -898,12 +906,6 @@ async fn configuration_is_validated() {
     );
     assert_eq!(
         bad(ServerConfig::new("https://vault:8200/v1", Flavor::Vault)),
-        ErrorKind::Configuration
-    );
-    assert_eq!(
-        bad(ServerConfig::new("http://127.0.0.1:8200", Flavor::Vault)
-            .allow_loopback_http()
-            .proxy(anykms_transit::Proxy::Url("http://proxy:3128".into()))),
         ErrorKind::Configuration
     );
     let p = TransitProvider::builder()

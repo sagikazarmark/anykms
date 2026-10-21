@@ -1,7 +1,7 @@
 [package]
 name = "anykms-http"
 version.workspace = true
-description = "HTTP plumbing shared by the anykms backends (TLS provider selection, no-redirect clients, zeroizing bodies, credential caching, server-message redaction); not for direct use"
+description = "HTTP plumbing shared by the anykms backends (the HttpTransport seam, the reqwest transport, TLS provider selection, zeroizing bodies, credential caching, server-message redaction); not for direct use"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,19 +13,25 @@ categories = ["cryptography"]
 exclude = ["tests/"]
 
 [features]
-default = ["rustls-aws-lc-rs"]
+default = ["reqwest", "rustls-aws-lc-rs"]
+# The built-in transport (`ReqwestTransport`): reqwest over rustls. Without it a backend must be
+# given a transport through its builder (`.http_transport(..)`).
+reqwest = ["dep:reqwest", "rustls", "tokio/rt"]
+# The rustls client configuration (`tls`): roots, client certificates, the crypto provider.
+# `ReqwestTransport` needs it; another transport built on rustls may reuse it.
+rustls = ["dep:rustls", "dep:rustls-native-certs"]
 # TLS crypto provider, used when neither a configured provider nor a process-wide default
 # (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the features.
 # aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
 # with `default-features = false, features = ["rustls-ring"]`. Both may be enabled (features
-# unify): aws-lc-rs then wins.
-rustls-ring = ["rustls/ring"]
-rustls-aws-lc-rs = ["rustls/aws-lc-rs"]
+# unify): aws-lc-rs then wins. They only affect `ReqwestTransport` (and `tls`).
+rustls-ring = ["rustls", "rustls/ring"]
+rustls-aws-lc-rs = ["rustls", "rustls/aws-lc-rs"]
 # A debug event naming the selected TLS crypto provider; the span schema (`span`, `request_span!`,
 # `token_span!`), which are no-ops without it.
 tracing = ["dep:tracing"]
-# Allow HTTP/2 (`ClientOptions::http2`).
-http2 = ["reqwest/http2"]
+# Allow HTTP/2 in `ReqwestTransport` (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
+http2 = ["reqwest?/http2"]
 
 [dependencies]
 anykms-core.workspace = true
@@ -34,20 +40,21 @@ zeroize.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
-reqwest.workspace = true
+http.workspace = true
+url.workspace = true
+reqwest = { workspace = true, optional = true }
 httpdate = "1"
 # Keyed fingerprints of server messages (`redact`).
 hmac.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
-rustls.workspace = true
-rustls-native-certs.workspace = true
+rustls = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, features = ["std"] }
 tracing = { workspace = true, optional = true }
-# Single flight (`cache::SingleFlight`), the credential cache's clock (`tokio::time::Instant`, so
-# paused test time moves it) and the runtime check before a request (`rt`: `Handle::try_current`);
-# reqwest already depends on tokio with `time`, and hyper-util with `rt`.
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+# Single flight (`cache::SingleFlight`) and the credential cache's clock (`tokio::time::Instant`,
+# so paused test time moves it); `ReqwestTransport`'s runtime check adds `rt` (`Handle::try_current`).
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

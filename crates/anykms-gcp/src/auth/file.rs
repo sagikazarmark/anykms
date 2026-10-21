@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anykms_core::{BoxFuture, Result};
+use anykms_http::HttpTransport;
+use anykms_http::url::Url;
 use serde::{Deserialize, Deserializer};
 use zeroize::Zeroizing;
 
@@ -278,8 +280,8 @@ impl CredentialSource for FileSource {
 
 /// `authorized_user`: a refresh token exchanged at the OAuth 2.0 token endpoint.
 pub(crate) struct AuthorizedUser {
-    http: reqwest::Client,
-    token_url: url::Url,
+    http: Arc<dyn HttpTransport>,
+    token_url: Url,
     client_id: String,
     client_secret: Secret,
     refresh_token: Secret,
@@ -304,9 +306,9 @@ impl super::Fetch for AuthorizedUser {
                 ("client_secret", self.client_secret.0.as_bytes()),
                 ("refresh_token", self.refresh_token.0.as_bytes()),
             ]);
-            let req = oauth::post_form(&self.http, &self.token_url, &body);
+            let req = oauth::post_form(&self.token_url, &body);
             drop(body);
-            let resp = oauth::send(WHAT, req).await?;
+            let resp = oauth::send(WHAT, &*self.http, req).await?;
             oauth::parse_oauth_token(WHAT, &resp)
         })
     }

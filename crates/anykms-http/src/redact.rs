@@ -83,7 +83,7 @@ pub fn request_id(id: &str) -> Option<&str> {
 /// port is the scheme's default when the URL names none, and is left out when the scheme has no
 /// default. A string that does not parse as a URL is `<invalid URL>`.
 pub fn url_origin(url: &str) -> String {
-    let Ok(u) = reqwest::Url::parse(url) else {
+    let Ok(u) = url::Url::parse(url) else {
         return "<invalid URL>".to_owned();
     };
     let host = u.host_str().unwrap_or("");

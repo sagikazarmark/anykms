@@ -4,8 +4,10 @@
 use std::sync::Arc;
 
 use anykms_core::{Error, ErrorKind, Operation, Result};
-use reqwest::header::HeaderValue;
-use reqwest::{Method, StatusCode};
+use anykms_http::HttpTransport;
+use anykms_http::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use anykms_http::http::{Method, StatusCode};
+use anykms_http::url::Url;
 use zeroize::Zeroizing;
 
 use crate::BACKEND;
@@ -15,9 +17,7 @@ use crate::errors::{ErrorBody, Failure, ReqClass, classify};
 
 /// Shared by every handle of a provider.
 pub(crate) struct Client {
-    pub(crate) http: reqwest::Client,
-    /// For test hosts (their CA, plain HTTP on loopback); `None` without test hosts.
-    pub(crate) test_http: Option<reqwest::Client>,
+    pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) tokens: Tokens,
     pub(crate) api_version: ApiVersion,
     pub(crate) max_response_bytes: usize,
@@ -44,7 +44,7 @@ impl std::fmt::Debug for Client {
 /// One request.
 pub(crate) struct Call<'a> {
     pub(crate) method: Method,
-    pub(crate) url: reqwest::Url,
+    pub(crate) url: Url,
     pub(crate) body: Option<Zeroizing<Vec<u8>>>,
     pub(crate) op: Operation,
     pub(crate) class: ReqClass,
@@ -59,7 +59,7 @@ pub(crate) struct Call<'a> {
 
 /// `x-ms-request-id`, through the shared filter (P1-9: 1–128 visible ASCII characters): the
 /// header is server-controlled, so anything else is dropped before it reaches errors or logs.
-fn request_id(headers: &reqwest::header::HeaderMap) -> Option<&str> {
+fn request_id(headers: &anykms_http::http::HeaderMap) -> Option<&str> {
     headers
         .get("x-ms-request-id")
         .and_then(|v| v.to_str().ok())
@@ -87,8 +87,7 @@ fn config_err(op: Operation, m: &'static str) -> Error {
 
 impl Client {
     pub(crate) fn new(
-        http: reqwest::Client,
-        test_http: Option<reqwest::Client>,
+        http: Arc<dyn HttpTransport>,
         tokens: Tokens,
         api_version: ApiVersion,
         max_response_bytes: usize,
@@ -96,7 +95,6 @@ impl Client {
     ) -> Self {
         Self {
             http,
-            test_http,
             tokens,
             api_version,
             max_response_bytes,
@@ -124,11 +122,11 @@ impl Client {
 
     /// `<base>/<segments...>?api-version=...`, each segment percent-encoded as one path segment
     /// (validated parts only; defence in depth).
-    pub(crate) fn url(&self, target: &Target, segments: &[&str]) -> Result<reqwest::Url> {
+    pub(crate) fn url(&self, target: &Target, segments: &[&str]) -> Result<Url> {
         if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
             return Err(config_err(Operation::Configure, "invalid request path"));
         }
-        let mut url = reqwest::Url::parse(&target.base_url())
+        let mut url = Url::parse(&target.base_url())
             .map_err(|_| config_err(Operation::Configure, "invalid vault host"))?;
         url.path_segments_mut()
             .map_err(|()| config_err(Operation::Configure, "invalid vault host"))?
@@ -139,22 +137,12 @@ impl Client {
         Ok(url)
     }
 
-    fn http_for(&self, target: &Target) -> Result<&reqwest::Client> {
-        if target.test {
-            self.test_http
-                .as_ref()
-                .ok_or_else(|| config_err(Operation::Configure, "no client for test hosts"))
-        } else {
-            Ok(&self.http)
-        }
-    }
-
     async fn send(
         &self,
         target: &Target,
         call: &Call<'_>,
         token: &CachedToken,
-    ) -> Result<(StatusCode, reqwest::header::HeaderMap, Zeroizing<Vec<u8>>)> {
+    ) -> Result<(StatusCode, HeaderMap, Zeroizing<Vec<u8>>)> {
         let secret = token.value().secret();
         let mut bearer = Zeroizing::new(String::with_capacity(7 + secret.len()));
         bearer.push_str("Bearer ");
@@ -163,36 +151,33 @@ impl Client {
         let mut auth = HeaderValue::from_str(&bearer)
             .map_err(|_| config_err(call.op, "access token contains invalid characters"))?;
         auth.set_sensitive(true);
-        let mut req = self
-            .http_for(target)?
-            .request(call.method.clone(), call.url.clone())
-            .header(reqwest::header::AUTHORIZATION, auth)
-            .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(body) = &call.body {
-            // reqwest copies the body into its own buffer; that copy cannot be wiped (see the
-            // crate docs on zeroization limits).
-            req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.to_vec());
-        }
+        let mut req = anykms_http::client::request(call.method.clone(), &call.url)
+            .header(AUTHORIZATION, auth)
+            .header(ACCEPT, "application/json");
+        // The body stays in a zeroizing buffer up to the transport (which may copy it; see the
+        // crate docs on zeroization limits).
+        let body = match &call.body {
+            Some(body) => {
+                req = req.header(CONTENT_TYPE, "application/json");
+                body.clone()
+            }
+            None => anykms_http::client::empty(),
+        };
         if let Some(n) = &self.requests {
             n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         // `send` records `http_status` into the request span.
-        use anykms_http::client::SendError;
-        let resp = anykms_http::client::send(req, self.max_response_bytes)
+        use anykms_http::SendError;
+        let resp = anykms_http::client::send(&*self.http, req.body(body), self.max_response_bytes)
             .await
             .map_err(|e| match e {
-                SendError::NoRuntime => anykms_http::client::no_runtime_error(BACKEND, call.op),
-                SendError::Transport(e) => {
-                    anykms_http::client::transport_error(BACKEND, call.op, e)
-                }
                 SendError::TooLarge { status } => crate::errors::unusable_response(
                     call.op,
                     &target.host,
                     Some(status.as_u16()),
                     "response exceeds the maximum size",
                 ),
+                e => e.into_error(BACKEND, call.op),
             })?;
         Ok((resp.status, resp.headers, resp.body))
     }
@@ -232,8 +217,11 @@ impl Client {
         target: &Target,
         call: &Call<'_>,
     ) -> Result<(Zeroizing<Vec<u8>>, Option<String>)> {
-        // First: outside a Tokio runtime the credential sources and reqwest would panic.
-        anykms_http::client::require_runtime(BACKEND, call.op)?;
+        // First: a transport that cannot send from this context (reqwest outside a Tokio
+        // runtime) fails here, before the credential is asked.
+        self.http
+            .ready()
+            .map_err(|e| e.into_error(BACKEND, call.op))?;
         let scope = target.scope.as_str();
         let token = self
             .tokens
@@ -261,7 +249,7 @@ impl Client {
         let request_id = request_id(&headers);
         let tenant_hint = if status == StatusCode::UNAUTHORIZED {
             let challenged = headers
-                .get(reqwest::header::WWW_AUTHENTICATE)
+                .get(anykms_http::http::header::WWW_AUTHENTICATE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(crate::errors::challenge_tenant);
             match (challenged, self.tokens.credential().tenant_id()) {

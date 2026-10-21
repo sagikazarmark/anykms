@@ -474,6 +474,13 @@ impl Error {
         self
     }
 
+    /// Replaces the backend (used by a backend that reports a shared component's error, such as
+    /// the HTTP transport it builds, as its own).
+    pub fn with_backend(mut self, backend: &'static str) -> Self {
+        self.backend = backend;
+        self
+    }
+
     /// The error kind.
     pub fn kind(&self) -> ErrorKind {
         self.kind

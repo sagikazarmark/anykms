@@ -50,7 +50,7 @@ impl ContainerCredentials {
             || vars.get("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_some()
     }
 
-    pub(crate) fn url(&self) -> Result<reqwest::Url> {
+    pub(crate) fn url(&self) -> Result<anykms_http::url::Url> {
         if let Some(rel) = self.vars.get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") {
             if !rel.starts_with('/')
                 || rel.starts_with("//")
@@ -61,7 +61,7 @@ impl ContainerCredentials {
                     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI must be a path starting with /",
                 ));
             }
-            return reqwest::Url::parse(&format!("{ECS_HOST}{rel}")).map_err(|_| {
+            return anykms_http::url::Url::parse(&format!("{ECS_HOST}{rel}")).map_err(|_| {
                 config_err("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is not a valid path")
             });
         }
@@ -69,7 +69,7 @@ impl ContainerCredentials {
             .vars
             .get("AWS_CONTAINER_CREDENTIALS_FULL_URI")
             .ok_or_else(|| config_err("no container credentials endpoint is configured"))?;
-        let url = reqwest::Url::parse(full)
+        let url = anykms_http::url::Url::parse(full)
             .map_err(|_| config_err("AWS_CONTAINER_CREDENTIALS_FULL_URI is not a valid URL"))?;
         if !url.username().is_empty() || url.password().is_some() {
             return Err(config_err(
@@ -109,35 +109,43 @@ impl ContainerCredentials {
     }
 
     pub(crate) async fn fetch(&self, cx: &SourceContext) -> Result<Credentials> {
+        use anykms_http::http::Method;
         let url = self.url()?;
-        let client = if url.scheme() == "https" {
-            cx.http.main()
+        // The link-local endpoint fails fast; an HTTPS endpoint (EKS Pod Identity through a
+        // proxy, say) gets the transport's own timeout.
+        let mut req = if url.scheme() == "https" {
+            anykms_http::client::request(Method::GET, &url)
         } else {
-            cx.http.local().await?
+            crate::client::Http::local(Method::GET, &url)
         };
-        let mut req = client.get(url);
         if let Some(t) = self.auth_token()? {
-            let mut v = reqwest::header::HeaderValue::from_str(&t)
+            let mut v = anykms_http::http::HeaderValue::from_str(&t)
                 .map_err(|_| config_err("the container authorization token is malformed"))?;
             v.set_sensitive(true);
-            req = req.header(reqwest::header::AUTHORIZATION, v);
+            req = req.header(anykms_http::http::header::AUTHORIZATION, v);
         }
-        let resp = req.send().await.map_err(|e| {
-            let err = anykms_http::client::transport_error(BACKEND, Operation::Configure, e);
-            if err.kind() == ErrorKind::Timeout {
-                err
-            } else {
-                Error::new(
-                    err.kind().max_unavailable(),
-                    BACKEND,
-                    Operation::Configure,
-                    "container credentials endpoint unreachable",
-                )
-            }
-        })?;
-        let status = resp.status().as_u16();
-        let body =
-            crate::client::read_body(resp, MAX_CREDENTIAL_BYTES, Operation::Configure).await?;
+        let resp = cx
+            .http
+            .send(
+                req.body(anykms_http::client::empty()),
+                MAX_CREDENTIAL_BYTES,
+                Operation::Configure,
+            )
+            .await
+            .map_err(|err| {
+                if err.kind() == ErrorKind::Timeout {
+                    err
+                } else {
+                    Error::new(
+                        err.kind().max_unavailable(),
+                        BACKEND,
+                        Operation::Configure,
+                        "container credentials endpoint unreachable",
+                    )
+                }
+            })?;
+        let status = resp.status.as_u16();
+        let body = resp.body;
         match status {
             200..=299 => JsonCredentials::parse(&body, "the container credentials endpoint"),
             401 | 403 => Err(unauthenticated(
@@ -166,17 +174,17 @@ impl MaxUnavailable for ErrorKind {
     }
 }
 
-fn http_allowed(url: &reqwest::Url) -> bool {
+fn http_allowed(url: &anykms_http::url::Url) -> bool {
     match url.host() {
-        Some(url::Host::Ipv4(ip)) => {
+        Some(anykms_http::url::Host::Ipv4(ip)) => {
             ip.is_loopback()
                 || ip.octets() == [169, 254, 170, 2]
                 || ip.octets() == [169, 254, 170, 23]
         }
-        Some(url::Host::Ipv6(ip)) => {
+        Some(anykms_http::url::Host::Ipv6(ip)) => {
             IpAddr::V6(ip).is_loopback() || ip.segments() == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23]
         }
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(anykms_http::url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
         None => false,
     }
 }

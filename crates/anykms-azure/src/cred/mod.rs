@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use anykms_core::Result;
 
-pub use entra::{ClientSecret, WorkloadIdentity};
-pub use managed_identity::{IMDS_ENDPOINT, ManagedIdentity};
+pub use entra::{ClientSecret, TOKEN_REQUEST_TIMEOUT, WorkloadIdentity};
+pub use managed_identity::{IMDS_ENDPOINT, IMDS_TIMEOUT, ManagedIdentity};
 #[cfg(feature = "azure-identity")]
 pub use sdk::AzureIdentity;
 

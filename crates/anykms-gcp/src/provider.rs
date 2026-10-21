@@ -10,10 +10,12 @@ use anykms_core::{
     SignatureAlgorithm, SigningShape,
 };
 
+use anykms_http::HttpTransport;
+
 use crate::BACKEND;
 use crate::auth::{AuthCtx, AuthEndpoints, Credentials, EnvVars};
 use crate::client::Client;
-use crate::config::{Endpoint, HttpVersion, Proxy, config_err, split_list};
+use crate::config::{Endpoint, config_err, split_list};
 use crate::handles::{
     GcpAeadKey, GcpDescribeKey, GcpDigestKey, GcpEd25519Key, GcpKeyWrapKey, GcpMacKey, KeyCtx,
     Shared,
@@ -30,7 +32,7 @@ use crate::uri::{GcpKeyRef, SCHEMES, location_ok, parse_version, project_ok};
 pub struct GcpProvider {
     shared: Arc<Shared>,
     endpoint: Endpoint,
-    custom_base: Option<url::Url>,
+    custom_base: Option<anykms_http::url::Url>,
     allowed_projects: Option<Vec<String>>,
     allowed_locations: Option<Vec<String>>,
 }
@@ -55,14 +57,7 @@ pub struct GcpProviderBuilder {
     quota_project: Option<String>,
     allowed_projects: Option<Vec<String>>,
     allowed_locations: Option<Vec<String>>,
-    connect_timeout: Duration,
-    request_timeout: Duration,
-    pool_idle_timeout: Duration,
-    tcp_keepalive: Duration,
-    http_version: HttpVersion,
-    proxy: Proxy,
-    crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
-    ca_pem: Option<Vec<u8>>,
+    http_transport: Option<Arc<dyn HttpTransport>>,
     public_key_ttl: Duration,
     allow_loopback_http: bool,
     max_response_bytes: usize,
@@ -77,7 +72,7 @@ impl std::fmt::Debug for GcpProviderBuilder {
             .field("quota_project", &self.quota_project)
             .field("allowed_projects", &self.allowed_projects)
             .field("allowed_locations", &self.allowed_locations)
-            .field("proxy", &self.proxy)
+            .field("http_transport", &self.http_transport.is_some())
             .field("public_key_ttl", &self.public_key_ttl)
             .finish_non_exhaustive()
     }
@@ -92,14 +87,7 @@ impl Default for GcpProviderBuilder {
             quota_project: None,
             allowed_projects: None,
             allowed_locations: None,
-            connect_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(10),
-            pool_idle_timeout: Duration::from_secs(50),
-            tcp_keepalive: Duration::from_secs(30),
-            http_version: HttpVersion::Http1,
-            proxy: Proxy::None,
-            crypto_provider: None,
-            ca_pem: None,
+            http_transport: None,
             public_key_ttl: Duration::from_secs(60),
             allow_loopback_http: false,
             max_response_bytes: 4 * 1024 * 1024,
@@ -161,54 +149,16 @@ impl GcpProviderBuilder {
         self
     }
 
-    /// Timeout for establishing a connection (TCP and TLS); default 2 s.
-    pub fn connect_timeout(mut self, d: Duration) -> Self {
-        self.connect_timeout = d;
-        self
-    }
-
-    /// Timeout for one request, from sending to the end of the response; default 10 s. The
-    /// overall deadline across retries belongs to `Retry`.
-    pub fn request_timeout(mut self, d: Duration) -> Self {
-        self.request_timeout = d;
-        self
-    }
-
-    /// How long idle pooled connections are kept; default 50 s.
-    pub fn pool_idle_timeout(mut self, d: Duration) -> Self {
-        self.pool_idle_timeout = d;
-        self
-    }
-
-    /// TCP keepalive interval; default 30 s.
-    pub fn tcp_keepalive(mut self, d: Duration) -> Self {
-        self.tcp_keepalive = d;
-        self
-    }
-
-    /// The HTTP version (default HTTP/1.1).
-    pub fn http_version(mut self, v: HttpVersion) -> Self {
-        self.http_version = v;
-        self
-    }
-
-    /// A proxy for Cloud KMS and token endpoints (default none; environment proxy variables are
-    /// ignored). The metadata server is always reached directly.
-    pub fn proxy(mut self, p: Proxy) -> Self {
-        self.proxy = p;
-        self
-    }
-
-    /// The rustls crypto provider (first in the precedence of the crate docs).
-    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
-        self.crypto_provider = Some(provider);
-        self
-    }
-
-    /// Trusts only these CA certificates (PEM) instead of the system roots, for Cloud KMS and
-    /// token endpoints (e.g. behind a TLS-inspecting proxy).
-    pub fn ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.ca_pem = Some(pem.into());
+    /// The HTTP transport Cloud KMS, the token endpoints and the metadata server are reached
+    /// through. It owns TLS trust, the crypto provider, timeouts, proxying and the HTTP version:
+    /// configure them on [`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder) (the
+    /// built-in transport, feature `reqwest`) or bring any [`HttpTransport`]. Without this, a
+    /// default `ReqwestTransport` is built; without the `reqwest` feature, building fails with
+    /// `Configuration`. Metadata-server requests carry a short per-request
+    /// [`RequestTimeout`](anykms_http::RequestTimeout) and are never proxied by the built-in
+    /// transport.
+    pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
+        self.http_transport = Some(Arc::new(transport));
         self
     }
 
@@ -233,13 +183,9 @@ impl GcpProviderBuilder {
         self
     }
 
-    /// Validates the configuration and builds the HTTP clients. No credential is resolved.
+    /// Validates the configuration and, without an injected transport, builds the default one.
+    /// No credential is resolved.
     pub fn build(self) -> Result<GcpProvider> {
-        if self.connect_timeout.is_zero() || self.request_timeout.is_zero() {
-            return Err(config_err(
-                "connect_timeout and request_timeout must be greater than zero",
-            ));
-        }
         if self.max_response_bytes < anykms_http::client::MIN_RESPONSE_BYTES {
             return Err(config_err("max_response_bytes must be at least 64 KiB"));
         }
@@ -284,49 +230,13 @@ impl GcpProviderBuilder {
             ));
         }
         let plain_http = custom_base.as_ref().is_some_and(|u| u.scheme() == "http");
-        if (plain_http || self.auth_endpoints.is_plain_http()) && self.proxy != Proxy::None {
-            return Err(config_err(
-                "a proxy cannot be used with a plain http:// endpoint",
-            ));
-        }
-        if self.http_version == HttpVersion::Http2 && !cfg!(feature = "http2") {
-            return Err(config_err(
-                "HttpVersion::Http2 needs the anykms-gcp `http2` feature",
-            ));
-        }
-        let tls = || {
-            anykms_http::tls::TlsOptions::new()
-                .ca_pem(self.ca_pem.as_deref())
-                .crypto_provider(
-                    self.crypto_provider.clone(),
-                    "GcpProviderBuilder::crypto_provider",
-                )
-                .require_roots(!plain_http)
-                .http2(self.http_version == HttpVersion::Http2 && !plain_http)
-                .build(BACKEND)
+        let http = match self.http_transport {
+            Some(t) => t,
+            // A plain-HTTP (loopback) endpoint needs no trusted roots.
+            None => anykms_http::default_transport(BACKEND, !plain_http)?,
         };
-        let proxy = match &self.proxy {
-            Proxy::None => None,
-            Proxy::Url(u) => Some(u.clone()),
-        };
-        let http = anykms_http::client::ClientOptions::new()
-            .connect_timeout(self.connect_timeout)
-            .request_timeout(self.request_timeout)
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .tcp_keepalive(self.tcp_keepalive)
-            .http2(self.http_version == HttpVersion::Http2 && !plain_http)
-            .proxy(proxy)
-            .build(BACKEND, tls()?)?;
-        // The metadata server: plain HTTP on a link-local address, a short connect timeout, never
-        // a proxy.
-        let metadata_http = anykms_http::client::ClientOptions::new()
-            .connect_timeout(Duration::from_secs(1))
-            .request_timeout(self.request_timeout)
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .build(BACKEND, tls()?)?;
         let ctx = AuthCtx {
             http: http.clone(),
-            metadata_http,
             endpoints: self.auth_endpoints,
             env: self.env,
         };
@@ -926,7 +836,6 @@ mod tests {
             GcpProvider::builder()
                 .endpoint(Endpoint::custom("https://kms.test"))
                 .auth_endpoints(AuthEndpoints::custom("http://127.0.0.1:1").unwrap()),
-            GcpProvider::builder().request_timeout(Duration::ZERO),
             GcpProvider::builder().max_response_bytes(64 * 1024 - 1),
         ] {
             assert_eq!(b.build().unwrap_err().kind(), ErrorKind::Configuration);

@@ -86,11 +86,19 @@
 //! - **No retries, no redirects.** The backend never retries (that is `Retry`'s job), except
 //!   once after a 401 when the credential source yields a new token. Redirects are never
 //!   followed.
+//! - **Transport.** Every request (Cloud KMS, the token endpoints, the metadata server) goes
+//!   through one [`HttpTransport`](anykms_http::HttpTransport): [`GcpProviderBuilder::http_transport`],
+//!   or a default [`ReqwestTransport`](anykms_http::ReqwestTransport) (feature `reqwest`). TLS
+//!   trust, the crypto provider, proxying, timeouts and the HTTP version are the transport's
+//!   settings ([`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder)). The built-in
+//!   transport never proxies the link-local metadata server, whose requests carry a 3 s
+//!   per-request timeout.
 //! - **Errors name the key.** Every handle error carries `gcp-kms://projects/...` as its
 //!   [`resource`](anykms_core::Error::resource). Server messages are kept only when pinned;
 //!   others are reduced to a keyed fingerprint.
-//! - **Runtime.** Requires a tokio runtime (reqwest); called outside one, an operation fails
-//!   with `Configuration` instead of panicking.
+//! - **Runtime.** The built-in transport requires a tokio runtime; called outside one, an
+//!   operation fails with `Configuration` instead of panicking, before the credential source is
+//!   asked.
 //!
 //! # Credentials
 //!
@@ -107,24 +115,26 @@
 //!
 //! # TLS crypto provider
 //!
-//! rustls needs a crypto provider. The provider takes the first of:
-//! [`GcpProviderBuilder::crypto_provider`]; the process default
-//! ([`CryptoProvider::install_default`]); aws-lc-rs with the `rustls-aws-lc-rs` feature
-//! (default); ring with the `rustls-ring` feature. Nothing is installed process-wide. The system
-//! roots are used unless [`GcpProviderBuilder::ca_pem`] replaces them; there is no way to skip
-//! verification.
+//! rustls needs a crypto provider. The built-in transport takes the first of:
+//! [`ReqwestTransportBuilder::crypto_provider`](anykms_http::ReqwestTransportBuilder::crypto_provider);
+//! the process default ([`CryptoProvider::install_default`]); aws-lc-rs with the `rustls-aws-lc-rs`
+//! feature (default); ring with the `rustls-ring` feature. Nothing is installed process-wide. The
+//! system roots are used unless
+//! [`ReqwestTransportBuilder::ca_pem`](anykms_http::ReqwestTransportBuilder::ca_pem) replaces
+//! them; there is no way to skip verification.
 //!
 //! # Cargo features
 //!
 //! | Feature | Default | Effect |
 //! |---|---|---|
-//! | `rustls-aws-lc-rs` | yes | aws-lc-rs as the fallback TLS crypto provider (wins over ring) |
+//! | `reqwest` | yes | the built-in transport ([`ReqwestTransport`](anykms_http::ReqwestTransport)); without it, [`GcpProviderBuilder::http_transport`] is required |
+//! | `rustls-aws-lc-rs` | yes | aws-lc-rs as the fallback TLS crypto provider of the built-in transport (wins over ring) |
 //! | `rustls-ring` | | ring as the fallback provider (opt-in, with `default-features = false`) |
 //! | `rsa-aws-lc-rs` | yes | RSA verification and RSA-OAEP wrapping with aws-lc-rs |
 //! | `rsa-rustcrypto` | | the same with RustCrypto's `rsa` (a release candidate) |
 //! | `service-account-key` | yes | `service_account` key files (RS256 with aws-lc-rs) |
 //! | `tracing` | | spans and events (field allowlist; never data or tokens) |
-//! | `http2` | | allow [`HttpVersion::Http2`] |
+//! | `http2` | | allow HTTP/2 in the built-in transport ([`ReqwestTransportBuilder::http2`](anykms_http::ReqwestTransportBuilder::http2)) |
 //!
 //! Without an `rsa-*` feature, RSA signing, verifying and public-key handles and RSA KEKs fail
 //! to open with `Configuration` (ECDSA and Ed25519 are unaffected).
@@ -144,11 +154,12 @@
 //! # Zeroization limits
 //!
 //! Request and response bodies, decoded plaintexts, tokens, refresh tokens, subject tokens and
-//! service-account keys are held in zeroizing buffers. Not wiped: the body copy reqwest sends,
-//! the `Authorization` header value, hyper/rustls buffers, serde_json's scratch buffers for
+//! service-account keys are held in zeroizing buffers. Not wiped: with the built-in transport, the
+//! body copy reqwest sends, the `Authorization` header value and hyper/rustls buffers;
+//! serde_json's scratch buffers for
 //! escaped strings, the process environment and kernel socket buffers.
 //!
-//! [`CryptoProvider::install_default`]: rustls::crypto::CryptoProvider::install_default
+//! [`CryptoProvider::install_default`]: anykms_http::rustls::crypto::CryptoProvider::install_default
 //! [`Provider::aead`]: anykms_core::Provider::aead
 //! [`Provider::data_keys`]: anykms_core::Provider::data_keys
 
@@ -169,15 +180,16 @@ mod wire;
 
 pub(crate) const BACKEND: &str = "gcp";
 
+/// The HTTP plumbing: the [`HttpTransport`](anykms_http::HttpTransport) seam and the built-in
+/// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`GcpProviderBuilder::http_transport`].
+pub use anykms_http;
 pub use auth::{AuthEndpoints, CredentialSource, Credentials, Token};
-pub use config::{Endpoint, HttpVersion, Proxy};
+pub use config::Endpoint;
 pub use handles::{
     GcpAeadKey, GcpDescribeKey, GcpDigestKey, GcpEd25519Key, GcpKeyWrapKey, GcpMacKey,
 };
 pub use keyinfo::{GcpKeyInfo, GcpVersionInfo};
 pub use provider::{GcpProvider, GcpProviderBuilder};
-/// The rustls version used for TLS, for [`GcpProviderBuilder::crypto_provider`].
-pub use rustls;
 pub use uri::{GcpKeyRef, SCHEME, SCHEMES};
 
 /// Internal parsers exposed for the fuzz targets. Not part of the public API.

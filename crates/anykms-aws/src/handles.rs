@@ -73,7 +73,7 @@ impl Origin {
 pub(crate) struct KeyCtx {
     pub(crate) kms: Arc<Kms>,
     pub(crate) key: Arc<AwsKeyRef>,
-    pub(crate) endpoint: Arc<reqwest::Url>,
+    pub(crate) endpoint: Arc<anykms_http::url::Url>,
     pub(crate) check: KeyTypeCheck,
     pub(crate) cache: Arc<DescribeCache>,
     pub(crate) public_keys: Arc<PublicKeyCache>,

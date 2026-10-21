@@ -6,6 +6,8 @@
 //! - [`assert_request_schema`] and [`assert_token_schema`]: a backend's spans follow the shared
 //!   schema of `anykms_http::span` exactly.
 //! - [`assert_debug_redacts`]: a value's `Debug` output names none of the given secrets.
+//! - [`ScriptedTransport`]: an in-process `HttpTransport` that answers from a script and records
+//!   every request, so a backend and its credential sources run without a network.
 //!
 //! The capturing subscriber is the **thread's** default while the [`Capture`] guard lives, so
 //! async tests that capture run on a current-thread runtime
@@ -459,5 +461,151 @@ mod tests {
             assert_debug_redacts(&Leaky { token: "SECRET" }, &["SECRET"]);
         });
         assert!(r.is_err());
+    }
+}
+
+/// One request a [`ScriptedTransport`] received.
+#[derive(Clone, Debug)]
+pub struct SeenRequest {
+    /// The method.
+    pub method: anykms_http::http::Method,
+    /// The full URI.
+    pub uri: String,
+    /// The headers.
+    pub headers: anykms_http::http::HeaderMap,
+    /// The body.
+    pub body: Vec<u8>,
+    /// The `limit` the backend passed.
+    pub limit: usize,
+    /// The [`RequestTimeout`](anykms_http::RequestTimeout) the request carried, if any.
+    pub timeout: Option<std::time::Duration>,
+}
+
+/// What a [`ScriptedTransport`] answers next.
+pub enum Scripted {
+    /// A response with this status and body (JSON-ish bytes), `content-type: application/json`.
+    Reply(u16, Vec<u8>),
+    /// A response with this status, headers and body.
+    ReplyWith(u16, Vec<(&'static str, String)>, Vec<u8>),
+    /// A transport failure.
+    Fail(anykms_http::SendError),
+    /// A reply whose body ignores the limit (a misbehaving transport), to prove the caller-side
+    /// check.
+    Oversized(u16, Vec<u8>),
+}
+
+impl fmt::Debug for Scripted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reply(s, b) => f.debug_tuple("Reply").field(s).field(&b.len()).finish(),
+            Self::ReplyWith(s, h, b) => f
+                .debug_tuple("ReplyWith")
+                .field(s)
+                .field(h)
+                .field(&b.len())
+                .finish(),
+            Self::Fail(e) => f.debug_tuple("Fail").field(e).finish(),
+            Self::Oversized(s, b) => f.debug_tuple("Oversized").field(s).field(&b.len()).finish(),
+        }
+    }
+}
+
+/// An in-process [`HttpTransport`](anykms_http::HttpTransport) that answers from a script and
+/// records every request, for exercising a backend without a network or reqwest. It honours
+/// `limit` like a real transport (a body over it is `TooLarge`) unless the script says
+/// [`Scripted::Oversized`]. Runs out of script: `SendError::Other`.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptedTransport {
+    inner: Arc<Mutex<ScriptState>>,
+}
+
+#[derive(Debug, Default)]
+struct ScriptState {
+    script: std::collections::VecDeque<Scripted>,
+    seen: Vec<SeenRequest>,
+}
+
+impl ScriptedTransport {
+    /// An empty script.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends a scripted answer.
+    pub fn push(&self, s: Scripted) -> &Self {
+        lock(&self.inner).script.push_back(s);
+        self
+    }
+
+    /// Appends a JSON reply.
+    pub fn reply(&self, status: u16, body: impl Into<Vec<u8>>) -> &Self {
+        self.push(Scripted::Reply(status, body.into()))
+    }
+
+    /// Every request so far.
+    pub fn seen(&self) -> Vec<SeenRequest> {
+        lock(&self.inner).seen.clone()
+    }
+
+    /// The number of requests so far.
+    pub fn count(&self) -> usize {
+        lock(&self.inner).seen.len()
+    }
+
+    /// Whether the whole script was consumed.
+    pub fn exhausted(&self) -> bool {
+        lock(&self.inner).script.is_empty()
+    }
+}
+
+impl anykms_http::HttpTransport for ScriptedTransport {
+    fn send(
+        &self,
+        req: anykms_http::transport::Request,
+        limit: usize,
+    ) -> anykms_core::BoxFuture<'_, Result<anykms_http::transport::Response, anykms_http::SendError>>
+    {
+        use anykms_http::SendError;
+        use anykms_http::http::{Response, StatusCode};
+        let next = {
+            let mut st = lock(&self.inner);
+            st.seen.push(SeenRequest {
+                method: req.method().clone(),
+                uri: req.uri().to_string(),
+                headers: req.headers().clone(),
+                body: req.body().to_vec(),
+                limit,
+                timeout: req
+                    .extensions()
+                    .get::<anykms_http::RequestTimeout>()
+                    .map(|t| t.0),
+            });
+            st.script.pop_front()
+        };
+        let build = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
+            let mut r = Response::new(zeroize::Zeroizing::new(body));
+            *r.status_mut() = StatusCode::from_u16(status).unwrap();
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            for (k, v) in headers {
+                r.headers_mut().insert(k, v.parse().unwrap());
+            }
+            r
+        };
+        Box::pin(async move {
+            match next {
+                None => Err(SendError::Other(
+                    "scripted transport: script exhausted".into(),
+                )),
+                Some(Scripted::Fail(e)) => Err(e),
+                Some(Scripted::Reply(s, b) | Scripted::ReplyWith(s, _, b)) if b.len() > limit => {
+                    Err(SendError::TooLarge {
+                        status: StatusCode::from_u16(s).unwrap(),
+                    })
+                }
+                Some(Scripted::Reply(s, b) | Scripted::Oversized(s, b)) => Ok(build(s, vec![], b)),
+                Some(Scripted::ReplyWith(s, h, b)) => Ok(build(s, h, b)),
+            }
+        })
     }
 }

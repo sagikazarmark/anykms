@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anykms_core::{BoxFuture, ErrorKind, Result};
+use anykms_http::HttpTransport;
 use anykms_http::credentials::Expiring;
+use anykms_http::http::Method;
+use anykms_http::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use anykms_http::url::Url;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -17,7 +21,7 @@ use super::{
 };
 
 /// The `generateAccessToken` URL for `target` (a service-account email).
-pub(crate) fn generate_url(endpoints: &AuthEndpoints, target: &str) -> Result<url::Url> {
+pub(crate) fn generate_url(endpoints: &AuthEndpoints, target: &str) -> Result<Url> {
     let ok = !target.is_empty()
         && target.len() <= 254
         && target.contains('@')
@@ -45,8 +49,8 @@ pub(crate) fn generate_url(endpoints: &AuthEndpoints, target: &str) -> Result<ur
 
 /// Exchanges `source_token` for an impersonated token at `url`.
 pub(crate) async fn exchange(
-    http: &reqwest::Client,
-    url: &url::Url,
+    http: &dyn HttpTransport,
+    url: &Url,
     source_token: &str,
     delegates: &[String],
     lifetime: Duration,
@@ -75,12 +79,11 @@ pub(crate) async fn exchange(
     if !delegates.is_empty() {
         body["delegates"] = delegates.into();
     }
-    let req = http
-        .post(url.clone())
-        .header(reqwest::header::AUTHORIZATION, oauth::bearer(source_token)?)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_string());
-    let resp = oauth::send(WHAT, req).await?;
+    let req = anykms_http::client::request(Method::POST, url)
+        .header(AUTHORIZATION, oauth::bearer(source_token)?)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Zeroizing::new(body.to_string().into_bytes()));
+    let resp = oauth::send(WHAT, http, req).await?;
     let bad = || {
         auth_err(
             ErrorKind::Unavailable,
@@ -103,9 +106,9 @@ pub(crate) async fn exchange(
 
 /// A source token from another credential, impersonated.
 pub(crate) struct Impersonate {
-    pub(crate) http: reqwest::Client,
+    pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) source: Arc<dyn CredentialSource>,
-    pub(crate) url: url::Url,
+    pub(crate) url: Url,
     pub(crate) delegates: Vec<String>,
     pub(crate) lifetime: Duration,
     pub(crate) quota_project: Option<String>,
@@ -129,7 +132,7 @@ impl Fetch for Impersonate {
                 )
             })?;
             let r = exchange(
-                &self.http,
+                &*self.http,
                 &self.url,
                 source.expose(),
                 &self.delegates,

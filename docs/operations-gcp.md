@@ -151,9 +151,12 @@ naming the path.
 `Endpoint::Regional` sends each request to `cloudkms.<location>.rep.googleapis.com` (data
 residency), derived from the key's location, never from caller text; a key in `global` is refused
 at open. A location without a regional endpoint fails with `Unavailable` "DNS lookup failed":
-check Google's list of regional endpoints. Proxy variables (`HTTPS_PROXY`) are ignored unless a
-proxy is configured with `GcpProviderBuilder::proxy`; the metadata server is always reached
-directly. Redirects are never followed.
+check Google's list of regional endpoints. Every request (Cloud KMS, the token endpoints, the
+metadata server) goes through one HTTP transport (`GcpProviderBuilder::http_transport`, or a
+default `ReqwestTransport`), which owns TLS trust, the crypto provider, proxying and timeouts.
+Proxy variables (`HTTPS_PROXY`) are ignored unless a proxy is configured on the transport
+(`ReqwestTransportBuilder::proxy`); the metadata server, a link-local host, is always reached
+directly and with a 3 s per-request timeout. Redirects are never followed.
 
 ## Limits and quotas
 
@@ -247,7 +250,7 @@ to a keyed fingerprint.
 | `InvalidArgument` | caller | input over 64 KiB or over an HSM limit; a digest of the wrong algorithm; an unversioned or non-numeric signature or tag version | use `EnvelopeAead`; fix the calling code |
 | `Throttled` | retryable | a quota | back off; raise the quota; spread HSM load across regions |
 | `Unavailable` | retryable | `UNAVAILABLE`/`ABORTED`, a front end's 5xx, connection refused or reset, DNS; a CRC32C or integrity-flag failure; a token endpoint or the metadata server unreachable or failing; a missing subject token file | retry; check network egress to `*.googleapis.com` (or the metadata server) |
-| `Timeout` | retryable | `DEADLINE_EXCEEDED`; the client's connect or request timeout | check latency; tune `connect_timeout`/`request_timeout` |
+| `Timeout` | retryable | `DEADLINE_EXCEEDED`; the client's connect or request timeout | check latency; tune the transport's `connect_timeout`/`request_timeout` |
 | `Backend` | config | an unclassified response (`INTERNAL`, an unpinned `FAILED_PRECONDITION` such as Cloud EKM or Key Access Justifications); an undecodable or oversized response; a response for another key | look at the fingerprint and request id; report it so the mapping can be pinned |
 
 ## Tracing

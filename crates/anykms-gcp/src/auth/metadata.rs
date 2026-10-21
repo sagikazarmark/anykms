@@ -8,7 +8,12 @@
 use std::time::Duration;
 
 use anykms_core::{BoxFuture, ErrorKind, Result};
+use std::sync::Arc;
+
 use anykms_http::credentials::Expiring;
+use anykms_http::http::Method;
+use anykms_http::url::Url;
+use anykms_http::{HttpTransport, RequestTimeout};
 
 use super::{AuthCtx, Cached, Fetch, Fetched, auth_err, config_err, oauth};
 
@@ -17,7 +22,7 @@ pub(crate) const DEFAULT_HOST: &str = "169.254.169.254";
 
 /// The metadata server origin: the custom auth origin, `GCE_METADATA_HOST` (`host[:port]`), or
 /// [`DEFAULT_HOST`].
-pub(crate) fn origin(ctx: &AuthCtx) -> Result<url::Url> {
+pub(crate) fn origin(ctx: &AuthCtx) -> Result<Url> {
     if let Some(m) = &ctx.endpoints.metadata {
         return Ok(m.clone());
     }
@@ -30,13 +35,27 @@ pub(crate) fn origin(ctx: &AuthCtx) -> Result<url::Url> {
     if host.contains(['/', '?', '#', '@']) {
         return Err(config_err("GCE_METADATA_HOST must be host[:port]"));
     }
-    url::Url::parse(&format!("http://{host}/"))
+    Url::parse(&format!("http://{host}/"))
         .map_err(|_| config_err("GCE_METADATA_HOST must be host[:port]"))
 }
 
 pub(crate) struct Metadata {
-    http: reqwest::Client,
-    token_url: url::Url,
+    http: Arc<dyn HttpTransport>,
+    token_url: Url,
+}
+
+/// The per-request timeout of every metadata-server request (a
+/// [`RequestTimeout`](anykms_http::RequestTimeout)): the server is link-local and answers in
+/// milliseconds, so an absent one must not stall the credential chain for the transport's full
+/// request timeout.
+pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A `GET` of a metadata URL with the `Metadata-Flavor: Google` header and [`METADATA_TIMEOUT`].
+fn metadata_get(url: &Url) -> anykms_http::http::Result<anykms_http::transport::Request> {
+    anykms_http::client::request(Method::GET, url)
+        .header("Metadata-Flavor", "Google")
+        .extension(RequestTimeout(METADATA_TIMEOUT))
+        .body(anykms_http::client::empty())
 }
 
 pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
@@ -45,27 +64,20 @@ pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
         .join("/computeMetadata/v1/instance/service-accounts/default/token")
         .map_err(|_| config_err("invalid metadata server address"))?;
     Ok(Cached::new(Metadata {
-        http: ctx.metadata_http.clone(),
+        http: ctx.http.clone(),
         token_url,
     }))
 }
 
-/// Whether a metadata server answers at `base` (any response with `Metadata-Flavor: Google`),
-/// within the metadata client's 1 s connect timeout and a 3 s overall limit.
+/// Whether a metadata server answers at `base` (any response with `Metadata-Flavor: Google`)
+/// within [`METADATA_TIMEOUT`].
 pub(crate) async fn probe(ctx: &AuthCtx) -> bool {
     let Ok(base) = origin(ctx) else {
         return false;
     };
-    match ctx
-        .metadata_http
-        .get(base)
-        .header("Metadata-Flavor", "Google")
-        .timeout(Duration::from_secs(3))
-        .send()
-        .await
-    {
+    match anykms_http::client::send(&*ctx.http, metadata_get(&base), 4096).await {
         Ok(r) => r
-            .headers()
+            .headers
             .get("Metadata-Flavor")
             .is_some_and(|v| v.as_bytes() == b"Google"),
         Err(_) => false,
@@ -85,33 +97,33 @@ impl Fetch for Metadata {
 
     fn fetch(&self) -> BoxFuture<'_, Result<Expiring<Fetched>>> {
         Box::pin(async move {
-            let req = self
-                .http
-                .get(self.token_url.clone())
-                .header("Metadata-Flavor", "Google");
-            let resp = req.send().await.map_err(|e| {
-                let e = anykms_http::client::transport_error(
-                    crate::BACKEND,
-                    anykms_core::Operation::Configure,
-                    e,
-                );
-                let kind = if e.kind() == ErrorKind::Timeout {
-                    ErrorKind::Timeout
-                } else {
-                    ErrorKind::Unavailable
-                };
-                auth_err(kind, format!("{WHAT}: {}", e.message())).with_source(e)
+            use anykms_http::SendError;
+            let resp = anykms_http::client::send(
+                &*self.http,
+                metadata_get(&self.token_url),
+                super::MAX_TOKEN_RESPONSE,
+            )
+            .await
+            .map_err(|e| match e {
+                SendError::TooLarge { .. } | SendError::Body(_) => {
+                    auth_err(ErrorKind::Unavailable, "metadata server: response unusable")
+                }
+                e => {
+                    let e = e.into_error(crate::BACKEND, anykms_core::Operation::Configure);
+                    let kind = if e.kind() == ErrorKind::Timeout {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Unavailable
+                    };
+                    auth_err(kind, format!("{WHAT}: {}", e.message())).with_source(e)
+                }
             })?;
-            let status = resp.status().as_u16();
+            let status = resp.status.as_u16();
             let flavor_ok = resp
-                .headers()
+                .headers
                 .get("Metadata-Flavor")
                 .is_some_and(|v| v.as_bytes() == b"Google");
-            let body = anykms_http::client::read_body(resp, super::MAX_TOKEN_RESPONSE)
-                .await
-                .map_err(|_| {
-                    auth_err(ErrorKind::Unavailable, "metadata server: response unusable")
-                })?;
+            let body = resp.body;
             if !(200..300).contains(&status) {
                 return Err(match status {
                     404 => auth_err(

@@ -12,10 +12,10 @@ pub(crate) fn config_err(m: impl Into<std::borrow::Cow<'static, str>>) -> Error 
 }
 
 /// Whether `u`'s host is a literal loopback IP (`127.0.0.0/8`, `::1`).
-pub(crate) fn is_loopback_ip(u: &url::Url) -> bool {
+pub(crate) fn is_loopback_ip(u: &anykms_http::url::Url) -> bool {
     match u.host() {
-        Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-        Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
+        Some(anykms_http::url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
+        Some(anykms_http::url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
         _ => false,
     }
 }
@@ -71,9 +71,12 @@ impl Endpoint {
     }
 
     /// Validates a custom URL: `scheme://host[:port]` with no credentials, query or fragment.
-    pub(crate) fn validate_custom(u: &str, allow_loopback_http: bool) -> Result<url::Url> {
-        let url =
-            url::Url::parse(u).map_err(|_| config_err("the custom endpoint is not a valid URL"))?;
+    pub(crate) fn validate_custom(
+        u: &str,
+        allow_loopback_http: bool,
+    ) -> Result<anykms_http::url::Url> {
+        let url = anykms_http::url::Url::parse(u)
+            .map_err(|_| config_err("the custom endpoint is not a valid URL"))?;
         if !url.username().is_empty() || url.password().is_some() {
             return Err(config_err(
                 "the custom endpoint must not contain credentials",
@@ -103,11 +106,16 @@ impl Endpoint {
     }
 
     /// The base URL for a key in `location`.
-    pub(crate) fn base_for(&self, location: &str, custom: Option<&url::Url>) -> Result<url::Url> {
+    pub(crate) fn base_for(
+        &self,
+        location: &str,
+        custom: Option<&anykms_http::url::Url>,
+    ) -> Result<anykms_http::url::Url> {
         match self {
-            Endpoint::Global => {
-                Ok(url::Url::parse("https://cloudkms.googleapis.com/").expect("fixed URL"))
-            }
+            Endpoint::Global => Ok(anykms_http::url::Url::parse(
+                "https://cloudkms.googleapis.com/",
+            )
+            .expect("fixed URL")),
             Endpoint::Regional => {
                 if location == "global" {
                     return Err(Error::new(
@@ -119,45 +127,12 @@ impl Endpoint {
                     ));
                 }
                 // The location passed the URI grammar ([a-z0-9-]), so it is a valid DNS label.
-                url::Url::parse(&format!("https://cloudkms.{location}.rep.googleapis.com/"))
-                    .map_err(|_| config_err("invalid regional endpoint"))
+                anykms_http::url::Url::parse(&format!(
+                    "https://cloudkms.{location}.rep.googleapis.com/"
+                ))
+                .map_err(|_| config_err("invalid regional endpoint"))
             }
             Endpoint::Custom(_) => Ok(custom.expect("validated at build").clone()),
-        }
-    }
-}
-
-/// HTTP protocol version.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HttpVersion {
-    /// HTTP/1.1 (default).
-    #[default]
-    Http1,
-    /// HTTP/2 (multiplexes every request over one connection). Requires the `http2` feature;
-    /// negotiated with TLS ALPN, so `https://` endpoints only.
-    Http2,
-}
-
-/// Proxy configuration. Environment proxies (`HTTPS_PROXY`, ...) are ignored unless configured
-/// explicitly.
-#[non_exhaustive]
-#[derive(Clone, Default, PartialEq, Eq)]
-pub enum Proxy {
-    /// Connect directly.
-    #[default]
-    None,
-    /// Use this proxy for all requests, including token endpoints (the metadata server is always
-    /// reached directly).
-    Url(String),
-}
-
-impl fmt::Debug for Proxy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Proxy::None => f.write_str("None"),
-            // Proxy URLs may carry credentials; print only scheme, host and port.
-            Proxy::Url(u) => write!(f, "Url({})", anykms_http::redact::url_origin(u)),
         }
     }
 }
@@ -212,9 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_debug_hides_credentials() {
-        let p = Proxy::Url("http://user:secret@proxy:3128".into());
-        assert_eq!(format!("{p:?}"), "Url(http://proxy:3128)");
+    fn endpoint_debug_hides_credentials() {
         let e = Endpoint::custom("https://user:secret@kms.example/x?token=secret");
         assert_eq!(format!("{e:?}"), "Custom(https://kms.example:443)");
     }

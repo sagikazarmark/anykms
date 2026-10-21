@@ -20,11 +20,17 @@ clippy:
 [doc("Check each crate on its own without default features.")]
 check:
     cargo hack check --workspace --no-default-features --all-targets --locked
+    # Without the `reqwest` feature there is no built-in transport: the tests that pin the error
+    # naming both remedies, and the facade skipping the HTTP backends.
+    cargo test -p anykms-http --no-default-features --locked --lib
+    cargo test -p anykms-transit --no-default-features --locked --test scripted
+    cargo test -p anykms --no-default-features --features transit,aws,gcp,azure,recipes --locked --lib
 
-# Each backend forwards them to anykms-http, which selects one. aws-lc-rs is the default: the
-# default build must not link ring, and the opt-in ring path (`--no-default-features --features
-# rustls-ring`) must not link aws-lc-sys. `check` covers "no provider" (process default at
-# runtime). The ring path keeps its TLS tests; `test` runs the aws-lc-rs ones.
+# Each backend forwards them to anykms-http, which selects one for the built-in transport.
+# aws-lc-rs is the default: the default build must not link ring, and the opt-in ring path
+# (`--no-default-features --features reqwest,rustls-ring`) must not link aws-lc-sys. `check`
+# covers "no provider" (process default at runtime). The ring path keeps its TLS tests; `test`
+# runs the aws-lc-rs ones.
 [doc("Check the rustls provider features.")]
 tls:
     #!/usr/bin/env bash
@@ -41,17 +47,17 @@ tls:
       exit 1
     fi
     cargo hack check -p anykms-transit -p anykms-aws -p anykms-gcp -p anykms-azure \
-      --no-default-features --features rustls-ring --all-targets --locked
+      --no-default-features --features reqwest,rustls-ring --all-targets --locked
     for c in anykms-transit anykms-aws anykms-gcp anykms-azure; do
-      if cargo tree -p "$c" --no-default-features --features rustls-ring \
+      if cargo tree -p "$c" --no-default-features --features reqwest,rustls-ring \
           -e normal --prefix none --locked | grep -q '^aws-lc-sys '; then
         echo "aws-lc-sys is linked into $c with only rustls-ring enabled" >&2
         exit 1
       fi
     done
-    cargo check -p anykms --no-default-features --features transit,aws,gcp,azure,rustls-ring --locked
-    cargo test -p anykms-transit --no-default-features --features rustls-ring --locked --lib --test tls
-    cargo test -p anykms-http --no-default-features --features rustls-ring --locked --lib
+    cargo check -p anykms --no-default-features --features transit,aws,gcp,azure,reqwest,rustls-ring --locked
+    cargo test -p anykms-transit --no-default-features --features reqwest,rustls-ring --locked --lib --test tls --test scripted
+    cargo test -p anykms-http --no-default-features --features reqwest,rustls-ring --locked --lib
 
 # Each recipe feature alone, on top of the verification-only build (no default features, also
 # linted on its own): what a backend that only verifies locally depends on. Then the RSA
@@ -183,10 +189,22 @@ examples *flags="--features local":
 # wasm-bindgen-test-runner (.cargo/config.toml), which needs a wasm-bindgen-cli matching the
 # `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it).
 wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo check -p anykms-core -p anykms-recipes -p anykms-local -p anykms-conformance \
       --target wasm32-unknown-unknown --locked --no-default-features \
       --features anykms-core/js,anykms-recipes/js,anykms-recipes/jose,anykms-recipes/envelope,anykms-recipes/rsa-rustcrypto,anykms-local/js,anykms-conformance/js
     cargo test -p anykms-wasm-tests --target wasm32-unknown-unknown --locked
+    # The HTTP backends without the built-in transport (`reqwest` off): a wasm32 build that brings
+    # its own `HttpTransport` must not pull reqwest, hyper or rustls into the tree (the backends
+    # are not compiled for wasm32 here; only the dependency tree is checked).
+    for dep in reqwest hyper rustls; do
+      if cargo tree -p anykms --no-default-features --features transit,aws,gcp,azure \
+          --target wasm32-unknown-unknown -e normal --prefix none --locked | grep -q "^$dep "; then
+        echo "$dep is in the facade's dependency tree with the reqwest feature off" >&2
+        exit 1
+      fi
+    done
 
 # Install the wasm-bindgen-cli release that matches Cargo.lock (the test runner refuses a mismatch).
 wasm-bindgen-cli:

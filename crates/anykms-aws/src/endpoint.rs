@@ -59,9 +59,9 @@ pub(crate) fn validate_url(
     raw: &str,
     allow_loopback_http: bool,
     what: &str,
-) -> Result<reqwest::Url> {
-    let url =
-        reqwest::Url::parse(raw).map_err(|_| config_err(format!("{what} is not a valid URL")))?;
+) -> Result<anykms_http::url::Url> {
+    let url = anykms_http::url::Url::parse(raw)
+        .map_err(|_| config_err(format!("{what} is not a valid URL")))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err(config_err(format!("{what} must not contain credentials")));
     }
@@ -74,8 +74,8 @@ pub(crate) fn validate_url(
         "https" => {}
         "http" => {
             let loopback = match url.host() {
-                Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-                Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
+                Some(anykms_http::url::Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
+                Some(anykms_http::url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
                 _ => false,
             };
             if !loopback {

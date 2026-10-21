@@ -3,8 +3,8 @@
 [![crates.io](https://img.shields.io/crates/v/anykms-azure?style=flat-square)](https://crates.io/crates/anykms-azure)
 [![docs.rs](https://img.shields.io/docsrs/anykms-azure?style=flat-square)](https://docs.rs/anykms-azure)
 
-The Azure Key Vault and Managed HSM backend: an in-house REST client on `reqwest` and rustls
-(ring or aws-lc-rs); Key Vault calls use no Azure SDK. RSA and EC keys (digest signing, server-side or
+The Azure Key Vault and Managed HSM backend: an in-house REST client over the `HttpTransport` seam (built in: `reqwest` and rustls,
+ring or aws-lc-rs); Key Vault calls use no Azure SDK. RSA and EC keys (digest signing, server-side or
 local verification, public keys), RSA-OAEP-256 key wrapping for envelope KEKs and data keys over
 it, and on Managed HSM `oct-HSM` keys AES-GCM `Aead` and `A256KW` wrapping (HMAC behind the
 experimental `mhsm-hmac` feature). Bearer tokens go only to an allowlisted vault host. Credentials

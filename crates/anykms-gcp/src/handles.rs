@@ -11,7 +11,7 @@ use anykms_core::{
     SignatureAlgorithm, Tag,
 };
 use anykms_http::cache::SingleFlight;
-use reqwest::Method;
+use anykms_http::http::Method;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -118,7 +118,7 @@ impl Shared {
 pub(crate) struct KeyCtx {
     pub(crate) shared: Arc<Shared>,
     pub(crate) key: GcpKeyRef,
-    pub(crate) base: Arc<url::Url>,
+    pub(crate) base: Arc<anykms_http::url::Url>,
     pub(crate) check: KeyTypeCheck,
     /// `gcp-kms://...` as opened, attached to every error of the handle.
     pub(crate) resource: Arc<str>,

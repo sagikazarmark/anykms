@@ -31,7 +31,7 @@ impl SelfSignedJwt {
         pem: &Secret,
         quota_project: Option<String>,
     ) -> Result<Self> {
-        let der = anykms_http::tls::private_key_from_pem(crate::BACKEND, pem.0.as_bytes())
+        let der = anykms_http::pem::private_key_from_pem(crate::BACKEND, pem.0.as_bytes())
             .map_err(|_| config_err("cannot parse the service-account private key"))?;
         let rustls_pki_types::PrivateKeyDer::Pkcs8(pkcs8) = der else {
             return Err(config_err(

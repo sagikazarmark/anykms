@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anykms_core::{BackendDetail, BoxFuture, Error, ErrorKind, Operation, Result};
+use anykms_http::HttpTransport;
 use anykms_http::credentials::{Credential, CredentialCache, Expiring};
 use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
@@ -85,6 +86,16 @@ pub trait AzureCredential: Send + Sync + fmt::Debug {
     fn tenant_id(&self) -> Option<&str> {
         None
     }
+
+    /// The provider hands over its HTTP transport when it is built. The built-in credentials
+    /// fetch their tokens through it (so one transport carries every request of a provider: its
+    /// TLS trust, proxy and timeouts apply to token endpoints too) and keep the first transport
+    /// they are given: a credential value belongs to one provider; clone it for another (a clone
+    /// starts unbound). A credential with its own way to the network ignores it, which is the
+    /// default.
+    fn bind_transport(&self, transport: Arc<dyn HttpTransport>) {
+        let _ = transport;
+    }
 }
 
 impl<T: AzureCredential + ?Sized> AzureCredential for Arc<T> {
@@ -99,6 +110,9 @@ impl<T: AzureCredential + ?Sized> AzureCredential for Arc<T> {
     }
     fn tenant_id(&self) -> Option<&str> {
         (**self).tenant_id()
+    }
+    fn bind_transport(&self, transport: Arc<dyn HttpTransport>) {
+        (**self).bind_transport(transport);
     }
 }
 
@@ -156,7 +170,8 @@ impl fmt::Debug for Tokens {
 pub(crate) type CachedToken = Credential<Arc<AccessToken>>;
 
 impl Tokens {
-    pub(crate) fn new(cred: Arc<dyn AzureCredential>) -> Self {
+    pub(crate) fn new(cred: Arc<dyn AzureCredential>, http: &Arc<dyn HttpTransport>) -> Self {
+        cred.bind_transport(http.clone());
         Self {
             cred,
             caches: Mutex::default(),
@@ -245,61 +260,71 @@ pub(crate) fn cred_config_err(m: impl Into<Cow<'static, str>>) -> Error {
     cred_err(ErrorKind::Configuration, m)
 }
 
-/// A reqwest client built on first use (building loads the system roots), kept afterwards. A
-/// failed build is not kept.
-pub(crate) struct LazyClient {
-    connect_timeout: Duration,
-    request_timeout: Duration,
-    require_roots: bool,
-    client: Mutex<Option<reqwest::Client>>,
+/// The HTTP transport a built-in credential fetches tokens through: the provider's, handed over
+/// by [`AzureCredential::bind_transport`] when the provider is built (the first binding wins);
+/// before that (a credential used on its own), the default transport, built on first use and
+/// kept until a provider binds its own. A clone starts with an empty slot, so a cloned credential
+/// can serve another provider.
+#[derive(Default)]
+pub(crate) struct TransportSlot(Mutex<Option<Held>>);
+
+/// What a slot holds: a provider's transport, or the default one built for standalone use.
+enum Held {
+    Bound(Arc<dyn HttpTransport>),
+    Default(Arc<dyn HttpTransport>),
 }
 
-impl fmt::Debug for LazyClient {
+impl Clone for TransportSlot {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for TransportSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LazyClient")
-            .field("connect_timeout", &self.connect_timeout)
-            .field("request_timeout", &self.request_timeout)
+        let state = match &*self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            None => "empty",
+            Some(Held::Bound(_)) => "bound",
+            Some(Held::Default(_)) => "default",
+        };
+        f.debug_struct("TransportSlot")
+            .field("transport", &state)
             .finish()
     }
 }
 
-impl Clone for LazyClient {
-    fn clone(&self) -> Self {
-        Self::new(
-            self.connect_timeout,
-            self.request_timeout,
-            self.require_roots,
-        )
-    }
-}
-
-impl LazyClient {
-    pub(crate) fn new(connect: Duration, request: Duration, require_roots: bool) -> Self {
-        Self {
-            connect_timeout: connect,
-            request_timeout: request,
-            require_roots,
-            client: Mutex::new(None),
-        }
+impl TransportSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
     }
 
-    pub(crate) fn get(&self) -> Result<reqwest::Client> {
-        let mut c = self
-            .client
+    /// Binds `transport` unless a provider's transport is bound already; a default built for
+    /// standalone use (a token fetched before the provider was built) is replaced.
+    pub(crate) fn bind(&self, transport: Arc<dyn HttpTransport>) {
+        let mut slot = self
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(c) = &*c {
-            return Ok(c.clone());
+        if !matches!(&*slot, Some(Held::Bound(_))) {
+            *slot = Some(Held::Bound(transport));
         }
-        let tls = anykms_http::tls::TlsOptions::new()
-            .require_roots(self.require_roots)
-            .build(BACKEND)?;
-        let built = anykms_http::client::ClientOptions::new()
-            .connect_timeout(self.connect_timeout)
-            .request_timeout(self.request_timeout)
-            .build(BACKEND, tls)?;
-        *c = Some(built.clone());
-        Ok(built)
+    }
+
+    pub(crate) fn get(&self) -> Result<Arc<dyn HttpTransport>> {
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(Held::Bound(t) | Held::Default(t)) = &*slot {
+            return Ok(t.clone());
+        }
+        let t = anykms_http::default_transport(BACKEND, true)?;
+        *slot = Some(Held::Default(t.clone()));
+        Ok(t)
     }
 }
 
@@ -309,10 +334,11 @@ pub(crate) const MAX_TOKEN_RESPONSE: usize = 64 * 1024;
 /// A validated authority host (`https://login.microsoftonline.com`): https, or plain http on a
 /// literal loopback IP (tests); no path, query or userinfo. Returned without a trailing slash.
 pub(crate) fn validate_authority(host: &str) -> Result<String> {
-    let url = url::Url::parse(host).map_err(|_| cred_config_err("invalid authority host URL"))?;
+    let url = anykms_http::url::Url::parse(host)
+        .map_err(|_| cred_config_err("invalid authority host URL"))?;
     let loopback = match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(anykms_http::url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(anykms_http::url::Host::Ipv6(ip)) => ip.is_loopback(),
         _ => false,
     };
     let ok_scheme = url.scheme() == "https" || (url.scheme() == "http" && loopback);
@@ -472,29 +498,26 @@ pub(crate) fn token_error(
     e
 }
 
-/// Sends a token request and decodes the response; transport errors keep anykms-http's fixed
-/// messages.
+/// Sends a token request through `http` and decodes the response; transport errors keep
+/// anykms-http's fixed messages.
 pub(crate) async fn send_token_request(
-    req: reqwest::RequestBuilder,
+    http: &dyn HttpTransport,
+    req: anykms_http::http::Result<anykms_http::transport::Request>,
     kind: &'static str,
 ) -> Result<AccessToken> {
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| anykms_http::client::transport_error(BACKEND, Operation::Configure, e))?;
-    let status = resp.status();
-    let retry_after = anykms_http::client::retry_after(resp.headers());
-    let body = anykms_http::client::read_body(resp, MAX_TOKEN_RESPONSE)
+    use anykms_http::SendError;
+    let resp = anykms_http::client::send(http, req, MAX_TOKEN_RESPONSE)
         .await
         .map_err(|e| match e {
-            anykms_http::client::BodyError::TooLarge => cred_err(
+            SendError::TooLarge { .. } => cred_err(
                 ErrorKind::Unavailable,
                 format!("{kind} token response too large"),
             ),
-            anykms_http::client::BodyError::Transport(e) => {
-                anykms_http::client::transport_error(BACKEND, Operation::Configure, e)
-            }
+            e => e.into_error(BACKEND, Operation::Configure),
         })?;
+    let status = resp.status;
+    let retry_after = anykms_http::client::retry_after(&resp.headers);
+    let body = resp.body;
     if !status.is_success() {
         return Err(token_error(kind, status.as_u16(), &body, retry_after));
     }
@@ -510,11 +533,11 @@ pub(crate) fn form_body(pairs: &[(&str, &str)]) -> Zeroizing<Vec<u8>> {
         if i > 0 {
             out.push(b'&');
         }
-        for part in url::form_urlencoded::byte_serialize(k.as_bytes()) {
+        for part in anykms_http::url::form_urlencoded::byte_serialize(k.as_bytes()) {
             out.extend_from_slice(part.as_bytes());
         }
         out.push(b'=');
-        for part in url::form_urlencoded::byte_serialize(v.as_bytes()) {
+        for part in anykms_http::url::form_urlencoded::byte_serialize(v.as_bytes()) {
             out.extend_from_slice(part.as_bytes());
         }
     }

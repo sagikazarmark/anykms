@@ -183,21 +183,29 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
 - Use `https://`. Plain `http://` is accepted only for literal loopback IPs (`127.0.0.0/8`,
   `::1`), for example a Vault/Bao Agent API proxy. `from_env` enables this automatically for such
   addresses. The hostname `localhost` is rejected.
-- `ca_pem` / `ca_file` / `VAULT_CACERT` / `VAULT_CAPATH` **replaces** the system roots.
-  `VAULT_CAPATH` is a directory of PEM files (symlinks followed, subdirectories skipped); every
-  file must hold a certificate, and `VAULT_CACERT` wins when both are set, as in the Vault CLI.
-  There is no way to skip verification, and `*_SKIP_VERIFY=true` makes `from_env` fail.
+- TLS trust, client certificates (mTLS), the crypto provider, proxying, timeouts and the HTTP
+  version are settings of the HTTP transport, not of `ServerConfig`: build a
+  `ReqwestTransport` (`anykms_transit::anykms_http::ReqwestTransport::builder()`) and pass it to
+  `ServerConfig::http_transport`, or bring any `HttpTransport`. One transport may serve several
+  servers and providers. Without one, a default `ReqwestTransport` (system roots) is built.
+- `ReqwestTransportBuilder::ca_pem`, and `VAULT_CACERT` / `VAULT_CAPATH` through `EnvConfig`
+  (which builds the transport from them), **replace** the system roots. `VAULT_CAPATH` is a
+  directory of PEM files (symlinks followed, subdirectories skipped); every file must hold a
+  certificate, and `VAULT_CACERT` wins when both are set, as in the Vault CLI.
+  `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` configure the client certificate the same way. There
+  is no way to skip verification, and `*_SKIP_VERIFY=true` makes `from_env` fail. A transport
+  passed to a `ServerConfig` loaded by `EnvConfig` replaces the one built from the variables.
 - TLS failures are classified: a rejected server certificate (`TLS certificate rejected: unknown
   issuer`, `name mismatch`, `expired`, ...) or a client certificate the server refuses is
   `Configuration` and is not retried. `DNS lookup failed` stays `Unavailable` (resolver outages
   are transient), so a mistyped host shows up as repeated `Unavailable` with that message.
 - The rustls crypto provider is aws-lc-rs by default (`rustls-aws-lc-rs`; building it needs a C
-  compiler). ring is opt-in: `default-features = false, features = ["rustls-ring"]`. A provider
-  passed with `ServerConfig::crypto_provider` wins, then the process default
-  (`CryptoProvider::install_default`), then the feature's provider. See the anykms-transit crate
+  compiler). ring is opt-in: `default-features = false, features = ["reqwest", "rustls-ring"]`. A
+  provider passed with `ReqwestTransportBuilder::crypto_provider` wins, then the process default
+  (`CryptoProvider::install_default`), then the feature's provider. See the anykms-http crate
   docs.
-- Certificate files are read when the provider is built. To pick up rotated CAs or client
-  certificates, rebuild the provider.
+- Certificate files are read when the transport is built. To pick up rotated CAs or client
+  certificates, build a new transport and provider.
 - Redirects are never followed. A 307 becomes `Unavailable` (retryable); it usually means the
   address points at a standby node without request forwarding (check the load balancer or
   `api_addr`). Any other 3xx (301/308 permanent redirects, and 302/303 from proxies or login
@@ -324,13 +332,17 @@ refused by default as well: a group-readable token is shared with every process 
 
 ### Timeouts and connections
 
+Connection settings live on the built-in transport (`ReqwestTransportBuilder`); the retry
+settings on `RetryPolicy`.
+
 | Setting | Default | Notes |
 |---|---|---|
 | `connect_timeout` | 2 s | fails fast on partitions |
-| `request_timeout` | 10 s | per attempt |
+| `request_timeout` | 10 s | per attempt; a backend's metadata probes override it per request (`RequestTimeout`) |
 | `pool_idle_timeout` | 50 s | below common load-balancer idle timeouts |
 | `tcp_keepalive` | 30 s | |
-| `http_version` | HTTP/1.1 | HTTP/2 multiplexes onto one node behind a load balancer; it is negotiated over TLS only, so plain-HTTP loopback servers always use HTTP/1.1 |
+| `http2` | off | HTTP/2 multiplexes onto one node behind a load balancer; it is negotiated over TLS only (needs the `http2` feature), so plain-HTTP loopback servers always use HTTP/1.1 |
+| `proxy` | none | environment proxy variables are ignored; link-local and loopback hosts are never proxied |
 | `Retry` attempts / backoff | 6 / 300 ms base, 5 s cap, equal jitter | the 5 retries wait 4.65–9.3 s in total, which spans a leader step-down (see "Failover" below) |
 | `Retry` deadline | 15 s | across attempts (see `RetryPolicy`) |
 
@@ -524,11 +536,10 @@ attempts, 50-500 ms backoff, 2 s deadline), on their own registry layer or per h
 refresh interval plus backoff (the preset fits the default 500 ms interval).
 
 The deadline bounds the retry schedule, not an attempt in flight: the worst case is the deadline
-plus one attempt, which lasts up to the provider's `request_timeout` (10 s by default), plus any
+plus one attempt, which lasts up to the transport's request timeout (10 s by default), plus any
 wait for credentials. A server that accepts connections and never answers costs an interactive
-request about 10 s. To bound it, lower `request_timeout` (e.g.
-`ServerConfig::request_timeout`, or the cloud providers' builders) or wrap the call in
-`tokio::time::timeout`.
+request about 10 s. To bound it, lower `ReqwestTransportBuilder::request_timeout` on the
+transport you pass to the providers, or wrap the call in `tokio::time::timeout`.
 
 | Condition (in this order) | Status | Notes |
 |---|---|---|

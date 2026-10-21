@@ -70,8 +70,14 @@
 //! - **Envelope KEKs** ([`AwsKeyWrapKey`]): symmetric keys wrap with `Encrypt`; RSA
 //!   `ENCRYPT_DECRYPT` keys wrap locally with RSAES-OAEP-SHA-256 over the pinned public key and
 //!   unwrap with `Decrypt` (needs the `rsa-aws-lc-rs` or `rsa-rustcrypto` feature).
-//! - **Transport.** No redirects are followed (a 3xx is `Configuration`); connect and per-request
-//!   timeouts (2 s / 10 s); TLS by rustls with no way to skip verification; plain `http://` only
+//! - **Transport.** Every request (KMS, STS, IMDS, the container endpoint) goes through one
+//!   [`HttpTransport`](anykms_http::HttpTransport): [`AwsProviderBuilder::http_transport`], or a
+//!   default [`ReqwestTransport`](anykms_http::ReqwestTransport) (feature `reqwest`). TLS trust,
+//!   the crypto provider, proxying, timeouts and the HTTP version are the transport's settings
+//!   ([`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder)); `AWS_CA_BUNDLE` builds
+//!   one. The built-in transport follows no redirects (a 3xx is `Configuration`), times out after
+//!   2 s connecting and 10 s per request (the link-local credential endpoints after 2 s), never
+//!   proxies link-local hosts, and offers no way to skip TLS verification. Plain `http://` only
 //!   for literal loopback IPs with [`AwsProviderBuilder::allow_loopback_http`] (emulators).
 //! - **Tracing** (`tracing` feature): each request is a `debug` span `anykms.aws` with `backend`,
 //!   `op`, `resource`, `key_version`, `attempt`, `http_status`, `code`, `request_id`,
@@ -80,12 +86,13 @@
 //! - **Errors** (backend name `aws`) name the key (`resource` = the key URI) and carry the AWS
 //!   exception name (`BackendDetail::code`), the request id and the HTTP status; server
 //!   messages are kept verbatim only when they are pinned, fixed texts.
-//! - **Runtime.** Requires a tokio runtime (reqwest); called outside one, an operation fails
-//!   with `Configuration` instead of panicking.
+//! - **Runtime.** The built-in transport requires a tokio runtime; called outside one, an
+//!   operation fails with `Configuration` instead of panicking, before the credential chain runs.
 //!
 //! # TLS crypto provider
 //!
-//! The first of: [`AwsProviderBuilder::crypto_provider`]; the process default
+//! The built-in transport takes the first of:
+//! [`ReqwestTransportBuilder::crypto_provider`](anykms_http::ReqwestTransportBuilder::crypto_provider); the process default
 //! ([`CryptoProvider::install_default`]); aws-lc-rs with the `rustls-aws-lc-rs` feature
 //! (default; it builds C, so a C compiler is needed); ring with the `rustls-ring` feature (opt-in,
 //! with `default-features = false`). The provider is never installed process-wide.
@@ -94,10 +101,11 @@
 //!
 //! Request and response bodies, decoded plaintexts, data keys, secret access keys, session
 //! tokens and derived SigV4 signing keys live in zeroizing buffers. Copies outside anykms'
-//! control are not wiped: the body reqwest sends, header values (the session token), the process
-//! environment, hyper/rustls buffers and the page cache of credential files.
+//! control are not wiped: with the built-in transport, the body reqwest sends, header values (the
+//! session token) and hyper/rustls buffers; the process environment and the page cache of
+//! credential files.
 //!
-//! [`CryptoProvider::install_default`]: rustls::crypto::CryptoProvider::install_default
+//! [`CryptoProvider::install_default`]: anykms_http::rustls::crypto::CryptoProvider::install_default
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
@@ -132,7 +140,10 @@ mod uri;
 /// The backend name of errors and of [`Provider::name`](anykms_core::Provider::name).
 pub(crate) const BACKEND: &str = "aws";
 
-pub use config::{AwsProviderBuilder, HttpVersion, Proxy};
+/// The HTTP plumbing: the [`HttpTransport`](anykms_http::HttpTransport) seam and the built-in
+/// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`AwsProviderBuilder::http_transport`].
+pub use anykms_http;
+pub use config::AwsProviderBuilder;
 pub use context::{
     AAD_CONTEXT_KEY, EncryptionContext, GrantTokens, MAX_AAD_BYTES, MAX_CONTEXT_BYTES,
 };
@@ -141,8 +152,6 @@ pub use extension::EncryptionContextAead;
 pub use handles::{AwsAeadKey, AwsDigestKey, AwsEd25519Key, AwsKeyWrapKey, AwsMacKey};
 pub use keyinfo::AwsKeyInfo;
 pub use provider::AwsProvider;
-/// The rustls version used for TLS, for [`AwsProviderBuilder::crypto_provider`].
-pub use rustls;
 pub use uri::{AwsKeyRef, SCHEME, SCHEMES};
 
 /// Key administration for the test fixtures and the A0 probe (hidden `__test-fixtures` feature).
@@ -166,8 +175,8 @@ pub mod __fuzz {
 
     /// Error-response classification (`x-amzn-ErrorType` from `header`, body JSON).
     pub fn classify(status: u16, header: Option<&str>, body: &[u8]) -> anykms_core::ErrorKind {
-        let mut h = reqwest::header::HeaderMap::new();
-        if let Some(v) = header.and_then(|v| reqwest::header::HeaderValue::from_str(v).ok()) {
+        let mut h = anykms_http::http::HeaderMap::new();
+        if let Some(v) = header.and_then(|v| anykms_http::http::HeaderValue::from_str(v).ok()) {
             h.insert("x-amzn-errortype", v);
         }
         let (code, message) = crate::errors::parse_error(&h, body);

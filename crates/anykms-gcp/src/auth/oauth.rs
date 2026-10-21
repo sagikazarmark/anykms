@@ -8,7 +8,11 @@ use serde::Deserialize;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{Fetched, MAX_TOKEN_RESPONSE, auth_err};
+use anykms_http::HttpTransport;
 use anykms_http::credentials::Expiring;
+use anykms_http::http::Method;
+use anykms_http::http::header::{CONTENT_TYPE, HeaderValue};
+use anykms_http::url::Url;
 
 /// Appends `s` form-urlencoded (`application/x-www-form-urlencoded`) to `out`.
 fn form_encode(out: &mut Zeroizing<Vec<u8>>, s: &[u8]) {
@@ -128,40 +132,40 @@ pub(crate) fn parse_oauth_token(what: &'static str, body: &[u8]) -> Result<Expir
     Ok(Fetched::valid_for(token, lifetime))
 }
 
-/// Sends a token request and returns the success body (bounded, zeroizing), or the mapped error.
+/// Sends a token request through `http` and returns the success body (bounded, zeroizing), or
+/// the mapped error.
 pub(crate) async fn send(
     what: &'static str,
-    req: reqwest::RequestBuilder,
+    http: &dyn HttpTransport,
+    req: anykms_http::http::Result<anykms_http::transport::Request>,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let resp = req.send().await.map_err(|e| {
-        let e = anykms_http::client::transport_error(
-            crate::BACKEND,
-            anykms_core::Operation::Configure,
-            e,
-        );
-        // A refused TLS certificate stays Configuration; every other failure to reach a token
-        // endpoint is retryable.
-        let kind = match e.kind() {
-            ErrorKind::Configuration => ErrorKind::Configuration,
-            ErrorKind::Timeout => ErrorKind::Timeout,
-            _ => ErrorKind::Unavailable,
-        };
-        let msg = format!("{what}: {}", e.message());
-        auth_err(kind, msg).with_source(e)
-    })?;
-    let status = resp.status().as_u16();
-    let body = anykms_http::client::read_body(resp, MAX_TOKEN_RESPONSE)
+    use anykms_http::SendError;
+    let resp = anykms_http::client::send(http, req, MAX_TOKEN_RESPONSE)
         .await
         .map_err(|e| match e {
-            anykms_http::client::BodyError::TooLarge => auth_err(
+            SendError::TooLarge { .. } => auth_err(
                 ErrorKind::Unavailable,
                 format!("{what}: token response too large"),
             ),
-            anykms_http::client::BodyError::Transport(_) => auth_err(
+            SendError::Body(_) => auth_err(
                 ErrorKind::Unavailable,
                 format!("{what}: token response was interrupted"),
             ),
+            e => {
+                let e = e.into_error(crate::BACKEND, anykms_core::Operation::Configure);
+                // A refused TLS certificate stays Configuration; every other failure to reach a
+                // token endpoint is retryable.
+                let kind = match e.kind() {
+                    ErrorKind::Configuration => ErrorKind::Configuration,
+                    ErrorKind::Timeout => ErrorKind::Timeout,
+                    _ => ErrorKind::Unavailable,
+                };
+                let msg = format!("{what}: {}", e.message());
+                auth_err(kind, msg).with_source(e)
+            }
         })?;
+    let status = resp.status.as_u16();
+    let body = resp.body;
     if !(200..300).contains(&status) {
         let e = endpoint_error(what, status, &body);
         drop(body);
@@ -170,28 +174,23 @@ pub(crate) async fn send(
     Ok(body)
 }
 
-/// A `POST` of a form body. The caller keeps (and wipes) its zeroizing buffer.
+/// A `POST` of a form body. The body is copied into the request's zeroizing buffer; the caller
+/// keeps (and wipes) its own.
 pub(crate) fn post_form(
-    http: &reqwest::Client,
-    url: &url::Url,
+    url: &Url,
     body: &[u8],
-) -> reqwest::RequestBuilder {
-    // reqwest copies the body into its own buffer; that copy is not wiped (see the crate docs on
-    // zeroization limits).
-    http.post(url.clone())
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
-        .body(body.to_vec())
+) -> anykms_http::http::Result<anykms_http::transport::Request> {
+    anykms_http::client::request(Method::POST, url)
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Zeroizing::new(body.to_vec()))
 }
 
 /// A bearer `Authorization` header value, marked sensitive.
-pub(crate) fn bearer(token: &str) -> Result<reqwest::header::HeaderValue> {
+pub(crate) fn bearer(token: &str) -> Result<HeaderValue> {
     let mut v = Zeroizing::new(String::with_capacity(token.len() + 7));
     v.push_str("Bearer ");
     v.push_str(token);
-    let mut h = reqwest::header::HeaderValue::from_str(&v).map_err(|_| {
+    let mut h = HeaderValue::from_str(&v).map_err(|_| {
         auth_err(
             ErrorKind::Configuration,
             "access token contains invalid characters",

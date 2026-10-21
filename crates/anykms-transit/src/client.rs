@@ -3,13 +3,15 @@
 use std::sync::Arc;
 
 use anykms_core::{BackendDetail, Error, ErrorKind, Operation, Result};
-use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::{Method, StatusCode};
+use anykms_http::HttpTransport;
+use anykms_http::http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use anykms_http::http::{Method, StatusCode};
+use anykms_http::url::Url;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::BACKEND;
-use crate::config::{HttpVersion, Proxy, ServerConfig};
+use crate::config::ServerConfig;
 use crate::errors::{Failure, classify};
 use crate::token::{Token, TokenSource};
 
@@ -20,8 +22,8 @@ const HARMLESS_WARNINGS: &[&str] = &[];
 pub(crate) struct Server {
     pub(crate) alias: String,
     pub(crate) cfg: ServerConfig,
-    base: reqwest::Url,
-    http: reqwest::Client,
+    base: Url,
+    http: Arc<dyn HttpTransport>,
     /// `cfg.token`, or the login source when `cfg.login` is set.
     token: Arc<dyn TokenSource>,
     /// The semantics of this server's handles, by key family.
@@ -74,24 +76,6 @@ fn config_err(m: &'static str) -> Error {
     Error::new(ErrorKind::Configuration, BACKEND, Operation::Configure, m)
 }
 
-/// The rustls client configuration: `ca_pem` or the system roots (required for `https://`), the
-/// optional client certificate, ALPN per `http_version`, and the crypto provider chosen by
-/// [`anykms_http::tls::select_provider`] (`ServerConfig::crypto_provider`, the process default,
-/// aws-lc-rs, ring).
-fn tls_config(cfg: &ServerConfig, require_roots: bool) -> Result<rustls::ClientConfig> {
-    anykms_http::tls::TlsOptions::new()
-        .ca_pem(cfg.ca_pem.as_deref())
-        .client_identity(
-            cfg.client_identity
-                .as_ref()
-                .map(|(cert, key)| (&cert[..], &key[..])),
-        )
-        .crypto_provider(cfg.crypto_provider.clone(), "ServerConfig::crypto_provider")
-        .require_roots(require_roots)
-        .http2(cfg.http_version == HttpVersion::Http2)
-        .build(BACKEND)
-}
-
 #[derive(Deserialize)]
 struct ErrorBody {
     #[serde(default)]
@@ -117,50 +101,36 @@ fn unexpected_warning(w: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
-/// Classifies a reqwest failure (no response): fixed messages, the URL stripped from the source.
-pub(crate) fn transport_error(op: Operation, e: reqwest::Error) -> Error {
-    anykms_http::client::transport_error(BACKEND, op, e)
-}
-
-/// Sends `req` through [`anykms_http::client::send`] (which records `http_status` into the
-/// current span) and classifies a failure to get a whole response: a transport error, or a body
-/// over `limit`, an unusable response with the message `too_large`.
+/// Sends `req` through `http` with [`anykms_http::client::send`] (which records `http_status`
+/// into the current span) and classifies a failure to get a whole response: a transport error,
+/// or a body over `limit`, an unusable response with the message `too_large`.
 pub(crate) async fn send(
-    req: reqwest::RequestBuilder,
+    http: &dyn HttpTransport,
+    req: anykms_http::http::Result<anykms_http::transport::Request>,
     limit: usize,
     op: Operation,
     alias: &str,
     too_large: &'static str,
 ) -> Result<anykms_http::client::Response> {
-    use anykms_http::client::SendError;
-    anykms_http::client::send(req, limit)
+    use anykms_http::SendError;
+    anykms_http::client::send(http, req, limit)
         .await
         .map_err(|e| match e {
-            SendError::NoRuntime => anykms_http::client::no_runtime_error(BACKEND, op),
-            SendError::Transport(e) => transport_error(op, e),
             SendError::TooLarge { status } => {
                 crate::errors::unusable_response(op, alias, Some(status.as_u16()), too_large)
             }
+            e => e.into_error(BACKEND, op),
         })
 }
 
 impl Server {
     pub(crate) fn new(alias: String, cfg: ServerConfig) -> Result<Self> {
         let base = cfg.validate()?;
-        // Always preconfigured: no process-global rustls provider is installed or required.
-        // Plain-HTTP (loopback) servers never use it, so they do not need trusted roots.
-        let tls = tls_config(&cfg, base.scheme() == "https")?;
-        let http = anykms_http::client::ClientOptions::new()
-            .connect_timeout(cfg.connect_timeout)
-            .request_timeout(cfg.request_timeout)
-            .pool_idle_timeout(cfg.pool_idle_timeout)
-            .tcp_keepalive(cfg.tcp_keepalive)
-            .http2(cfg.http_version != HttpVersion::Http1)
-            .proxy(match &cfg.proxy {
-                Proxy::None => None,
-                Proxy::Url(u) => Some(u.as_str().to_owned()),
-            })
-            .build(BACKEND, tls)?;
+        let http = match &cfg.http_transport {
+            Some(t) => t.clone(),
+            // A plain-HTTP (loopback) server needs no trusted roots.
+            None => anykms_http::default_transport(BACKEND, base.scheme() == "https")?,
+        };
         let token: Arc<dyn TokenSource> = match &cfg.login {
             Some(login) => Arc::new(crate::auth::LoginSource::new(
                 login.clone(),
@@ -183,7 +153,7 @@ impl Server {
 
     /// `<base>/v1/<segments...>`, each segment percent-encoded as a single path segment. Empty,
     /// `.` and `..` segments are refused (URI and mount validation already rule them out).
-    fn url(&self, segments: &[&str]) -> Result<reqwest::Url> {
+    fn url(&self, segments: &[&str]) -> Result<Url> {
         if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
             return Err(config_err("invalid request path"));
         }
@@ -202,9 +172,7 @@ impl Server {
         token: Option<&Token>,
     ) -> Result<(StatusCode, HeaderMap, Zeroizing<Vec<u8>>)> {
         let url = self.url(&call.segments)?;
-        let mut req = self
-            .http
-            .request(call.method.clone(), url)
+        let mut req = anykms_http::client::request(call.method.clone(), &url)
             .header("X-Vault-Request", "true");
         if let Some(t) = token {
             let mut v = HeaderValue::from_str(t.expose()).map_err(|_| {
@@ -221,20 +189,23 @@ impl Server {
         if let Some(ns) = call.namespace {
             req = req.header("X-Vault-Namespace", ns);
         }
-        if let Some(body) = &call.body {
-            // reqwest copies the body into its own buffer; that copy cannot be zeroized (see the
-            // zeroization limits in docs/guarantees.md).
-            req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.to_vec());
-        }
+        // The body stays in a zeroizing buffer up to the transport (which may copy it; see the
+        // zeroization limits in docs/guarantees.md).
+        let body = match &call.body {
+            Some(body) => {
+                req = req.header(CONTENT_TYPE, "application/json");
+                body.clone()
+            }
+            None => anykms_http::client::empty(),
+        };
         // `http_status` is recorded for every response, success included; the 403-refresh retry
         // overwrites it with the final attempt's status. Content-Length is a hint from the
         // server, trusted only up to a small cap, so a lying header cannot make us allocate up
         // front; the body grows into fresh zeroizing buffers (the old one is wiped), never
         // beyond the limit.
         let r = send(
-            req,
+            &*self.http,
+            req.body(body),
             self.cfg.max_response_bytes,
             call.op,
             &self.alias,
@@ -264,8 +235,11 @@ impl Server {
     }
 
     async fn call_inner(&self, call: &Call<'_>) -> Result<Zeroizing<Vec<u8>>> {
-        // First: outside a Tokio runtime the credential sources and reqwest would panic.
-        anykms_http::client::require_runtime(BACKEND, call.op)?;
+        // First: a transport that cannot send from this context (reqwest outside a Tokio
+        // runtime) fails here, before the token source is asked.
+        self.http
+            .ready()
+            .map_err(|e| e.into_error(BACKEND, call.op))?;
         let source = &self.token;
         let token = source
             .token()

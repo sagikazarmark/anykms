@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/anykms-gcp?style=flat-square)](https://crates.io/crates/anykms-gcp)
 [![docs.rs](https://img.shields.io/docsrs/anykms-gcp?style=flat-square)](https://docs.rs/anykms-gcp)
 
-The Google Cloud KMS backend: an in-house REST client on `reqwest` and rustls (ring or aws-lc-rs)
+The Google Cloud KMS backend: an in-house REST client over the `HttpTransport` seam (built in: `reqwest` and rustls, ring or aws-lc-rs)
 with in-house Application Default Credentials (metadata server, service-account keys,
 authorized-user, workload identity federation, impersonation). AEAD, envelope KEKs, ECDSA/RSA/Ed25519
 signing with local verification, HMAC, RSA-OAEP key wrapping, public keys and describe; CRC32C

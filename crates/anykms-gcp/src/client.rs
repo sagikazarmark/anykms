@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use anykms_core::{Error, ErrorKind, Operation, Result};
-use reqwest::{Method, StatusCode};
+use anykms_http::HttpTransport;
+use anykms_http::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap};
+use anykms_http::http::{Method, StatusCode};
+use anykms_http::url::Url;
 use zeroize::Zeroizing;
 
 use crate::BACKEND;
@@ -13,7 +16,7 @@ use crate::handles::Origin;
 use crate::uri::GcpKeyRef;
 
 pub(crate) struct Client {
-    pub(crate) http: reqwest::Client,
+    pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) creds: Arc<dyn CredentialSource>,
     /// The configured quota project; wins over the credential's.
     pub(crate) quota_project: Option<String>,
@@ -32,7 +35,7 @@ impl std::fmt::Debug for Client {
 /// One request.
 pub(crate) struct Call<'a> {
     pub(crate) method: Method,
-    pub(crate) base: &'a url::Url,
+    pub(crate) base: &'a Url,
     /// The key the request is about (the path).
     pub(crate) key: &'a GcpKeyRef,
     /// The handle's `gcp-kms://` URI, the span's `resource`.
@@ -59,7 +62,7 @@ impl Call<'_> {
     /// `<base>/v1/projects/.../cryptoKeys/<k>[/cryptoKeyVersions/<n>][/<collection>][:<verb>]`.
     /// Every segment is percent-encoded as a single path segment (defence in depth: the URI
     /// grammar already rules out `/`, `%`, `?` and `#`).
-    pub(crate) fn url(&self) -> Result<url::Url> {
+    pub(crate) fn url(&self) -> Result<Url> {
         let version = self.version.map(|v| v.to_string());
         let mut segs: Vec<&str> = self.key.key_segments().to_vec();
         if let Some(v) = &version {
@@ -91,15 +94,15 @@ impl Call<'_> {
     }
 }
 
-pub(crate) type Response = (StatusCode, reqwest::header::HeaderMap, Zeroizing<Vec<u8>>);
+pub(crate) type Response = (StatusCode, HeaderMap, Zeroizing<Vec<u8>>);
 
 impl Client {
     async fn send(&self, call: &Call<'_>, token: Option<&Token>) -> Result<Response> {
         let url = call.url()?;
-        let mut req = self.http.request(call.method.clone(), url);
+        let mut req = anykms_http::client::request(call.method.clone(), &url);
         if let Some(t) = token {
             req = req.header(
-                reqwest::header::AUTHORIZATION,
+                AUTHORIZATION,
                 crate::auth::bearer_header(t.expose()).map_err(|e| e.with_operation(call.op))?,
             );
         }
@@ -110,27 +113,26 @@ impl Client {
         {
             req = req.header("x-goog-user-project", q);
         }
-        if let Some(body) = &call.body {
-            // reqwest copies the body into its own buffer; that copy cannot be zeroized (see the
-            // crate docs on zeroization limits).
-            req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.to_vec());
-        }
+        // The body stays in a zeroizing buffer up to the transport (which may copy it; see the
+        // crate docs on zeroization limits).
+        let body = match &call.body {
+            Some(body) => {
+                req = req.header(CONTENT_TYPE, "application/json");
+                body.clone()
+            }
+            None => anykms_http::client::empty(),
+        };
         // `send` records `http_status` into the request span for every response.
-        use anykms_http::client::SendError;
-        let r = anykms_http::client::send(req, self.max_response)
+        use anykms_http::SendError;
+        let r = anykms_http::client::send(&*self.http, req.body(body), self.max_response)
             .await
             .map_err(|e| match e {
-                SendError::NoRuntime => anykms_http::client::no_runtime_error(BACKEND, call.op),
-                SendError::Transport(e) => {
-                    anykms_http::client::transport_error(BACKEND, call.op, e)
-                }
                 SendError::TooLarge { status } => crate::errors::unusable_response(
                     call.op,
                     Some(status.as_u16()),
                     "response exceeds the maximum size",
                 ),
+                e => e.into_error(BACKEND, call.op),
             })?;
         Ok((r.status, r.headers, r.body))
     }
@@ -163,8 +165,11 @@ impl Client {
     }
 
     async fn call_inner(&self, call: &Call<'_>) -> Result<Zeroizing<Vec<u8>>> {
-        // First: outside a Tokio runtime the credential sources and reqwest would panic.
-        anykms_http::client::require_runtime(BACKEND, call.op)?;
+        // First: a transport that cannot send from this context (reqwest outside a Tokio
+        // runtime) fails here, before the credential source is asked.
+        self.http
+            .ready()
+            .map_err(|e| e.into_error(BACKEND, call.op))?;
         let token = self
             .creds
             .token()
@@ -229,7 +234,7 @@ mod tests {
         let key =
             GcpKeyRef::parse_rest("//projects/my-project/locations/global/keyRings/r/cryptoKeys/k")
                 .unwrap();
-        let base = url::Url::parse("http://127.0.0.1:1234/").unwrap();
+        let base = Url::parse("http://127.0.0.1:1234/").unwrap();
         let mut call = Call {
             method: Method::POST,
             base: &base,

@@ -173,9 +173,13 @@ through `AzureIdentity` as above.
 | `AZURE_AUTHORITY_HOST` | the Entra ID authority (sovereign clouds); `https://` only |
 | `ANYKMS_AZURE_ALLOWED_VAULTS` | comma-separated exact hosts tokens may go to (`contoso-prod.vault.azure.net`) |
 
-There is no environment variable for test hosts, custom CAs or a proxy: those are builder calls
-(`test_host`, `ca_pem`, `proxy`), so production configuration cannot be redirected by the
-environment. Proxy variables (`HTTPS_PROXY`) are ignored. Redirects are never followed (a 3xx is
+There is no environment variable for test hosts, custom CAs or a proxy: test hosts are a builder
+call (`test_host`), and TLS trust, the crypto provider, proxying and timeouts are settings of the
+HTTP transport (`ReqwestTransportBuilder`, passed to `AzureProviderBuilder::http_transport`),
+so production configuration cannot be redirected by the environment. Every request (vaults, the
+Entra ID token endpoint, IMDS) goes through that one transport; the built-in credentials receive
+it from the provider (`AzureCredential::bind_transport`). Proxy variables (`HTTPS_PROXY`) are
+ignored; IMDS, a link-local host, is never proxied. Redirects are never followed (a 3xx is
 `Configuration`). `Debug` output prints a proxy URL as `scheme://host:port` only.
 
 ## Limits
@@ -252,7 +256,7 @@ verification needs the `rsa-aws-lc-rs` (default) or `rsa-rustcrypto` feature.
 | `InvalidArgument` | input too large (RSA-OAEP: modulus bytes − 66), digest of the wrong hash, unversioned signature, malformed version; a malformed key identifier or version given to `AzureKeyRef::from_key_id` / `with_version` (`Operation::Construct`); a 400 the vault gave for a write | fix the input |
 | `Throttled` | vault limit (see [Limits](#limits)); `retry_after()` when Azure sent `Retry-After` | retry with backoff; reduce request volume |
 | `Unavailable` | 5xx, connection refused or reset, DNS, IMDS unreachable; an `AzureIdentity` credential that could not reach its endpoint (a connection or I/O error, 429 or 5xx) | retry; check Azure status |
-| `Timeout` | slow vault or network | retry; check `request_timeout` |
+| `Timeout` | slow vault or network | retry; check the transport's `request_timeout` |
 | `Backend` | an unexpected response (logged with the `tracing` feature, body never logged) | report it with `request_id` (`x-ms-request-id`) |
 
 **Key states.** Azure answers an operation on a disabled, not-yet-valid or expired version with
