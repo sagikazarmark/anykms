@@ -80,16 +80,13 @@ use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
 use zeroize::Zeroizing;
 
 use crate::around::{Around, Call, CallCx, CallOutput};
 use crate::dynamic::*;
 use crate::error::{Error, ErrorKind, Result};
+use crate::time::Instant;
 use crate::traits::*;
 use crate::types::*;
 
@@ -105,12 +102,12 @@ pub fn instant_sleep() -> SleepFn {
 /// subtracts two readings, to enforce [`RetryPolicy::deadline`].
 ///
 /// Inject one that matches the [`SleepFn`] (e.g. tokio's clock with `tokio::time::sleep`, so
-/// paused test time drives both). On `wasm32-unknown-unknown` the default reads
-/// `performance.now()` through `web_time`, since `std::time::Instant::now` panics there.
+/// paused test time drives both). On `wasm32-unknown-unknown` with the `js` feature the default
+/// reads `performance.now()` ([`crate::time`]), since `std::time::Instant::now` panics there.
 pub type ClockFn = Arc<dyn Fn() -> Duration + Send + Sync>;
 
-/// The default [`ClockFn`]: `std::time::Instant` (`web_time::Instant` on wasm32), measured from the
-/// first reading in the process.
+/// The default [`ClockFn`]: [`crate::time::Instant`] (`std::time::Instant`, or the JS clock on
+/// `wasm32-unknown-unknown` with the `js` feature), measured from the first reading in the process.
 pub fn std_clock() -> ClockFn {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     Arc::new(|| ORIGIN.get_or_init(Instant::now).elapsed())

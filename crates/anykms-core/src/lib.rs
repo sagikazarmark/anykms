@@ -61,6 +61,7 @@ pub mod retry;
 mod semantics;
 #[cfg(feature = "serde")]
 mod serde_impls;
+pub mod time;
 mod traits;
 mod types;
 mod uri;

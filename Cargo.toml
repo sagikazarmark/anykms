@@ -55,8 +55,11 @@ spki = "0.8"
 signature = "3"
 rand_core = "0.10"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-# Portability (wasm32-unknown-unknown): `std::time::{Instant, SystemTime}::now` panic there.
-web-time = "1.1"
+# JS hosts on wasm32-unknown-unknown (`js` feature): `performance.now()` / `Date.now()` for the
+# clock (`std::time::{Instant, SystemTime}::now` panic there). Already in the graph through
+# `getrandom`'s `wasm_js` backend.
+js-sys = "0.3"
+wasm-bindgen = "0.2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

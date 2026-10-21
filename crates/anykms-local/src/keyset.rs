@@ -577,13 +577,7 @@ impl LocalKeyset {
 }
 
 fn now() -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
-    use std::time::{SystemTime, UNIX_EPOCH};
-    #[cfg(target_arch = "wasm32")]
-    use web_time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    anykms_core::time::unix_now().as_secs()
 }
 
 #[cfg(test)]

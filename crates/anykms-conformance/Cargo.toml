@@ -12,6 +12,10 @@ categories = ["cryptography", "development-tools::testing"]
 [features]
 # Helpers for backend fixtures: `RunId`, `KeySpecTable`, `FreshKeys` and `typed_handles!`.
 fixture-helpers = []
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): the clock behind
+# `Ctx::settled` and the recipes' clocks and RNG (`anykms-core/js`, `anykms-recipes/js`). A wasm
+# host drives `run_async` on its own executor. No effect on any other target.
+js = ["anykms-core/js", "anykms-recipes/js"]
 
 [dependencies]
 anykms-core.workspace = true
@@ -34,12 +38,9 @@ tokio.workspace = true
 libtest-mimic.workspace = true
 anykms-recipes = { workspace = true, features = ["rsa-aws-lc-rs"] }
 
-# wasm32-unknown-unknown: the pure-Rust RSA backend (aws-lc-rs does not build there) and the
-# `web_time` clock for `Ctx::settled`.
+# wasm32: the pure-Rust RSA backend (aws-lc-rs has no C toolchain there).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 anykms-recipes = { workspace = true, features = ["rsa-rustcrypto"] }
-web-time.workspace = true
-getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 # examples/minimal_backend.rs: key material and nonces for its toy KMS.

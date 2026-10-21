@@ -47,14 +47,18 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   fails with `Configuration` (see [From synchronous code](guide.md#from-synchronous-code)). Core,
   recipes and local are runtime-agnostic (any async executor; you supply `Retry`'s sleep function
   and, optionally, its clock).
-- **`wasm32-unknown-unknown`** (browsers, Cloudflare Workers): core, recipes, local and
-  conformance build and run there. Clocks come from `web_time` (`Date.now()`,
-  `performance.now()`), so `Retry`'s default clock, `CachedVerifier`, JWT signing (`JwtOptions`
-  without `with_now`), local keyset timestamps and the DEK cache work unchanged. The application
-  must enable `getrandom`'s `wasm_js` feature and pass `--cfg getrandom_backend="wasm_js"`; the
-  RSA backend must be `rsa-rustcrypto` (aws-lc-rs does not build for wasm32). The conformance
-  runner (`run`, `run_or_skip`) is native-only; a wasm host drives
-  `anykms_conformance::run_async` on its own executor and reports the `Report`. The HTTP
+- **`wasm32-unknown-unknown` on a JS host** (browsers, Node.js, Cloudflare Workers): core,
+  recipes, local and conformance build and run there with their `js` feature. `std::time` has no
+  clock on that target, so the feature routes every clock read through `anykms_core::time`:
+  `performance.now()` for the monotonic clock (`Retry`'s default clock, `CachedVerifier`, the DEK
+  cache) and `Date.now()` for the wall clock (JWT `iat`/`exp`, local keyset timestamps), with no
+  extra dependencies beyond the `js-sys`/`wasm-bindgen` that `getrandom`'s JS backend already
+  brings. The same feature enables that backend; the application still passes
+  `--cfg getrandom_backend="wasm_js"`. The RSA backend must be `rsa-rustcrypto` (aws-lc-rs does
+  not build for wasm32). The conformance runner (`run`, `run_or_skip`) is native-only; a wasm host
+  drives `anykms_conformance::run_async` on its own executor and reports the `Report`. Cloudflare
+  Workers advance both clocks only across I/O. Without `js`, the target behaves as before (the
+  std clock panics on first use); WASI targets have a working clock and never need it. The HTTP
   backends are **not** supported there: they need TLS control the host does not offer (see the
   `HttpTransport` discussion in the issue tracker).
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in

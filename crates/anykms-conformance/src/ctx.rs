@@ -202,10 +202,7 @@ impl<F: Fixture> Ctx<F> {
     where
         Fut: std::future::Future<Output = Result<T, String>>,
     {
-        #[cfg(not(target_arch = "wasm32"))]
-        use std::time::Instant;
-        #[cfg(target_arch = "wasm32")]
-        use web_time::Instant;
+        use anykms_core::time::Instant;
         let deadline = Instant::now() + self.caps.settle_time;
         loop {
             let r = check().await;

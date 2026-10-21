@@ -115,9 +115,8 @@
 
 use std::sync::Mutex;
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use anykms_core::time::unix_now;
 use anykms_core::{
     AsymmetricKeyType, Describe, DigestSigner, Error, ErrorKind, KeyState, KeyVersion,
     MessageSigner, Operation, PublicKey, PublicKeys, Result, Signature, SignatureAlgorithm,
@@ -138,11 +137,7 @@ fn invalid(op: Operation, m: &'static str) -> Error {
 }
 
 fn now_unix() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    use web_time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    unix_now().as_secs()
 }
 
 /// The default key id: `<key name>.<version>`.
@@ -463,7 +458,8 @@ impl JwtOptions {
     }
 
     /// Uses `unix_seconds` as the current time instead of the system clock (for tests). On
-    /// `wasm32-unknown-unknown` the clock is `Date.now()` via `web_time`.
+    /// `wasm32-unknown-unknown` the clock is `Date.now()` with the `js` feature
+    /// (`anykms_core::time`); without it, signing reads `SystemTime` and panics there.
     pub fn with_now(mut self, unix_seconds: u64) -> Self {
         self.now = Some(unix_seconds);
         self

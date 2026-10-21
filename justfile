@@ -93,7 +93,7 @@ test:
 # missing from a package and dev-dependencies that `cargo publish` strips.
 [doc("Build every crate from its packaged sources.")]
 package:
-    cargo package --workspace --exclude anykms-testkit --locked
+    cargo package --workspace --exclude anykms-testkit --exclude anykms-wasm-tests --locked
 
 # local, gcp (its in-process fake Cloud KMS server, without and with the public-key cache) and
 # conformance (the minimal_backend example) need nothing else, so every case they can run must
@@ -178,14 +178,28 @@ live package *args:
 examples *flags="--features local":
     for e in field_encryption jwt_signing jwt_signing_jwt_simple hmac_tokens; do cargo run -p anykms --locked {{ flags }} --example "$e"; done
 
+# The transport-free crates on wasm32-unknown-unknown with their `js` feature (a JS host:
+# browsers, Node.js, Cloudflare Workers): a check of each, then anykms-wasm-tests under Node via
+# wasm-bindgen-test-runner (.cargo/config.toml), which needs a wasm-bindgen-cli matching the
+# `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it).
+wasm:
+    cargo check -p anykms-core -p anykms-recipes -p anykms-local -p anykms-conformance \
+      --target wasm32-unknown-unknown --locked --no-default-features \
+      --features anykms-core/js,anykms-recipes/js,anykms-recipes/jose,anykms-recipes/envelope,anykms-recipes/rsa-rustcrypto,anykms-local/js,anykms-conformance/js
+    cargo test -p anykms-wasm-tests --target wasm32-unknown-unknown --locked
+
+# Install the wasm-bindgen-cli release that matches Cargo.lock (the test runner refuses a mismatch).
+wasm-bindgen-cli:
+    cargo install wasm-bindgen-cli --locked --version "$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')"
+
 # Check feature combinations that workspace builds hide (Cargo unifies features across the workspace).
 features:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Each feature alone (with no default features), the defaults, and none. anykms-testkit is an
-    # unpublished test helper.
-    cargo hack check --each-feature --lib --locked --workspace --exclude anykms-testkit
+    # Each feature alone (with no default features), the defaults, and none. anykms-testkit and
+    # anykms-wasm-tests are unpublished test helpers.
+    cargo hack check --each-feature --lib --locked --workspace --exclude anykms-testkit --exclude anykms-wasm-tests
 
     # The facade with its cloud backends (default features).
     cargo check -p anykms --features aws,gcp,azure --locked

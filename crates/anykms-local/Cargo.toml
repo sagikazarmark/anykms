@@ -11,6 +11,12 @@ categories = ["cryptography", "development-tools::testing"]
 # Tests are not published: no test sources or test keys in the package.
 exclude = ["tests/"]
 
+[features]
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): keyset
+# timestamps read `Date.now()` (`anykms-core/js`) and `getrandom` uses `crypto.getRandomValues()`
+# (the application still passes `--cfg getrandom_backend="wasm_js"`). No effect elsewhere.
+js = ["anykms-core/js", "getrandom/wasm_js"]
+
 [dependencies]
 anykms-core.workspace = true
 
@@ -27,12 +33,6 @@ signature.workspace = true
 spki.workspace = true
 getrandom.workspace = true
 tracing.workspace = true
-
-# wasm32-unknown-unknown: clocks from `web_time` (`std::time::*::now` panics there); `getrandom`
-# needs its `wasm_js` feature plus `--cfg getrandom_backend="wasm_js"` in the final build.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time.workspace = true
-getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 tokio.workspace = true

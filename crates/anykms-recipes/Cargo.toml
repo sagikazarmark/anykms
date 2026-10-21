@@ -35,6 +35,11 @@ envelope = ["dep:aes-gcm", "dep:hkdf", "dep:sha2", "dep:subtle"]
 # verify a precomputed digest.
 rsa-rustcrypto = ["dep:rsa", "dep:sha2"]
 rsa-aws-lc-rs = ["dep:aws-lc-rs"]
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): the clocks behind
+# `CachedVerifier`, the DEK cache and JWT `now` read `performance.now()` / `Date.now()`
+# (`anykms-core/js`), and `getrandom` uses `crypto.getRandomValues()` (the application still passes
+# `--cfg getrandom_backend="wasm_js"`). No effect on any other target.
+js = ["anykms-core/js", "getrandom/wasm_js"]
 
 [dependencies]
 anykms-core.workspace = true
@@ -57,12 +62,6 @@ getrandom.workspace = true
 base64.workspace = true
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-
-# wasm32-unknown-unknown: clocks from `web_time` (`std::time::*::now` panics there); `getrandom`
-# needs its `wasm_js` feature plus `--cfg getrandom_backend="wasm_js"` in the final build.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time.workspace = true
-getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 # In-process KMS keys with versions (tests/jose_interop.rs, tests/emulated.rs). Path only, so
