@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use anykms_core::time::Instant;
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
 use zeroize::Zeroizing;
 
@@ -309,7 +310,7 @@ impl FileToken {
     /// The token: the cached one while the file is unchanged, otherwise a fresh read inside a
     /// token span.
     fn read(&self) -> Result<Token> {
-        let started = anykms_core::time::Instant::now();
+        let started = Instant::now();
         let r = match self.read_inner() {
             Ok((tok, Fresh::Cached)) => return Ok(tok),
             Ok((tok, Fresh::Read)) => Ok(tok),

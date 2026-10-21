@@ -394,7 +394,9 @@ name = "anykms-wasm-tests"
 version = "0.1.0"
 dependencies = [
  "anykms-aws",
+ "anykms-azure",
  "anykms-core",
+ "anykms-gcp",
  "anykms-http",
  "anykms-local",
  "anykms-recipes",

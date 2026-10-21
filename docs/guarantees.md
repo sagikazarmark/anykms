@@ -96,19 +96,27 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   dependency that remains is its `sync` and `time` types (no runtime), which build for the target.
 - **Cloudflare Workers.** The shape is `TowerTransport::new(tower_worker_fetch::FetchService::new())`,
   or that service under layers, with `default-features = false`, a backend feature, `tower` and
-  `js`: anykms ships no Workers transport and depends on no Workers crate. Supported **once
-  redirect control ships in `tower-worker-fetch`** (its issue #3): until a Worker's outbound
-  `fetch` can use `redirect: "manual"`, a signed or bearer-authenticated request can be silently
-  redirected, which the built-in transport never allows. What holds on a Worker regardless: TLS
-  is the host's (Cloudflare's edge, the public CAs), so the public cloud KMS endpoints (AWS, GCP,
-  Azure) are reachable, and Vault or OpenBao behind a private CA or client certificates is
-  **not**. Only static or explicitly provided credentials make sense: the metadata servers
-  (IMDS, the GCP metadata server, Azure IMDS) are not reachable from a Worker, so configure
-  credentials explicitly (`AwsProviderBuilder::credentials` with `StaticCredentials`,
-  `Credentials::from_json` or `static_token` for GCP, a `ClientSecret` for Azure) rather than
-  letting a default chain probe them.
-  `TowerTransport` has no timeout, so add one at the service: a `map_request` layer that inserts
-  `tower_worker_fetch::Timeout` (an `AbortSignal.timeout`), which also bounds such a probe.
+  `js`: anykms ships no Workers transport and depends on no Workers crate. Two request extensions
+  of `tower-worker-fetch` (0.2 or later) are **required**, set by a `map_request` layer on every
+  request (the guide shows the layer):
+  - `tower_worker_fetch::Redirect::Manual`. A Worker's outbound `fetch` follows redirects by
+    default and forwards every header, `Authorization` included, to the target, so without it a
+    signed or bearer-authenticated request can be silently redirected to a host of the server's
+    choosing; the built-in transport never allows that. With it, a 3xx comes back as is and the
+    backend rejects it, as on every other transport.
+  - `tower_worker_fetch::Timeout` (an `AbortSignal.timeout`): `TowerTransport` has no timeout of
+    its own, and the `RequestTimeout` a backend sets reaches the service but `FetchService` does
+    not read it; map one into the other, or set a fixed one.
+
+  What holds on a Worker regardless: TLS is the host's (Cloudflare's edge, the public CAs), so the
+  public cloud KMS endpoints (AWS, GCP, Azure) are reachable, and Vault or OpenBao behind a private
+  CA or client certificates is **not**. Only static or explicitly provided credentials make sense:
+  the link-local metadata servers (EC2 IMDS, the GCP metadata server, Azure IMDS) are not
+  reachable from a Worker, and on `wasm32-unknown-unknown` those sources fail with a
+  `Configuration` error **before sending anything**, whether chosen explicitly or reached by a
+  default chain (CI drives all three). Configure credentials explicitly:
+  `AwsProviderBuilder::credentials` with `StaticCredentials`, `Credentials::from_json` or
+  `static_token` for GCP, a `ClientSecret` for Azure.
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
   `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its

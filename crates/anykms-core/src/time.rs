@@ -19,8 +19,10 @@
 //!
 //! The JS `Instant` offers the subset of `std::time::Instant` the anykms crates use (`now`,
 //! `elapsed`, `duration_since` and friends, `+`/`-` with `Duration`, comparisons). It is a
-//! different type from `std::time::Instant`, so it never appears in a public signature: public
-//! APIs that take time take a `Duration` or a closure ([`crate::retry::ClockFn`]).
+//! different type from `std::time::Instant`, so the application-facing APIs of this crate take a
+//! `Duration` or a closure ([`crate::retry::ClockFn`]) rather than an instant. The backend-facing
+//! APIs of `anykms-http` (`Expiring`, the span helpers) name [`Instant`] from this module, which
+//! is `std::time::Instant` on every target but a JS host; code written against them does the same.
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown", feature = "js")))]
 mod imp {

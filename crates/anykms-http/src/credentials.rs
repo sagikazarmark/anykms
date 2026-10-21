@@ -42,8 +42,11 @@ use anykms_core::{Error, Result};
 
 use crate::cache::{Flight, SingleFlight};
 
-/// Now, on tokio's clock, which paused test time moves; on a JS host (where tokio's clock, like
-/// `std`'s, panics) the `anykms_core::time` clock.
+/// Now, on tokio's clock, which paused test time moves; on `wasm32-unknown-unknown` (where
+/// tokio's clock, like `std`'s, panics) the `anykms_core::time` clock: the JS host's with the
+/// `js` feature, `std`'s (panicking as before) without. The predicate is the target alone, unlike
+/// `anykms_core::time`'s: the feature decides what `Instant::now` reads, not whether tokio's
+/// clock is usable.
 fn now() -> Instant {
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {

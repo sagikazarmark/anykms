@@ -128,15 +128,48 @@ The adapter sets `content-length`, reads the response into the same bounded zero
 the built-in transport, and keeps the client's failure classes. It has **no timeout of its own**
 (`tower::timeout` is a layer you add; a `map_err` layer that boxes a `SendError::Timeout` keeps
 the class) and **cannot control redirects**: when the service is not the built-in client, configure
-it not to follow them. A request's `RequestTimeout` extension reaches the service, which may
-honour it (the built-in client does).
+it not to follow them (for a `fetch`-based service, the `Redirect::Manual` extension below). A
+request's `RequestTimeout` extension reaches the service, which may honour it (the built-in client
+does). The service is cloned for each request, so every layer in the stack must be `Clone`: tower's
+`RateLimit` is not, so put a rate limit behind a `buffer` layer (`ServiceBuilder::buffer`, feature
+`buffer`, needs a Tokio runtime), as tower documents.
+
+One difference from the bare client: `HttpTransport::ready` (the check a backend runs before its
+credential fetch, so that running outside a Tokio runtime fails with one `NoRuntime` error) cannot
+look through a tower stack. With `into_service()` at the bottom, `NoRuntime` still has its class
+and is still a `Configuration` error, but it surfaces from the first request, after the credential
+chain has started.
 
 The same adapter is how anykms runs where reqwest cannot, such as Cloudflare Workers: with
 `default-features = false`, a backend feature, `tower` and `js` (the host's clocks and RNG), the
-dependency tree holds no reqwest, hyper or rustls, and
-`TowerTransport::new(tower_worker_fetch::FetchService::new())` carries the requests over the
-host's `fetch`. See [guarantees](guarantees.md) for what holds on a Worker (host TLS, explicit
-credentials, and what the support still waits on).
+dependency tree holds no reqwest, hyper or rustls, and `tower-worker-fetch`'s `FetchService`
+carries the requests over the host's `fetch`. Two of its request extensions are **required** on
+every request, set by a `map_request` layer: `Redirect::Manual` (a Worker's `fetch` follows
+redirects by default, `Authorization` header included) and `Timeout` (the adapter has none, and
+`FetchService` does not read anykms's `RequestTimeout`; map it, or set a fixed one):
+
+```rust,ignore
+use std::time::Duration;
+
+use anykms::aws::anykms_http::{RequestTimeout, TowerTransport};
+use tower::ServiceBuilder;
+use tower_worker_fetch::{FetchService, Redirect, Timeout};
+
+let service = ServiceBuilder::new()
+    .map_request(|mut req: http::Request<_>| {
+        let ext = req.extensions_mut();
+        ext.insert(Redirect::Manual); // a 3xx comes back as is; the backend rejects it
+        let timeout = ext.get::<RequestTimeout>().map_or(Duration::from_secs(10), |t| t.0);
+        ext.insert(Timeout(timeout));
+        req
+    })
+    .service(FetchService::new());
+let transport = TowerTransport::new(service);
+```
+
+See [guarantees](guarantees.md) for what holds on a Worker: host TLS (public cloud endpoints
+reachable, a private CA or mTLS not), and explicit credentials only (the link-local metadata
+servers fail with a `Configuration` error before sending anything).
 
 ## Typed handles
 

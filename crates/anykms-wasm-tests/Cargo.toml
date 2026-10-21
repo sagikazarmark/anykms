@@ -21,13 +21,17 @@ test = false
 # anykms-aws and anykms-http's `tower` and `js` features are the Cloudflare Workers shape (a backend
 # over a `TowerTransport`, no reqwest, every clock on the host's): the backend must build for the
 # target and perform an operation on it. The `fetch` service itself (`tower-worker-fetch`) needs
-# workerd and is not driven here.
+# workerd and is not driven here. anykms-gcp and anykms-azure are here for one thing: their
+# link-local credential sources (metadata server, IMDS) must fail with a `Configuration` error
+# on this target, without a probe.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 anykms-core = { workspace = true, features = ["js"] }
 anykms-recipes = { workspace = true, default-features = false, features = ["js", "jose", "envelope", "rsa-rustcrypto"] }
 anykms-local = { workspace = true, features = ["js"] }
 anykms-http = { workspace = true, features = ["tower", "js"] }
 anykms-aws = { workspace = true, features = ["rsa-rustcrypto", "js"] }
+anykms-gcp = { workspace = true, features = ["rsa-rustcrypto", "js"] }
+anykms-azure = { workspace = true, features = ["rsa-rustcrypto", "js"] }
 tower-service.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true

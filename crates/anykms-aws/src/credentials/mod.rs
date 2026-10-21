@@ -24,6 +24,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anykms_core::time::system_now;
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
 use zeroize::Zeroizing;
 
@@ -339,7 +340,7 @@ impl JsonCredentials {
             expires_at,
         };
         c.validate().map_err(|_| bad())?;
-        if expires_at.is_some_and(|t| t <= anykms_core::time::system_now()) {
+        if expires_at.is_some_and(|t| t <= system_now()) {
             return Err(Error::new(
                 ErrorKind::Unavailable,
                 BACKEND,

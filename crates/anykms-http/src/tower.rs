@@ -18,9 +18,10 @@
 //! and reads the response body frame by frame into a [`BodyBuffer`], so nothing past the limit
 //! is buffered and what was read is wiped on overflow. It has **no timeout of its own**
 //! (`tower::timeout` needs a Tokio runtime and panics inside a Worker): a native stack adds its
-//! own layer, a Worker a `map_request` layer that inserts a `fetch` timeout. It **cannot control
-//! redirects**: the inner service must be configured not to follow them; a 3xx that reaches the
-//! adapter is returned as is, and the backends treat it as an error.
+//! own layer, a Worker a `map_request` layer that inserts `tower_worker_fetch::Timeout`. It
+//! **cannot control redirects**: the inner service must be configured not to follow them (on a
+//! Worker, the same layer inserts `tower_worker_fetch::Redirect::Manual`); a 3xx that reaches
+//! the adapter is returned as is, and the backends treat it as an error.
 
 use std::fmt;
 use std::future::poll_fn;
@@ -46,10 +47,19 @@ pub type RequestBody = Full<Bytes>;
 /// [`http_body::Body`] whose data is `Bytes`; its error is anything boxable. A service that
 /// returns a boxed [`SendError`] (a `map_err` layer can produce one, and
 /// [`ReqwestService`](crate::reqwest::ReqwestService) does) has it passed through unchanged, so
-/// the backends classify it; any other error is [`SendError::Other`] (a body read failure
-/// [`SendError::Body`]). The request's extensions, including its
+/// the backends classify it; one that wraps it in an error of its own (`tower::buffer`) keeps
+/// its class, the wrapper as the source; any other error is [`SendError::Other`] (a body read
+/// failure [`SendError::Body`]). The request's extensions, including its
 /// [`RequestTimeout`](crate::transport::RequestTimeout), reach the service unchanged: a service
 /// that can honour them may.
+///
+/// The service is cloned for each request (ready, then call), so every layer must be `Clone`:
+/// tower's `RateLimit` is not, and sits behind a `buffer` layer, as tower documents.
+///
+/// [`HttpTransport::ready`] cannot look through the stack and is the default `Ok`: with
+/// [`ReqwestService`](crate::reqwest::ReqwestService) at the bottom,
+/// [`SendError::NoRuntime`] keeps its class but surfaces from the first request, after a
+/// backend's credential fetch has started, rather than before it.
 ///
 /// The service, its future and the response body must be `Send` (see the trait's note): a
 /// `fetch`-based service wraps its JS futures on its own side, as `tower-worker-fetch` does.
@@ -164,11 +174,52 @@ fn body_len_header(method: &Method, len: usize) -> Option<HeaderValue> {
     (len > 0 || !get_like).then(|| HeaderValue::from(len))
 }
 
-/// A boxed [`SendError`] passes through; anything else is `other`.
+/// A boxed [`SendError`] passes through, whole when it is the error itself, by class when a
+/// layer wrapped it in an error of its own (`tower::buffer`'s `ServiceError` reports the
+/// service's failure as its `source()`): the wrapping error stays as the source. Anything else
+/// is `other`.
 fn classify(e: impl Into<Source>, other: fn(Source) -> SendError) -> SendError {
-    match e.into().downcast::<SendError>() {
-        Ok(e) => *e,
-        Err(e) => other(e),
+    let e = match e.into().downcast::<SendError>() {
+        Ok(e) => return *e,
+        Err(e) => e,
+    };
+    let mut cur = e.source();
+    let found = loop {
+        let Some(s) = cur else { break None };
+        if let Some(inner) = s.downcast_ref::<SendError>() {
+            break Some(same_class(inner));
+        }
+        cur = s.source();
+    };
+    match found {
+        Some(make) => make(e),
+        None => other(e),
+    }
+}
+
+/// A constructor for a [`SendError`] of `like`'s variant over another source: a `SendError`
+/// found inside a wrapping error cannot be moved out of it, so its class is copied instead.
+fn same_class(like: &SendError) -> Box<dyn FnOnce(Source) -> SendError> {
+    match like {
+        SendError::NoRuntime => Box::new(|_| SendError::NoRuntime),
+        SendError::TooLarge { status } => {
+            let status = *status;
+            Box::new(move |_| SendError::TooLarge { status })
+        }
+        SendError::InvalidRequest(_) => Box::new(SendError::InvalidRequest),
+        SendError::Timeout(_) => Box::new(SendError::Timeout),
+        SendError::Dns(_) => Box::new(SendError::Dns),
+        SendError::TlsRejected { reason, .. } => {
+            let reason = *reason;
+            Box::new(move |source| SendError::TlsRejected { reason, source })
+        }
+        SendError::Tls(_) => Box::new(SendError::Tls),
+        SendError::Connect { failure, .. } => {
+            let failure = *failure;
+            Box::new(move |source| SendError::connect(failure, source))
+        }
+        SendError::Body(_) => Box::new(SendError::Body),
+        SendError::Other(_) => Box::new(SendError::Other),
     }
 }
 
@@ -464,6 +515,61 @@ mod tests {
         // The clone per call released the one permit.
         match t.send(post(b""), 16).await {
             Err(SendError::Timeout(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A `SendError` wrapped by a layer's own error (`buffer` reports a failed `poll_ready` as
+    /// its `ServiceError`, the real one as the source) keeps its class; the wrapper is kept as
+    /// the source.
+    #[tokio::test]
+    async fn a_wrapped_send_error_keeps_its_class() {
+        use ::tower::ServiceBuilder;
+
+        /// Fails `poll_ready` with a boxed `SendError` of a `Configuration` class.
+        #[derive(Clone)]
+        struct NotReady;
+        impl Service<http::Request<RequestBody>> for NotReady {
+            type Response = http::Response<Full<Bytes>>;
+            type Error = Source;
+            type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Err(Box::new(SendError::TlsRejected {
+                    reason: "TLS certificate rejected: unknown issuer",
+                    source: "bad cert".into(),
+                })))
+            }
+
+            fn call(&mut self, _req: http::Request<RequestBody>) -> Self::Future {
+                unreachable!("never ready")
+            }
+        }
+
+        let svc = ServiceBuilder::new().buffer(1).service(NotReady);
+        match TowerTransport::new(svc).send(post(b""), 16).await {
+            Err(e @ SendError::TlsRejected { .. }) => {
+                assert_eq!(e.kind(), anykms_core::ErrorKind::Configuration);
+                assert_eq!(e.message(), "TLS certificate rejected: unknown issuer");
+                // The wrapper, then the original, then its source.
+                let wrapper = std::error::Error::source(&e).unwrap();
+                assert!(
+                    wrapper.is::<::tower::buffer::error::ServiceError>(),
+                    "{wrapper}"
+                );
+                let original = wrapper.source().unwrap();
+                assert!(original.is::<SendError>(), "{original}");
+                assert_eq!(original.source().unwrap().to_string(), "bad cert");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // No `SendError` anywhere in the chain: still `Other`.
+        let svc = ServiceBuilder::new()
+            .buffer(1)
+            .service(Scripted::new(fail("boom".into())));
+        match TowerTransport::new(svc).send(post(b""), 16).await {
+            Err(SendError::Other(e)) => assert_eq!(e.to_string(), "boom"),
             other => panic!("{other:?}"),
         }
     }

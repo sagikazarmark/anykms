@@ -70,7 +70,7 @@ tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # `ServiceBuilder` layers for the `TowerTransport` tests.
-tower = { workspace = true, features = ["util", "limit", "timeout"] }
+tower = { workspace = true, features = ["util", "limit", "timeout", "buffer"] }
 
 [lints]
 workspace = true

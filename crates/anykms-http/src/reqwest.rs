@@ -4,6 +4,9 @@
 //! connection-level setting — TLS trust and client certificates, the crypto provider, timeouts,
 //! proxying, HTTP version, the user agent — through [`ReqwestTransportBuilder`]. Backends
 //! configure only what is transport-independent (endpoint, credentials, response limit).
+//!
+//! With the `tower` feature, [`ReqwestTransport::into_service`] is the transport as a tower
+//! service ([`ReqwestService`]), for the bottom of a stack.
 
 use std::fmt;
 use std::sync::Arc;
@@ -17,6 +20,12 @@ use crate::tls::TlsOptions;
 use crate::transport::{
     BodyBuffer, ConnectFailure, HttpTransport, Request, RequestTimeout, Response, SendError, Source,
 };
+
+#[cfg(feature = "tower")]
+mod tower;
+#[cfg(feature = "tower")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
+pub use self::tower::{ReqwestBody, ReqwestService};
 
 /// The backend name in this transport's `Configuration` errors.
 const BACKEND: &str = "http";
@@ -254,17 +263,6 @@ impl ReqwestTransport {
         Self::builder().build()
     }
 
-    /// This client as a tower service, for the bottom of a tower stack that a
-    /// [`TowerTransport`](crate::tower::TowerTransport) then wraps: the hardened client (TLS,
-    /// no redirects, timeouts, proxy rules) with the caller's layers on top.
-    #[cfg(feature = "tower")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-    pub fn into_service(self) -> ReqwestService {
-        ReqwestService {
-            client: self.client,
-        }
-    }
-
     async fn send_inner(&self, req: Request, limit: usize) -> Result<Response, SendError> {
         let timeout = req.extensions().get::<RequestTimeout>().copied();
         let (parts, body) = req.into_parts();
@@ -318,65 +316,6 @@ impl HttpTransport for ReqwestTransport {
             return Err(SendError::NoRuntime);
         }
         Ok(())
-    }
-}
-
-/// The response body of [`ReqwestService`]: reqwest's, its errors classified as [`SendError`].
-#[cfg(feature = "tower")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-pub type ReqwestBody =
-    http_body_util::combinators::MapErr<::reqwest::Body, fn(::reqwest::Error) -> SendError>;
-
-/// [`ReqwestTransport`] as a tower service ([`ReqwestTransport::into_service`]), over
-/// `http::Request<`[`RequestBody`](crate::tower::RequestBody)`>`.
-///
-/// Its errors are [`SendError`]s, already classified, which
-/// [`TowerTransport`](crate::tower::TowerTransport) passes through, so a stack built on it
-/// reports failures exactly as the transport alone does. A request's
-/// [`RequestTimeout`] is honoured. Like the transport, it fails with [`SendError::NoRuntime`]
-/// outside a Tokio runtime instead of panicking.
-#[cfg(feature = "tower")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-#[derive(Clone)]
-pub struct ReqwestService {
-    client: ::reqwest::Client,
-}
-
-#[cfg(feature = "tower")]
-impl fmt::Debug for ReqwestService {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReqwestService").finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "tower")]
-impl tower_service::Service<http::Request<crate::tower::RequestBody>> for ReqwestService {
-    type Response = http::Response<ReqwestBody>;
-    type Error = SendError;
-    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: http::Request<crate::tower::RequestBody>) -> Self::Future {
-        use http_body_util::BodyExt as _;
-        let transport = ReqwestTransport {
-            client: self.client.clone(),
-        };
-        if let Err(e) = transport.ready() {
-            return Box::pin(async move { Err(e) });
-        }
-        let timeout = req.extensions().get::<RequestTimeout>().copied();
-        let req = req.map(::reqwest::Body::wrap);
-        Box::pin(async move {
-            let resp: http::Response<::reqwest::Body> =
-                transport.execute(req, timeout).await?.into();
-            Ok(resp.map(|b| b.map_err(classify as fn(::reqwest::Error) -> SendError)))
-        })
     }
 }
 
@@ -479,13 +418,21 @@ fn tls_failure(e: &rustls::Error) -> Classified {
     }
 }
 
+/// Fixtures the transport's and the tower service's tests share: a root-free client, loopback
+/// servers, and a runtime-free executor.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use http::StatusCode;
+mod test_support {
+    use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use zeroize::Zeroizing;
+
+    use super::ReqwestTransport;
+    use crate::transport::Request;
 
     /// Polls `fut` to completion on this thread, with no Tokio runtime.
-    fn block_on<F: Future>(fut: F) -> F::Output {
+    pub(super) fn block_on<F: Future>(fut: F) -> F::Output {
         struct Unpark(std::thread::Thread);
         impl std::task::Wake for Unpark {
             fn wake(self: std::sync::Arc<Self>) {
@@ -503,18 +450,80 @@ mod tests {
         }
     }
 
-    fn plain() -> ReqwestTransport {
+    pub(super) fn plain() -> ReqwestTransport {
         ReqwestTransport::builder()
             .require_roots(false)
             .build()
             .unwrap()
     }
 
-    fn get(url: &str) -> Request {
+    pub(super) fn get(url: &str) -> Request {
         http::Request::get(url)
             .body(Zeroizing::new(Vec::new()))
             .unwrap()
     }
+
+    /// Serves one canned HTTP/1.1 response per connection on a loopback port, `n` times, and
+    /// hands back each request as read (headers, then a body of the announced length). The URL
+    /// carries a query-string secret that must never appear in an error.
+    pub(super) fn serve(response: Vec<u8>, n: usize) -> (String, mpsc::Receiver<Vec<u8>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..n {
+                let (mut s, _) = l.accept().unwrap();
+                let mut req = Vec::new();
+                let mut b = [0u8; 1024];
+                loop {
+                    match s.read(&mut b) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req.extend_from_slice(&b[..k]),
+                    }
+                    if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                        if req.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = s.write_all(&response);
+                let _ = tx.send(req);
+            }
+        });
+        (format!("http://{addr}/p?token=SECRET"), rx)
+    }
+
+    /// A URL nothing listens on (the port was bound, then released).
+    pub(super) fn closed_port() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}/p?token=SECRET", l.local_addr().unwrap())
+    }
+
+    /// A server that accepts one connection, reads once and then sleeps `delay` without
+    /// answering.
+    pub(super) fn slow_server(delay: Duration) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 1024];
+            let _ = s.read(&mut b);
+            std::thread::sleep(delay);
+        });
+        format!("http://{addr}/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{block_on, closed_port, get, plain, serve, slow_server};
+    use super::*;
+    use http::StatusCode;
 
     /// R-35: outside a Tokio runtime `send` sends nothing and fails instead of panicking.
     #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
@@ -661,33 +670,11 @@ mod tests {
         assert!(!d.contains("KEYMATERIAL"), "{d}");
     }
 
-    /// Serves one canned HTTP/1.1 response per connection on a loopback port, `n` times.
-    fn serve(response: Vec<u8>, n: usize) -> String {
-        use std::io::{Read as _, Write as _};
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for _ in 0..n {
-                let (mut s, _) = l.accept().unwrap();
-                let mut req = Vec::new();
-                let mut b = [0u8; 1024];
-                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match s.read(&mut b) {
-                        Ok(0) | Err(_) => break,
-                        Ok(k) => req.extend_from_slice(&b[..k]),
-                    }
-                }
-                let _ = s.write_all(&response);
-            }
-        });
-        format!("http://{addr}/p?token=SECRET")
-    }
-
     #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
     #[tokio::test]
     async fn send_reads_any_status_within_the_limit() {
         let t = plain();
-        let url = serve(
+        let (url, _seen) = serve(
             b"HTTP/1.1 503 Service Unavailable\r\nx-request-id: r1\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello"
                 .to_vec(),
             2,
@@ -702,12 +689,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // Nothing listens there.
-        let closed = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}/p?token=SECRET", l.local_addr().unwrap())
-        };
-        match t.send(get(&closed), 4).await {
+        match t.send(get(&closed_port()), 4).await {
             Err(e @ SendError::Connect { .. }) => {
                 assert!(!format!("{e:?}").contains("SECRET"));
             }
@@ -720,156 +702,8 @@ mod tests {
     #[cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
     #[tokio::test]
     async fn request_timeout_extension_is_honoured() {
-        use std::io::Read as _;
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut s, _) = l.accept().unwrap();
-            let mut b = [0u8; 1024];
-            let _ = s.read(&mut b);
-            std::thread::sleep(Duration::from_secs(2));
-        });
         let t = plain();
-        let mut req = get(&format!("http://{addr}/"));
-        req.extensions_mut()
-            .insert(RequestTimeout(Duration::from_millis(100)));
-        let start = std::time::Instant::now();
-        match t.send(req, 1024).await {
-            Err(SendError::Timeout(_)) => {}
-            other => panic!("{other:?}"),
-        }
-        assert!(start.elapsed() < Duration::from_secs(1));
-    }
-}
-
-#[cfg(all(
-    test,
-    feature = "tower",
-    any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
-))]
-mod tower_tests {
-    use std::io::{Read as _, Write as _};
-
-    use http::StatusCode;
-    use zeroize::Zeroizing;
-
-    use super::*;
-    use crate::tower::TowerTransport;
-
-    fn plain() -> ReqwestTransport {
-        ReqwestTransport::builder()
-            .require_roots(false)
-            .build()
-            .unwrap()
-    }
-
-    /// Serves one canned response per connection, `n` times, and hands back what it read.
-    fn serve(response: Vec<u8>, n: usize) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for _ in 0..n {
-                let (mut s, _) = l.accept().unwrap();
-                let mut req = Vec::new();
-                let mut b = [0u8; 1024];
-                // Headers, then a body of the announced length.
-                loop {
-                    match s.read(&mut b) {
-                        Ok(0) | Err(_) => break,
-                        Ok(k) => req.extend_from_slice(&b[..k]),
-                    }
-                    if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
-                        let len = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length: "))
-                            .map_or(0, |v| v.trim().parse::<usize>().unwrap());
-                        if req.len() >= end + 4 + len {
-                            break;
-                        }
-                    }
-                }
-                let _ = s.write_all(&response);
-                let _ = tx.send(req);
-            }
-        });
-        (format!("http://{addr}/p?token=SECRET"), rx)
-    }
-
-    /// The built-in client at the bottom of a tower stack: the body and `content-length` reach
-    /// the wire, the response is read within the limit, and the failures keep the transport's
-    /// classes (a connection refused is `Connect`, not `Other`).
-    #[tokio::test]
-    async fn a_stack_over_the_client_behaves_like_the_transport() {
-        let svc = ::tower::ServiceBuilder::new()
-            .concurrency_limit(4)
-            .service(plain().into_service());
-        let t = TowerTransport::new(svc);
-        let (url, rx) = serve(
-            b"HTTP/1.1 503 Service Unavailable\r\nx-request-id: r1\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello"
-                .to_vec(),
-            2,
-        );
-        let req = http::Request::post(&url)
-            .body(Zeroizing::new(b"{\"k\":1}".to_vec()))
-            .unwrap();
-        let r = t.send(req, 5).await.unwrap();
-        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(r.headers().get("x-request-id").unwrap(), "r1");
-        assert_eq!(&r.body()[..], b"hello");
-        let seen = String::from_utf8(rx.recv().unwrap()).unwrap();
-        assert!(
-            seen.to_ascii_lowercase().contains("content-length: 7\r\n"),
-            "{seen}"
-        );
-        assert!(seen.ends_with("{\"k\":1}"), "{seen}");
-
-        let req = http::Request::get(&url)
-            .body(Zeroizing::new(Vec::new()))
-            .unwrap();
-        match t.send(req, 4).await {
-            Err(SendError::TooLarge { status }) => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-            }
-            other => panic!("{other:?}"),
-        }
-        let seen = String::from_utf8(rx.recv().unwrap()).unwrap();
-        assert!(
-            !seen.to_ascii_lowercase().contains("content-length"),
-            "{seen}"
-        );
-
-        let closed = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}/p?token=SECRET", l.local_addr().unwrap())
-        };
-        let req = http::Request::get(&closed)
-            .body(Zeroizing::new(Vec::new()))
-            .unwrap();
-        match t.send(req, 4).await {
-            Err(e @ SendError::Connect { .. }) => {
-                assert!(!format!("{e:?}").contains("SECRET"));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// A `RequestTimeout` reaches the client through the stack.
-    #[tokio::test]
-    async fn request_timeout_extension_is_honoured_through_the_stack() {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let (mut s, _) = l.accept().unwrap();
-            let mut b = [0u8; 1024];
-            let _ = s.read(&mut b);
-            std::thread::sleep(Duration::from_secs(2));
-        });
-        let t = TowerTransport::new(plain().into_service());
-        let mut req = http::Request::get(format!("http://{addr}/"))
-            .body(Zeroizing::new(Vec::new()))
-            .unwrap();
+        let mut req = get(&slow_server(Duration::from_secs(2)));
         req.extensions_mut()
             .insert(RequestTimeout(Duration::from_millis(100)));
         let start = std::time::Instant::now();

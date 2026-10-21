@@ -5,6 +5,11 @@
 //!
 //! The backend's data path reads the clock (the SigV4 signing time, the credential cache): with
 //! the `js` features those reads go through `anykms_core::time`, where `std::time` would panic.
+//!
+//! The link-local credential sources (EC2 IMDS, the GCP metadata server, Azure IMDS) cannot be
+//! reached from a Worker, and the host's `fetch` need not honour the probes' timeouts: each must
+//! fail with a `Configuration` error before anything is sent, whether chosen explicitly or by a
+//! default chain.
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
@@ -14,7 +19,7 @@ use std::task::{Context, Poll};
 use anykms_aws::credentials::StaticCredentials;
 use anykms_aws::{AwsProvider, Credentials};
 use anykms_core::prelude::*;
-use anykms_core::{KeyTypeCheck, Zeroizing};
+use anykms_core::{ErrorKind, KeyTypeCheck, Zeroizing};
 use anykms_http::http::{self, Request, Response, StatusCode};
 use anykms_http::tower::RequestBody;
 use anykms_http::{HttpTransport, SendError, TowerTransport};
@@ -147,4 +152,109 @@ async fn aws_encrypts_over_a_tower_transport() {
             .starts_with(&today)
     );
     assert!(req.headers().contains_key(http::header::CONTENT_LENGTH));
+}
+
+/// `err` is the `Configuration` error a link-local source must fail with here, and `svc` saw
+/// nothing: no probe was sent.
+fn assert_failed_before_sending(err: &anykms_core::Error, svc: &Canned) {
+    assert_eq!(err.kind(), ErrorKind::Configuration, "{err:?}");
+    assert!(
+        svc.seen.lock().unwrap().is_empty(),
+        "a request reached the service: {err:?}"
+    );
+}
+
+/// AWS without explicit credentials: the default chain ends at IMDS, which fails before a probe.
+#[wasm_bindgen_test]
+async fn aws_default_chain_fails_before_probing_imds() {
+    let svc = canned(StatusCode::OK, b"{}");
+    let provider = AwsProvider::builder()
+        .allowed_accounts(["123456789012"])
+        .allowed_regions(["eu-west-1"])
+        .http_transport(TowerTransport::new(svc.clone()))
+        .build()
+        .expect("a provider without credentials builds; the chain resolves lazily");
+    let err = provider
+        .aead_key(format!("aws-kms://{KEY_ARN}"))
+        .expect("key")
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .encrypt(b"plaintext", b"")
+        .await
+        .expect_err("no credential source works on a JS host");
+    assert_failed_before_sending(&err, &svc);
+    // The chain names what it tried; the source says why IMDS was not.
+    let source = std::error::Error::source(&err).expect("the IMDS failure as source");
+    assert!(
+        source
+            .to_string()
+            .contains("not reachable from this target"),
+        "{source}"
+    );
+
+    // Chosen explicitly, the same.
+    let svc = canned(StatusCode::OK, b"{}");
+    let provider = AwsProvider::builder()
+        .credentials(anykms_aws::credentials::ImdsCredentials::new())
+        .http_transport(TowerTransport::new(svc.clone()))
+        .build()
+        .expect("builds");
+    let err = provider
+        .aead_key(format!("aws-kms://{KEY_ARN}"))
+        .expect("key")
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .encrypt(b"plaintext", b"")
+        .await
+        .expect_err("IMDS is unreachable");
+    assert_failed_before_sending(&err, &svc);
+}
+
+/// GCP: ADC skips the metadata server without a probe and reports no credentials; chosen
+/// explicitly, the metadata server is refused at `build()`.
+#[wasm_bindgen_test]
+async fn gcp_metadata_server_fails_before_probing() {
+    use anykms_gcp::{Credentials, GcpProvider};
+    const KEY: &str = "gcp-kms://projects/my-project/locations/global/keyRings/r/cryptoKeys/k";
+
+    let svc = canned(StatusCode::OK, b"{}");
+    let provider = GcpProvider::builder()
+        .http_transport(TowerTransport::new(svc.clone()))
+        .build()
+        .expect("ADC resolves lazily");
+    let err = provider
+        .aead_key(KEY)
+        .expect("key")
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .encrypt(b"plaintext", b"")
+        .await
+        .expect_err("no credential source works on a JS host");
+    assert_failed_before_sending(&err, &svc);
+
+    let svc = canned(StatusCode::OK, b"{}");
+    let err = GcpProvider::builder()
+        .credentials(Credentials::metadata_server())
+        .http_transport(TowerTransport::new(svc.clone()))
+        .build()
+        .expect_err("the metadata server is unreachable");
+    assert_failed_before_sending(&err, &svc);
+}
+
+/// Azure: a managed identity through IMDS fails at the token request, before it is sent.
+#[wasm_bindgen_test]
+async fn azure_imds_managed_identity_fails_before_sending() {
+    use anykms_azure::{AzureProvider, ManagedIdentity};
+
+    let svc = canned(StatusCode::OK, b"{}");
+    let provider = AzureProvider::builder()
+        .credential(ManagedIdentity::system())
+        .http_transport(TowerTransport::new(svc.clone()))
+        .build()
+        .expect("builds; the token is fetched lazily");
+    let err = provider
+        // AES-GCM keys live on Managed HSM; any handle would do, the token comes first.
+        .aead_key("azure-kv://contoso.managedhsm.azure.net/keys/k")
+        .expect("key")
+        .encrypt(b"plaintext", b"")
+        .await
+        .expect_err("IMDS is unreachable");
+    assert_failed_before_sending(&err, &svc);
 }
