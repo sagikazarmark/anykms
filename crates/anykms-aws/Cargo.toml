@@ -111,5 +111,5 @@ workspace = true
 
 [package.metadata.docs.rs]
 # Every public feature, never the hidden `__test-fixtures` (a `compile_error!` in release builds).
-features = ["tracing", "http2", "rsa-aws-lc-rs", "rsa-rustcrypto", "rustls-aws-lc-rs", "rustls-ring", "sdk-credentials"]
+features = ["reqwest", "tracing", "http2", "rsa-aws-lc-rs", "rsa-rustcrypto", "rustls-aws-lc-rs", "rustls-ring", "sdk-credentials"]
 rustdoc-args = ["--cfg", "docsrs"]
