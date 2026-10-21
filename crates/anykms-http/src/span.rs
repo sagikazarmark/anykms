@@ -13,7 +13,9 @@
 //! Without the `tracing` feature the macros build a [`Span`] that is a unit no-op type, and
 //! every helper here does nothing, so callers need no `cfg` of their own.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use anykms_core::time::Instant;
 
 use anykms_core::Result;
 

@@ -309,7 +309,7 @@ impl FileToken {
     /// The token: the cached one while the file is unchanged, otherwise a fresh read inside a
     /// token span.
     fn read(&self) -> Result<Token> {
-        let started = std::time::Instant::now();
+        let started = anykms_core::time::Instant::now();
         let r = match self.read_inner() {
             Ok((tok, Fresh::Cached)) => return Ok(tok),
             Ok((tok, Fresh::Read)) => Ok(tok),

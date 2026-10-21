@@ -724,7 +724,7 @@ impl Fetched {
         Expiring::valid_for(
             Self {
                 secret: Some(Arc::new(secret)),
-                expires_at: SystemTime::now().checked_add(lifetime),
+                expires_at: anykms_core::time::system_now().checked_add(lifetime),
             },
             lifetime,
         )
@@ -812,12 +812,12 @@ impl<F: Fetch> Cached<F> {
             backend = BACKEND,
             credential = self.fetcher.kind(),
         );
-        let started = std::time::Instant::now();
+        let started = anykms_core::time::Instant::now();
         let r = anykms_http::span::instrument(self.fetcher.fetch(), &span).await;
         let expires_in = r.as_ref().ok().and_then(|t| {
             t.value()
                 .expires_at
-                .and_then(|at| at.duration_since(SystemTime::now()).ok())
+                .and_then(|at| at.duration_since(anykms_core::time::system_now()).ok())
         });
         anykms_http::span::finish_token(&span, started, expires_in, &r);
         #[cfg(feature = "tracing")]

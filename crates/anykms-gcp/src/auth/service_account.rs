@@ -5,7 +5,7 @@
 //! when freed). Google recommends against service-account keys; prefer the metadata server or
 //! workload identity federation.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anykms_core::{BoxFuture, ErrorKind, Result};
 use anykms_http::credentials::Expiring;
@@ -54,10 +54,8 @@ impl SelfSignedJwt {
         if let Some(kid) = &self.key_id {
             header["kid"] = kid.clone().into();
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| auth_err(ErrorKind::Configuration, "system clock is before 1970"))?
-            .as_secs();
+        // `unix_now` is zero before 1970, which would make a token already expired, not a panic.
+        let now = anykms_core::time::unix_now().as_secs();
         let claims = serde_json::json!({
             "iss": self.email,
             "sub": self.email,

@@ -155,7 +155,7 @@ impl WebIdentityCredentials {
             Some(n) => n.clone(),
             None => format!(
                 "anykms-{}",
-                std::time::SystemTime::now()
+                anykms_core::time::system_now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis())
             ),

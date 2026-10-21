@@ -33,7 +33,7 @@ pub(crate) type CacheKey = (String, Option<String>, String, String);
 /// Cache of key types, shared per provider: key → (expiry, type, derived).
 #[derive(Default)]
 pub(crate) struct TypeCache {
-    entries: Mutex<HashMap<Arc<CacheKey>, (std::time::Instant, TransitKeyType, bool)>>,
+    entries: Mutex<HashMap<Arc<CacheKey>, (anykms_core::time::Instant, TransitKeyType, bool)>>,
     /// One metadata read at a time for concurrent misses (R-34).
     flights: SingleFlight<Arc<CacheKey>, Result<(TransitKeyType, bool)>>,
 }
@@ -234,7 +234,7 @@ impl KeyCtx {
 
     /// The cached key type and derived flag, if a check has run and has not expired.
     fn cached(&self) -> Option<(TransitKeyType, bool)> {
-        let now = std::time::Instant::now();
+        let now = anykms_core::time::Instant::now();
         self.cache
             .entries
             .lock()
@@ -305,7 +305,7 @@ impl KeyCtx {
                 e.with_operation(op)
             }
         })?;
-        let now = std::time::Instant::now();
+        let now = anykms_core::time::Instant::now();
         let mut cache = self
             .cache
             .entries

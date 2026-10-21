@@ -187,13 +187,21 @@ mod imp {
 
 pub use imp::{Instant, unix_now};
 
+/// The wall clock as a `SystemTime` ([`unix_now`] after the epoch), for code that compares
+/// against or formats `SystemTime` values: a `SystemTime` is a plain value on every target, only
+/// `SystemTime::now()` is not.
+#[must_use]
+pub fn system_now() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + unix_now()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     // The std clock. The JS clock is exercised by `anykms-wasm-tests` under Node (`just wasm`):
     // this crate's test binary cannot build for wasm32 (tokio dev-dependency).
-    use super::{Instant, unix_now};
+    use super::{Instant, system_now, unix_now};
 
     #[test]
     fn instant_is_monotonic_and_arithmetic_is_std_like() {
@@ -213,5 +221,9 @@ mod tests {
     fn unix_now_is_after_2020() {
         // 2020-01-01T00:00:01Z.
         assert!(unix_now() > Duration::from_secs(1_577_836_801));
+        let d = system_now()
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or_else(|e| e.duration());
+        assert!(d < Duration::from_secs(1), "{d:?}");
     }
 }

@@ -2,7 +2,6 @@
 //! the portable and Azure-specific metadata views.
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anykms_core::{
     AsymmetricKeyType, Capabilities, KeyInfo, KeyState, KeyVersion, KeyVersionInfo, PublicKey,
@@ -307,9 +306,7 @@ impl KeyBundle {
 
 impl AzureKeyInfo {
     fn state_of(enabled: Option<bool>, nbf: Option<u64>, exp: Option<u64>) -> Option<KeyState> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = anykms_core::time::unix_now().as_secs();
         match enabled? {
             false => Some(KeyState::Disabled),
             true if nbf.is_some_and(|n| n > now) => {
@@ -730,10 +727,7 @@ bQIDAQAB
 
     #[test]
     fn states_and_versions() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = anykms_core::time::unix_now().as_secs();
         assert_eq!(
             AzureKeyInfo::state_of(Some(false), None, None),
             Some(KeyState::Disabled)

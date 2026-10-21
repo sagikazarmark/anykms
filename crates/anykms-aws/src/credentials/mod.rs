@@ -339,7 +339,7 @@ impl JsonCredentials {
             expires_at,
         };
         c.validate().map_err(|_| bad())?;
-        if expires_at.is_some_and(|t| t <= SystemTime::now()) {
+        if expires_at.is_some_and(|t| t <= anykms_core::time::system_now()) {
             return Err(Error::new(
                 ErrorKind::Unavailable,
                 BACKEND,

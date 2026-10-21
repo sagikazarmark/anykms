@@ -50,7 +50,7 @@ impl CredentialSource for GoogleCloudAuth {
         Box::pin(async move {
             let span =
                 anykms_http::token_span!("anykms.gcp.token", backend = BACKEND, credential = KIND);
-            let started = std::time::Instant::now();
+            let started = anykms_core::time::Instant::now();
             let r = anykms_http::span::instrument(self.fetch(), &span).await;
             anykms_http::span::finish_token(&span, started, None, &r);
             #[cfg(feature = "tracing")]

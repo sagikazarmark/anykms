@@ -82,7 +82,7 @@ pub async fn send(
 /// in the past being a zero delay. `None` when absent or malformed.
 pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     let v = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?;
-    retry_after_value(v, SystemTime::now())
+    retry_after_value(v, anykms_core::time::system_now())
 }
 
 /// A `Retry-After` value relative to `now` (see [`retry_after`]).

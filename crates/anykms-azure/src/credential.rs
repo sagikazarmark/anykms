@@ -213,11 +213,11 @@ impl Tokens {
             backend = BACKEND,
             credential = credential,
         );
-        let started = std::time::Instant::now();
+        let started = anykms_core::time::Instant::now();
         let r = anykms_http::span::instrument(self.cred.token(scope), &span).await;
         let expires_in = r.as_ref().ok().and_then(|t| {
             t.expires_at
-                .and_then(|at| at.duration_since(SystemTime::now()).ok())
+                .and_then(|at| at.duration_since(anykms_core::time::system_now()).ok())
         });
         anykms_http::span::finish_token(&span, started, expires_in, &r);
         // P1-8: a refresh is routine; a failure needs an operator. A token file that failed is
@@ -429,7 +429,7 @@ pub(crate) fn parse_token_response(body: &[u8], kind: &'static str) -> Result<Ac
     if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(bad());
     }
-    let now = SystemTime::now();
+    let now = anykms_core::time::system_now();
     let expires_at = match (
         r.expires_on.as_ref().and_then(NumOrString::get),
         r.expires_in.as_ref().and_then(NumOrString::get),
@@ -559,7 +559,7 @@ mod tests {
         let left = t
             .expires_at()
             .unwrap()
-            .duration_since(SystemTime::now())
+            .duration_since(anykms_core::time::system_now())
             .unwrap();
         assert!(left > Duration::from_secs(3500));
         let t = parse_token_response(

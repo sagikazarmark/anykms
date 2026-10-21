@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use anykms_core::time::Instant;
 
 use anykms_core::{
     Aead, AsymmetricKeyType, Ciphertext, Decrypted, Describe, Digest, DigestSigner, DigestVerifier,
