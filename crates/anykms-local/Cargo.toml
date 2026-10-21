@@ -28,6 +28,12 @@ spki.workspace = true
 getrandom.workspace = true
 tracing.workspace = true
 
+# wasm32-unknown-unknown: clocks from `web_time` (`std::time::*::now` panics there); `getrandom`
+# needs its `wasm_js` feature plus `--cfg getrandom_backend="wasm_js"` in the final build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+
 [dev-dependencies]
 tokio.workspace = true
 anykms-recipes.workspace = true

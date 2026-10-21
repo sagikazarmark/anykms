@@ -46,6 +46,8 @@ pub struct Ctx<F> {
     typed: Arc<dyn TypedHandles>,
     /// The path handles are opened through.
     pub path: Path,
+    /// How [`settled`](Self::settled) waits between checks (the runner's clock).
+    sleep: anykms_core::SleepFn,
 }
 
 impl<F> fmt::Debug for Ctx<F> {
@@ -64,6 +66,7 @@ impl<F> Clone for Ctx<F> {
             registry: self.registry.clone(),
             typed: self.typed.clone(),
             path: self.path,
+            sleep: self.sleep.clone(),
         }
     }
 }
@@ -108,6 +111,7 @@ impl<F: Fixture> Ctx<F> {
         registry: Registry,
         typed: Arc<dyn TypedHandles>,
         path: Path,
+        sleep: anykms_core::SleepFn,
     ) -> Self {
         Self {
             fx,
@@ -115,6 +119,7 @@ impl<F: Fixture> Ctx<F> {
             registry,
             typed,
             path,
+            sleep,
         }
     }
 
@@ -139,6 +144,7 @@ impl<F: Fixture> Ctx<F> {
                 registry,
                 typed: c.typed,
                 path: self.path,
+                sleep: self.sleep.clone(),
             },
             c.requests,
         ))
@@ -196,13 +202,17 @@ impl<F: Fixture> Ctx<F> {
     where
         Fut: std::future::Future<Output = Result<T, String>>,
     {
-        let deadline = std::time::Instant::now() + self.caps.settle_time;
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+        #[cfg(target_arch = "wasm32")]
+        use web_time::Instant;
+        let deadline = Instant::now() + self.caps.settle_time;
         loop {
             let r = check().await;
-            if r.is_ok() || std::time::Instant::now() >= deadline {
+            if r.is_ok() || Instant::now() >= deadline {
                 return r;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            (self.sleep)(std::time::Duration::from_millis(50)).await;
         }
     }
 

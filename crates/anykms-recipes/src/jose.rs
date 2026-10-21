@@ -114,7 +114,9 @@
 //! bytes or signature (replay caches, revocation lists); use a claim such as `jti`.
 
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anykms_core::{
     AsymmetricKeyType, Describe, DigestSigner, Error, ErrorKind, KeyState, KeyVersion,
@@ -136,6 +138,8 @@ fn invalid(op: Operation, m: &'static str) -> Error {
 }
 
 fn now_unix() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -458,9 +462,8 @@ impl JwtOptions {
         self
     }
 
-    /// Uses `unix_seconds` as the current time instead of the system clock (for tests, and where
-    /// `SystemTime::now` panics, such as `wasm32-unknown-unknown`: signing reads the clock
-    /// unless this is set).
+    /// Uses `unix_seconds` as the current time instead of the system clock (for tests). On
+    /// `wasm32-unknown-unknown` the clock is `Date.now()` via `web_time`.
     pub fn with_now(mut self, unix_seconds: u64) -> Self {
         self.now = Some(unix_seconds);
         self

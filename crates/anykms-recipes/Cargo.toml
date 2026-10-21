@@ -58,6 +58,12 @@ base64.workspace = true
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+# wasm32-unknown-unknown: clocks from `web_time` (`std::time::*::now` panics there); `getrandom`
+# needs its `wasm_js` feature plus `--cfg getrandom_backend="wasm_js"` in the final build.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
+
 [dev-dependencies]
 # In-process KMS keys with versions (tests/jose_interop.rs, tests/emulated.rs). Path only, so
 # `cargo publish` strips it: anykms-local dev-depends on this crate.

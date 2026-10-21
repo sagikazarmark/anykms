@@ -44,15 +44,19 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   credential types (`aws-sdk-credentials`) are held by Cargo's MSRV-aware resolver on releases
   that support it; newer releases need a newer compiler.
 - The HTTP backends (transit, aws, gcp, azure) need a tokio runtime; outside one an operation
-  fails with `Configuration` (see [From synchronous code](guide.md#from-synchronous-code)). Core, recipes and local are runtime-agnostic (any
-  async executor; you supply `Retry`'s sleep function and, optionally, its clock). They assume
-  a working std clock and OS RNG, so `wasm32-unknown-unknown` is only partly usable:
-  `std::time::Instant::now` and `SystemTime::now` panic there. Give `Retry` a clock
-  (`RetryLayer::with_clock`; the default uses `Instant`). `CachedVerifier` reads `Instant`
-  directly and cannot be used there; JWT signing reads `SystemTime` unless
-  `JwtOptions::with_now` sets the time; local keysets read `SystemTime` when keys are created or rotated. Recipes and
-  local draw randomness from `getrandom`, which only builds on that target with its `wasm_js`
-  feature enabled by the application.
+  fails with `Configuration` (see [From synchronous code](guide.md#from-synchronous-code)). Core,
+  recipes and local are runtime-agnostic (any async executor; you supply `Retry`'s sleep function
+  and, optionally, its clock).
+- **`wasm32-unknown-unknown`** (browsers, Cloudflare Workers): core, recipes, local and
+  conformance build and run there. Clocks come from `web_time` (`Date.now()`,
+  `performance.now()`), so `Retry`'s default clock, `CachedVerifier`, JWT signing (`JwtOptions`
+  without `with_now`), local keyset timestamps and the DEK cache work unchanged. The application
+  must enable `getrandom`'s `wasm_js` feature and pass `--cfg getrandom_backend="wasm_js"`; the
+  RSA backend must be `rsa-rustcrypto` (aws-lc-rs does not build for wasm32). The conformance
+  runner (`run`, `run_or_skip`) is native-only; a wasm host drives
+  `anykms_conformance::run_async` on its own executor and reports the `Report`. The HTTP
+  backends are **not** supported there: they need TLS control the host does not offer (see the
+  `HttpTransport` discussion in the issue tracker).
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
   `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its
