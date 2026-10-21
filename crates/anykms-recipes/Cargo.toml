@@ -37,8 +37,8 @@ rsa-rustcrypto = ["dep:rsa", "dep:sha2"]
 rsa-aws-lc-rs = ["dep:aws-lc-rs"]
 # `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): the clocks behind
 # `CachedVerifier`, the DEK cache and JWT `now` read `performance.now()` / `Date.now()`
-# (`anykms-core/js`), and `getrandom` uses `crypto.getRandomValues()` (the application still passes
-# `--cfg getrandom_backend="wasm_js"`). No effect on any other target.
+# (`anykms-core/js`), and `getrandom` uses `crypto.getRandomValues()`. No effect on any other
+# target.
 js = ["anykms-core/js", "getrandom/wasm_js"]
 
 [dependencies]

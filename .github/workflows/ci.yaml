@@ -113,9 +113,10 @@ jobs:
     name: wasm32 (JS host)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    env:
-      # RUSTFLAGS overrides .cargo/config.toml's target rustflags; restate the `getrandom` cfg.
-      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: --cfg getrandom_backend="wasm_js" -D warnings
+    defaults:
+      run:
+        # The `wasm` profile drops lld (devenv.nix): its `-fuse-ld=lld` is not a wasm linker flag.
+        shell: devenv --profile wasm shell -- bash -e {0}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,7 +130,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          cmd-format: devenv shell -- {0}
+          cmd-format: devenv --profile wasm shell -- {0}
 
       - name: Install wasm-bindgen-cli (version from Cargo.lock)
         run: just wasm-bindgen-cli

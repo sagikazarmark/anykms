@@ -1,7 +1,4 @@
-# wasm32-unknown-unknown builds inside this repository (tests, `just wasm`): route `getrandom`
-# through `crypto.getRandomValues` — the `js` features enable the backend, the final build must
-# select it — and run test binaries under Node through wasm-bindgen-test-runner. Applications set
-# the same cfg themselves.
+# wasm32-unknown-unknown test binaries in this repository (`just wasm`) run under Node through
+# wasm-bindgen-test-runner (`just wasm-bindgen-cli` installs the release matching Cargo.lock).
 [target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 runner = "wasm-bindgen-test-runner"

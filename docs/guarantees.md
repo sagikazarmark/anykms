@@ -53,8 +53,7 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   `performance.now()` for the monotonic clock (`Retry`'s default clock, `CachedVerifier`, the DEK
   cache) and `Date.now()` for the wall clock (JWT `iat`/`exp`, local keyset timestamps), with no
   extra dependencies beyond the `js-sys`/`wasm-bindgen` that `getrandom`'s JS backend already
-  brings. The same feature enables that backend; the application still passes
-  `--cfg getrandom_backend="wasm_js"`. The RSA backend must be `rsa-rustcrypto` (aws-lc-rs does
+  brings. The same feature enables that backend. The RSA backend must be `rsa-rustcrypto` (aws-lc-rs does
   not build for wasm32). The conformance runner (`run`, `run_or_skip`) is native-only; a wasm host
   drives `anykms_conformance::run_async` on its own executor and reports the `Report`. Cloudflare
   Workers advance both clocks only across I/O. Without `js`, the target behaves as before (the
