@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use anykms_core::time::{Instant, system_now};
 use anykms_core::{Error, ErrorKind, Operation, Result};
 use anykms_http::credentials::{Credential, CredentialCache, Expiring};
 use anykms_http::http::header::{AUTHORIZATION, CONTENT_TYPE, DATE, HeaderMap, HeaderValue};
@@ -110,11 +111,11 @@ impl CredsCache {
                     backend = BACKEND,
                     credential = credential,
                 );
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let r = anykms_http::span::instrument(fetch, &span).await;
                 let expires_in = r.as_ref().ok().and_then(|c| {
                     c.expires_at()
-                        .and_then(|t| t.duration_since(SystemTime::now()).ok())
+                        .and_then(|t| t.duration_since(system_now()).ok())
                 });
                 anykms_http::span::finish_token(&span, started, expires_in, &r);
                 // P1-8: a refresh is routine; a failure needs an operator. A token file that
@@ -194,7 +195,7 @@ impl Kms {
     /// The signing time: the local clock corrected by the recorded skew.
     fn now(&self) -> SystemTime {
         let skew = self.skew_ms.load(Ordering::Relaxed);
-        let now = SystemTime::now();
+        let now = system_now();
         let d = Duration::from_millis(skew.unsigned_abs());
         if skew >= 0 {
             now.checked_add(d).unwrap_or(now)
@@ -212,7 +213,7 @@ impl Kms {
         else {
             return;
         };
-        let now = SystemTime::now();
+        let now = system_now();
         let ms = match server.duration_since(now) {
             Ok(ahead) => i64::try_from(ahead.as_millis()).unwrap_or(i64::MAX),
             Err(e) => -i64::try_from(e.duration().as_millis()).unwrap_or(i64::MAX),

@@ -40,8 +40,9 @@ enum Source {
 ///
 /// Requests go through the provider's transport (the built-in one never proxies link-local hosts)
 /// with a per-request timeout of [`IMDS_TIMEOUT`], so that a host off Azure fails as
-/// `Unavailable` rather than stalling. Azure Arc and Cloud Shell are not supported (implement
-/// [`AzureCredential`] for them).
+/// `Unavailable` rather than stalling. On `wasm32-unknown-unknown` (a Cloudflare Worker) IMDS is
+/// unreachable and a token request fails with a `Configuration` error before sending anything.
+/// Azure Arc and Cloud Shell are not supported (implement [`AzureCredential`] for them).
 #[derive(Clone)]
 pub struct ManagedIdentity {
     id: Option<UserAssigned>,
@@ -185,6 +186,17 @@ impl ManagedIdentity {
     }
 
     fn request(&self, scope: &str) -> Result<anykms_http::http::request::Builder> {
+        // IMDS is link-local: nothing on a JS host (a Cloudflare Worker) can reach it, and the
+        // host's `fetch` need not honour `IMDS_TIMEOUT`. Fail before anything is sent. (The App
+        // Service endpoint is a configured URL; it is left to the transport.)
+        if cfg!(all(target_arch = "wasm32", target_os = "unknown"))
+            && matches!(self.source, Source::Imds { .. })
+        {
+            return Err(cred_config_err(
+                "Azure IMDS is not reachable from this target (wasm32-unknown-unknown): \
+                 configure a credential explicitly",
+            ));
+        }
         let resource = resource_of(scope);
         let (id_param, id_value) = match &self.id {
             None => (None, None),

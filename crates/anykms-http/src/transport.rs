@@ -41,8 +41,9 @@ pub type Source = Box<dyn std::error::Error + Send + Sync>;
 /// A request may carry a [`RequestTimeout`] in its extensions; a transport that can honour a
 /// per-request timeout should.
 ///
-/// The future is `Send`. A transport whose futures are not (a browser `fetch`, say) wraps them
-/// on its own side of this boundary.
+/// The future is `Send`, on every target. A transport whose futures are not (a browser `fetch`,
+/// say) wraps them on its own side of this boundary; the crate docs say why the seam does not
+/// bend instead.
 pub trait HttpTransport: Send + Sync + 'static {
     /// Sends `req` and reads the whole response (any status) into a body of at most `limit`
     /// bytes.

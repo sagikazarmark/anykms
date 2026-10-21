@@ -25,7 +25,7 @@
 //!   stays bounded; a client that wants to skip it also compares the values.
 //!
 //! Expiry and backoffs follow tokio's clock (`tokio::time::Instant`): the system clock, except in
-//! tests that pause time (tokio's `test-util`).
+//! tests that pause time (tokio's `test-util`). On a JS host they follow `anykms_core::time`.
 //!
 //! [`get`]: CredentialCache::get
 //! [`invalidate`]: CredentialCache::invalidate
@@ -35,15 +35,27 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
+use anykms_core::time::{Instant, system_now};
 use anykms_core::{Error, Result};
 
 use crate::cache::{Flight, SingleFlight};
 
-/// Now, on tokio's clock.
+/// Now, on tokio's clock, which paused test time moves; on `wasm32-unknown-unknown` (where
+/// tokio's clock, like `std`'s, panics) the `anykms_core::time` clock: the JS host's with the
+/// `js` feature, `std`'s (panicking as before) without. The predicate is the target alone, unlike
+/// `anykms_core::time`'s: the feature decides what `Instant::now` reads, not whether tokio's
+/// clock is usable.
 fn now() -> Instant {
-    tokio::time::Instant::now().into_std()
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        tokio::time::Instant::now().into_std()
+    }
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        Instant::now()
+    }
 }
 
 /// A freshly fetched credential and when it expires (`None`: never).
@@ -82,9 +94,7 @@ impl<T> Expiring<T> {
     /// A credential valid until the wall-clock time `at` (e.g. an AWS `Expiration`); a time in
     /// the past means already expired.
     pub fn valid_until(value: T, at: SystemTime) -> Self {
-        let left = at
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO);
+        let left = at.duration_since(system_now()).unwrap_or(Duration::ZERO);
         Self::valid_for(value, left)
     }
 

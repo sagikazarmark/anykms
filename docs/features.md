@@ -14,7 +14,7 @@ member crates can also be used directly.
 | [`anykms-aws`](../crates/anykms-aws) | AWS KMS (in-house SigV4 client and workload credential chain over the `HttpTransport` seam, AWS SDK credentials as an option; facade feature `aws`) |
 | [`anykms-gcp`](../crates/anykms-gcp) | Google Cloud KMS (in-house REST client and Application Default Credentials, `google-cloud-auth` as an option; CRC32C integrity checks; local signature verification; facade feature `gcp`) |
 | [`anykms-azure`](../crates/anykms-azure) | Azure Key Vault and Managed HSM (in-house REST client and Entra ID workload credentials, Azure SDK credentials as an option; vault host allowlist; framed ciphertexts; facade feature `azure`) |
-| [`anykms-http`](../crates/anykms-http) | HTTP plumbing shared by the backends: the `HttpTransport` seam and the built-in `ReqwestTransport` (TLS, no redirects, zeroizing bodies); an application touches it only to build or bring a transport |
+| [`anykms-http`](../crates/anykms-http) | HTTP plumbing shared by the backends: the `HttpTransport` seam, the built-in `ReqwestTransport` (TLS, no redirects, zeroizing bodies) and `TowerTransport` (any tower `Service`); an application touches it only to build or bring a transport |
 | [`anykms-local`](../crates/anykms-local) | in-memory software keys, **tests and development only** |
 | [`anykms-conformance`](../crates/anykms-conformance) | the shared conformance suite for backends, including third-party ones (published; its fixture API may change in minor releases, and new `Feature`s and cases come only in minor releases) |
 
@@ -38,6 +38,8 @@ one.
 | `azure-identity` | | credentials from the Azure SDK for `azure` (`anykms_azure::AzureIdentity` over an `azure_identity` credential: the Azure CLI, certificates, ...) |
 | `reqwest` | yes | the built-in HTTP transport of the HTTP backends (`anykms_http::ReqwestTransport`: reqwest over rustls). Without it, each HTTP backend needs a transport through its builder's `.http_transport(..)`, and `with_default_providers` skips the HTTP backends; the dependency tree then holds no reqwest or hyper, and no rustls either as long as the `rustls-*` features stay off too (they are provider features of the built-in transport) |
 | `http2` | | allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`) |
+| `tower` | | `anykms_http::TowerTransport`: any tower `Service` as the HTTP backends' transport, for a tower stack around the built-in client (`ReqwestTransport::into_service`) or a `fetch`-based service on Cloudflare Workers (see [the guide](guide.md#a-tower-stack-as-the-transport)) |
+| `js` | | `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): every clock read goes through `anykms_core::time` (`performance.now()`, `Date.now()`) and the RNG through `getrandom`'s JS backend, in every enabled crate. With `default-features = false`, a backend feature and `tower`, the HTTP backends run there over a `fetch`-based service (see [guarantees](guarantees.md)). No effect on other targets |
 | `local` | | in-memory keys, development and tests only |
 | `tracing` | | spans and events (no secrets) |
 | `serde` | | `Serialize`/`Deserialize` for `Ciphertext`, `Signature` and `Tag`: their base64 storage encoding in JSON and other text formats, bytes in binary ones |
@@ -53,6 +55,12 @@ one.
   `ReqwestTransportBuilder` and pass the result to the backend builder's `.http_transport(..)`
   (one transport may serve several providers); without, each backend builds a default
   `ReqwestTransport`. The `rustls-*`, `http2` features apply to the built-in transport only.
+  With `tower`, `anykms_http::TowerTransport` adapts any tower `Service` over
+  `http::Request<Full<Bytes>>`: the built-in client under your own layers
+  (`ReqwestTransport::into_service`), or a `fetch`-based service where reqwest cannot run. The
+  adapter sets `content-length`, reads bodies into the same bounded zeroizing buffer, has no
+  timeout of its own and cannot control redirects (configure the inner service not to follow
+  them).
 - The built-in transport picks its TLS provider the same way everywhere: the configured provider
   (`ReqwestTransportBuilder::crypto_provider`) if set, else the process-wide provider installed
   with rustls' `CryptoProvider::install_default` (e.g. a FIPS provider for TLS; see
@@ -106,6 +114,7 @@ The SDK bridge crates count only with their feature on.
 | `google-cloud-auth` 1 (≥ 1.3) | `anykms_gcp::Credentials::google_cloud_auth` (feature `gcp-google-cloud-auth`) | wrap Google's `AccessTokenCredentials` |
 | `azure_core` 1 | `anykms_azure::AzureIdentity::new` (feature `azure-identity`) | wrap an `Arc<dyn azure_core::credentials::TokenCredential>` |
 | `reqwest` 0.13 | none: `ReqwestTransport` wraps it without exposing it; `reqwest` is no longer a public dependency |
+| `tower-service` 0.3, `http-body` 1, `http-body-util` 0.1, `bytes` 1 | the bounds of `anykms_http::TowerTransport<S>` and the types of `ReqwestService` (feature `tower`) | wrap a tower service as a transport |
 | `rustls-pki-types` 1 | `anykms_http::pem::private_key_from_pem` (`PrivateKeyDer`) | for anykms backend authors only |
 | `tracing` 0.1 | `anykms_http::span::Span` (feature `tracing`) | for anykms backend authors only |
 

@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use anykms_core::time::Instant;
 
 // Key bundles and local verifiers' public keys are trusted for the provider's `key_cache_ttl`
 // ±10% (keys can be deleted and recreated with another type, have `key_ops` changed, or

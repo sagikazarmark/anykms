@@ -5,8 +5,9 @@
 //! when freed). Google recommends against service-account keys; prefer the metadata server or
 //! workload identity federation.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use anykms_core::time::unix_now;
 use anykms_core::{BoxFuture, ErrorKind, Result};
 use anykms_http::credentials::Expiring;
 use base64::Engine as _;
@@ -54,10 +55,16 @@ impl SelfSignedJwt {
         if let Some(kid) = &self.key_id {
             header["kid"] = kid.clone().into();
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| auth_err(ErrorKind::Configuration, "system clock is before 1970"))?
-            .as_secs();
+        // `unix_now` is zero before 1970 (where `SystemTime` would fail): a token with `iat: 0`
+        // is one the server rejects, so refuse it here, as a clock problem.
+        let now = unix_now();
+        if now.is_zero() {
+            return Err(auth_err(
+                ErrorKind::Configuration,
+                "system clock is before 1970",
+            ));
+        }
+        let now = now.as_secs();
         let claims = serde_json::json!({
             "iss": self.email,
             "sub": self.email,

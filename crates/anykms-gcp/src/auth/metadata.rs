@@ -58,7 +58,18 @@ fn metadata_get(url: &Url) -> anykms_http::http::Result<anykms_http::transport::
         .body(anykms_http::client::empty())
 }
 
+/// Whether a metadata server can be reached from this target at all. It is link-local, so on a
+/// JS host (a Cloudflare Worker) it cannot be, and the host's `fetch` need not honour
+/// [`METADATA_TIMEOUT`]: nothing is sent there.
+const REACHABLE: bool = !cfg!(all(target_arch = "wasm32", target_os = "unknown"));
+
 pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
+    if !REACHABLE {
+        return Err(config_err(
+            "the metadata server is not reachable from this target (wasm32-unknown-unknown): \
+             configure credentials explicitly",
+        ));
+    }
     let base = origin(ctx)?;
     let token_url = base
         .join("/computeMetadata/v1/instance/service-accounts/default/token")
@@ -70,8 +81,11 @@ pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
 }
 
 /// Whether a metadata server answers at `base` (any response with `Metadata-Flavor: Google`)
-/// within [`METADATA_TIMEOUT`].
+/// within [`METADATA_TIMEOUT`]. `false` without a probe where none can be reached.
 pub(crate) async fn probe(ctx: &AuthCtx) -> bool {
+    if !REACHABLE {
+        return false;
+    }
     let Ok(base) = origin(ctx) else {
         return false;
     };

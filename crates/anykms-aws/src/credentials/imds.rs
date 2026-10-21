@@ -19,6 +19,10 @@ const TOKEN_TTL: &str = "21600";
 ///
 /// The endpoint comes from `AWS_EC2_METADATA_SERVICE_ENDPOINT`, else
 /// `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE` (`IPv4`, default, or `IPv6`).
+///
+/// On `wasm32-unknown-unknown` (a Cloudflare Worker) the service is unreachable and this source
+/// fails with a `Configuration` error before sending anything; configure credentials explicitly
+/// there.
 #[derive(Clone)]
 pub struct ImdsCredentials {
     endpoint: Option<String>,
@@ -97,6 +101,15 @@ impl ImdsCredentials {
     pub(crate) async fn fetch(&self, cx: &SourceContext) -> Result<Credentials> {
         use anykms_http::client::empty;
         use anykms_http::http::Method;
+        // A link-local service: nothing on a JS host (a Cloudflare Worker) can reach it, and
+        // the host's `fetch` need not honour the probe's timeout. Fail before anything is sent,
+        // whether this source was chosen explicitly or by the default chain.
+        if cfg!(all(target_arch = "wasm32", target_os = "unknown")) {
+            return Err(config_err(
+                "the EC2 instance metadata service is not reachable from this target \
+                 (wasm32-unknown-unknown): configure credentials explicitly",
+            ));
+        }
         let base = self.base()?;
         let url = |p: &str| {
             let mut u = base.clone();

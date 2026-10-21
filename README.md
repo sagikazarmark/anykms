@@ -151,6 +151,8 @@ cargo run -p anykms --features local --example field_encryption  # envelope encr
 cargo run -p anykms --features local --example jwt_signing       # JWTs and a JWKS
 cargo run -p anykms --features local --example jwt_signing_jwt_simple
 cargo run -p anykms --features local --example hmac_tokens       # HMAC tokens
+# against Vault only (VAULT_ADDR, VAULT_TOKEN): the built-in client under a tower concurrency limit
+cargo run -p anykms --features transit,tower --example tower_transport
 ```
 
 ## Documentation

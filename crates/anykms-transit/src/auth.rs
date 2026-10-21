@@ -3,7 +3,9 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use anykms_core::time::Instant;
 
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
 use anykms_http::HttpTransport;

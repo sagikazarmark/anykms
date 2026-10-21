@@ -490,8 +490,12 @@ helper, backends call it instead of keeping their own copy.
 - **No redirects.** reqwest-based clients (Azure's default `azure_core` transport, any
   in-house client) use `redirect::Policy::none()`; a 3xx is `Configuration` (D6: a redirect
   means the endpoint is wrong, and retrying will not fix it) with no body or `Location` echoed. Verify for each SDK transport.
+  `TowerTransport` cannot control the inner service's redirects: its docs make the caller
+  configure the service not to follow them, and a 3xx that comes through is still the
+  backend's `Configuration` error.
 - **Timeouts**: connect and per-attempt timeouts in the client (transit defaults: 2 s / 10 s);
-  overall deadline stays in `Retry`.
+  overall deadline stays in `Retry`. `TowerTransport` adds none of its own (a layer's job; it
+  forwards `RequestTimeout` to the service in the request's extensions).
 - **Responses** are read through `anykms_http::client::send` (bounded, zeroizing);
   `max_response_bytes` is at least `client::MIN_RESPONSE_BYTES` (64 KiB), refused at `build()`
   otherwise (P1-11).

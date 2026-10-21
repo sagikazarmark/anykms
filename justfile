@@ -179,29 +179,42 @@ live package *args:
     esac
 
 # Without VAULT_ADDR/BAO_ADDR or key URIs, the examples use in-memory local keys; they need only
-# the `local` feature (on top of the defaults).
+# the `local` feature (on top of the defaults). tower_transport is about the transport, so it runs
+# only against a server, and only when its key is named (ANYKMS_KEK_URI): it does not create one.
 [doc("Run the facade's examples.")]
 examples *flags="--features local":
     for e in field_encryption jwt_signing jwt_signing_jwt_simple hmac_tokens; do cargo run -p anykms --locked {{ flags }} --example "$e"; done
+    if [ -n "${VAULT_ADDR:-}${BAO_ADDR:-}" ] && [ -n "${ANYKMS_KEK_URI:-}" ]; then cargo run -p anykms --locked --features transit,tower --example tower_transport; fi
 
 # The transport-free crates on wasm32-unknown-unknown with their `js` feature (a JS host:
 # browsers, Node.js, Cloudflare Workers): a check of each, then anykms-wasm-tests under Node via
 # wasm-bindgen-test-runner (.cargo/config.toml), which needs a wasm-bindgen-cli matching the
-# `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it).
+# `wasm-bindgen` crate in Cargo.lock (`just wasm-bindgen-cli` installs it). The HTTP backends with
+# `js` and anykms-http's `tower` feature are checked for the target too; anykms-wasm-tests runs
+# anykms-aws over a `TowerTransport` under Node: the Cloudflare Workers shape, minus the `fetch`
+# service, which needs workerd to drive.
 wasm:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo check -p anykms-core -p anykms-recipes -p anykms-local -p anykms-conformance \
       --target wasm32-unknown-unknown --locked --no-default-features \
       --features anykms-core/js,anykms-recipes/js,anykms-recipes/jose,anykms-recipes/envelope,anykms-recipes/rsa-rustcrypto,anykms-local/js,anykms-conformance/js
+    cargo check -p anykms-http -p anykms-transit -p anykms-aws -p anykms-gcp -p anykms-azure \
+      --target wasm32-unknown-unknown --locked --no-default-features \
+      --features anykms-http/tower,anykms-http/js,anykms-transit/js,anykms-aws/js,anykms-gcp/js,anykms-azure/js,anykms-aws/rsa-rustcrypto,anykms-gcp/rsa-rustcrypto,anykms-azure/rsa-rustcrypto
     cargo test -p anykms-wasm-tests --target wasm32-unknown-unknown --locked
     # The HTTP backends without the built-in transport (`reqwest` off): a wasm32 build that brings
-    # its own `HttpTransport` must not pull reqwest, hyper or rustls into the tree (the backends
-    # are not compiled for wasm32 here; only the dependency tree is checked).
+    # its own `HttpTransport` must not pull reqwest, hyper or rustls into the tree, neither the
+    # facade's with every backend nor anykms-wasm-tests' (anykms-aws + anykms-http/tower).
     for dep in reqwest hyper rustls; do
       if cargo tree -p anykms --no-default-features --features transit,aws,gcp,azure \
           --target wasm32-unknown-unknown -e normal --prefix none --locked | grep -q "^$dep "; then
         echo "$dep is in the facade's dependency tree with the reqwest feature off" >&2
+        exit 1
+      fi
+      if cargo tree -p anykms-wasm-tests --target wasm32-unknown-unknown -e normal,dev --prefix none --locked \
+          | grep -q "^$dep "; then
+        echo "$dep is in anykms-wasm-tests' dependency tree" >&2
         exit 1
       fi
     done

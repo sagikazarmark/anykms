@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use anykms_core::time::system_now;
 use anykms_core::{BackendDetail, BoxFuture, Error, ErrorKind, Operation, Result};
 use zeroize::Zeroizing;
 
@@ -155,7 +156,7 @@ impl WebIdentityCredentials {
             Some(n) => n.clone(),
             None => format!(
                 "anykms-{}",
-                std::time::SystemTime::now()
+                system_now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis())
             ),

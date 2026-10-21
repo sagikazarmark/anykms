@@ -101,6 +101,80 @@ never mixed), refuses `*_SKIP_VERIFY`, and accepts `*_CACERT` (a PEM file) or `*
 directory of PEM files). See the [`anykms-transit` docs](https://docs.rs/anykms-transit) for every
 variable.
 
+## A tower stack as the transport
+
+With the `tower` feature, any tower `Service` over `http::Request<Full<Bytes>>` is a transport
+(`anykms_http::TowerTransport`). A service that already has a tower stack puts the built-in
+client at the bottom of it and its own layers (a concurrency limit, a rate limit, instrumentation)
+on top; the backend sends every request, credential fetches included, through the stack:
+
+```rust
+use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
+use anykms::transit::{EnvConfig, TransitProvider};
+use tower::ServiceBuilder;
+
+let service = ServiceBuilder::new()
+    .concurrency_limit(4)
+    .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
+let server = EnvConfig::vault()
+    .load()?
+    .http_transport(TowerTransport::new(service));
+let registry = anykms::Registry::builder()
+    .provider(TransitProvider::builder().server("default", server).build()?)
+    .build()?;
+```
+
+The adapter sets `content-length`, reads the response into the same bounded zeroizing buffer as
+the built-in transport, and keeps the client's failure classes. It has **no timeout of its own**,
+and a `tower::timeout` layer bounds only the service's response future, not the body the adapter
+reads afterwards: the timeout that covers the whole exchange is the one at the bottom of the stack
+(the built-in client's request timeout and `RequestTimeout` span the body; so does a `fetch`
+timeout). Over another service, give it one that does too; a `map_err` layer that boxes a
+`SendError::Timeout` keeps the class. The adapter **cannot control redirects**: when the service
+is not the built-in client, configure it not to follow them (for a `fetch`-based service, the
+`Redirect::Manual` extension below). A request's `RequestTimeout` extension reaches the service,
+which may honour it (the built-in client does). The service is cloned for each request, so every
+layer in the stack must be `Clone`: tower's `RateLimit` is not, so put a rate limit behind a
+`buffer` layer (`ServiceBuilder::buffer`, feature `buffer`, needs a Tokio runtime), as tower
+documents.
+
+One difference from the bare client: `HttpTransport::ready` (the check a backend runs before its
+credential fetch, so that running outside a Tokio runtime fails with one `NoRuntime` error) cannot
+look through a tower stack. With `into_service()` at the bottom, `NoRuntime` still has its class
+and is still a `Configuration` error, but it surfaces from the first request, after the credential
+chain has started.
+
+The same adapter is how anykms runs where reqwest cannot, such as Cloudflare Workers: with
+`default-features = false`, a backend feature, `tower` and `js` (the host's clocks and RNG), the
+dependency tree holds no reqwest, hyper or rustls, and `tower-worker-fetch`'s `FetchService`
+carries the requests over the host's `fetch`. Two of its request extensions are **required** on
+every request, set by a `map_request` layer: `Redirect::Manual` (a Worker's `fetch` follows
+redirects by default, `Authorization` header included) and `Timeout` (the adapter has none, and
+`FetchService` does not read anykms's `RequestTimeout`; map it, or set a fixed one):
+
+```rust,ignore
+use std::time::Duration;
+
+use anykms::aws::anykms_http::{RequestTimeout, TowerTransport, http};
+use tower::ServiceBuilder;
+use tower_worker_fetch::{FetchService, Redirect, Timeout};
+
+let service = ServiceBuilder::new()
+    .map_request(|mut req: http::Request<_>| {
+        let ext = req.extensions_mut();
+        ext.insert(Redirect::Manual); // a 3xx comes back as is; the backend rejects it
+        let timeout = ext.get::<RequestTimeout>().map_or(Duration::from_secs(10), |t| t.0);
+        ext.insert(Timeout(timeout));
+        req
+    })
+    .service(FetchService::new());
+let transport = TowerTransport::new(service);
+```
+
+See [guarantees](guarantees.md) for what holds on a Worker: host TLS (public cloud endpoints
+reachable, a private CA or mTLS not), and explicit credentials only (the link-local metadata
+servers fail with a `Configuration` error before sending anything).
+
 ## Typed handles
 
 Typed handles give compile-time capabilities:

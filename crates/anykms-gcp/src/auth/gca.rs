@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use anykms_core::time::Instant;
 use anykms_core::{BoxFuture, ErrorKind, Result};
 use google_cloud_auth::credentials::AccessTokenCredentials;
 
@@ -50,7 +51,7 @@ impl CredentialSource for GoogleCloudAuth {
         Box::pin(async move {
             let span =
                 anykms_http::token_span!("anykms.gcp.token", backend = BACKEND, credential = KIND);
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             let r = anykms_http::span::instrument(self.fetch(), &span).await;
             anykms_http::span::finish_token(&span, started, None, &r);
             #[cfg(feature = "tracing")]

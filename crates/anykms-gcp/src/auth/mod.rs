@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use anykms_core::time::{Instant, system_now};
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
 use anykms_http::HttpTransport;
 use anykms_http::credentials::{Credential, CredentialCache, Expiring};
@@ -481,7 +482,9 @@ impl Credentials {
     }
 
     /// The metadata server only (GCE, GKE Workload Identity, Cloud Run), at `GCE_METADATA_HOST`
-    /// or `169.254.169.254`, over plain HTTP with `Metadata-Flavor: Google`.
+    /// or `169.254.169.254`, over plain HTTP with `Metadata-Flavor: Google`. On
+    /// `wasm32-unknown-unknown` (a Cloudflare Worker) the server is unreachable and this is a
+    /// `Configuration` error at `build()`; ADC skips it there without a probe.
     pub fn metadata_server() -> Self {
         Self(Spec::Metadata)
     }
@@ -724,7 +727,7 @@ impl Fetched {
         Expiring::valid_for(
             Self {
                 secret: Some(Arc::new(secret)),
-                expires_at: SystemTime::now().checked_add(lifetime),
+                expires_at: system_now().checked_add(lifetime),
             },
             lifetime,
         )
@@ -812,12 +815,12 @@ impl<F: Fetch> Cached<F> {
             backend = BACKEND,
             credential = self.fetcher.kind(),
         );
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let r = anykms_http::span::instrument(self.fetcher.fetch(), &span).await;
         let expires_in = r.as_ref().ok().and_then(|t| {
             t.value()
                 .expires_at
-                .and_then(|at| at.duration_since(SystemTime::now()).ok())
+                .and_then(|at| at.duration_since(system_now()).ok())
         });
         anykms_http::span::finish_token(&span, started, expires_in, &r);
         #[cfg(feature = "tracing")]
