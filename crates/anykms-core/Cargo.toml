@@ -18,6 +18,11 @@ tracing = ["dep:tracing"]
 # `Serialize`/`Deserialize` for `Ciphertext`, `Signature` and `Tag` (their base64 storage
 # encoding in human-readable formats, bytes in binary ones).
 serde = ["dep:serde"]
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): the clock
+# behind `std_clock` (and, through the crates that forward this feature, every other clock
+# read) comes from `performance.now()` / `Date.now()`, since `std::time::*::now` panics
+# there. No effect on any other target.
+js = ["dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 trait-variant.workspace = true
@@ -27,6 +32,10 @@ sha2 = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 # Not the workspace definition, which enables `derive`.
 serde = { version = "1", default-features = false, features = ["std"], optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

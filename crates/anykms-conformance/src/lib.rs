@@ -79,9 +79,11 @@ pub mod __private {
     pub use anykms_core;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use libtest_mimic::{Arguments, Trial};
 
 use cases::Case;
@@ -92,6 +94,7 @@ pub use fixture::{
 };
 
 /// Builds the fixture, probes it, and runs every case. Returns the process exit code.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run<F, M>(make: M) -> ExitCode
 where
     F: Fixture,
@@ -103,6 +106,7 @@ where
 /// Like [`run`], but the fixture may be unavailable (e.g. no server running). Then every case is
 /// reported as ignored with kind `skip` and the reason, never as passed. Set
 /// `ANYKMS_REQUIRE_FIXTURE=1` (as CI does) to make an unavailable fixture a failure instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_or_skip<F, M>(make: M) -> ExitCode
 where
     F: Fixture,
@@ -161,6 +165,7 @@ where
                 registry.clone(),
                 typed.clone(),
                 path,
+                Arc::new(|d| Box::pin(tokio::time::sleep(d))),
             );
             let rt = rt.clone();
             let body = case.run.clone();
@@ -198,6 +203,7 @@ where
 }
 
 /// The name of the trial that checks the fixture's declarations.
+#[cfg(not(target_arch = "wasm32"))]
 const DECLARATIONS: &str = "conformance::declarations";
 
 /// Whether a case runs.
@@ -243,8 +249,161 @@ fn undeclared_message(features: &[Feature]) -> String {
     )
 }
 
+/// The outcome of one conformance case, as [`run_async`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The case ran and passed.
+    Passed,
+    /// The case ran and failed with this message.
+    Failed(String),
+    /// The case did not run: the fixture declared the feature not applicable (`n/a`) or lacking
+    /// (`skip`).
+    Ignored {
+        /// `"n/a"` or `"skip"`.
+        kind: &'static str,
+        /// The fixture's reason.
+        reason: String,
+    },
+    /// The case did not run: `probe()` left a feature it needs undeclared (a fixture bug).
+    Undeclared(String),
+}
+
+/// One named case and its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseReport {
+    /// `<path>::<case>` (e.g. `typed::aead::roundtrip`).
+    pub name: String,
+    /// What happened.
+    pub outcome: Outcome,
+}
+
+/// Every case's outcome plus the declarations check, as produced by [`run_async`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    /// Cases in run order.
+    pub cases: Vec<CaseReport>,
+    /// Features a selected case needs that `probe()` left undeclared, with the cases' names.
+    /// Empty when every selected case's features are declared. Covers the cases the run's
+    /// `filter` selects, like `cases`; a run without a filter checks every case.
+    pub undeclared: Vec<(Feature, Vec<String>)>,
+}
+
+impl Report {
+    /// Whether every case that ran passed and every needed feature is declared. Ignored cases
+    /// (`n/a`, `skip`) do not fail the report; a host may treat `skip` as failure itself.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.undeclared.is_empty()
+            && self
+                .cases
+                .iter()
+                .all(|c| !matches!(c.outcome, Outcome::Failed(_) | Outcome::Undeclared(_)))
+    }
+
+    /// Counts of (passed, failed, ignored, undeclared).
+    #[must_use]
+    pub fn counts(&self) -> (usize, usize, usize, usize) {
+        let mut c = (0, 0, 0, 0);
+        for r in &self.cases {
+            match r.outcome {
+                Outcome::Passed => c.0 += 1,
+                Outcome::Failed(_) => c.1 += 1,
+                Outcome::Ignored { .. } => c.2 += 1,
+                Outcome::Undeclared(_) => c.3 += 1,
+            }
+        }
+        c
+    }
+}
+
+/// Runs every case **sequentially on the caller's executor**, with no runtime of its own: the
+/// portable entry point for hosts without tokio or `libtest` (a Cloudflare Worker, a browser
+/// test). Natively [`run`] is the usual choice: it runs cases in parallel and prints
+/// `libtest`-style output.
+///
+/// `sleep` is how the cases wait between settle checks (e.g. a
+/// `setTimeout`-backed delay on wasm, `tokio::time::sleep` natively, or
+/// [`anykms_core::instant_sleep`] for fixtures with no settle time). `filter`, when set, selects
+/// the cases whose full name (`<path>::<case>`) contains it: only those run, and only their
+/// undeclared features count against the report — a host running a subset is not failed by
+/// cases it did not ask for. Run without a filter to check every declaration, as the native
+/// `conformance::declarations` trial does.
+///
+/// # Panics
+///
+/// If the fixture's provider cannot be registered (as [`run`] does).
+pub async fn run_async<F: Fixture>(
+    fx: Arc<F>,
+    sleep: anykms_core::SleepFn,
+    filter: Option<&str>,
+) -> Report {
+    let caps = Arc::new(fx.probe().await);
+    let registry = anykms_core::Registry::builder()
+        .provider_arc(fx.provider())
+        .build()
+        .expect("fixture provider registers");
+    let typed = fx.typed();
+    let all = cases::all::<F>();
+    let mut report = Report::default();
+    for case in all.iter().filter(|c| selected(filter, c)) {
+        if let Gate::Undeclared(fs) = gate(&caps, case) {
+            for f in fs {
+                match report.undeclared.iter_mut().find(|(g, _)| *g == f) {
+                    Some((_, names)) => names.push(case.name.clone()),
+                    None => report.undeclared.push((f, vec![case.name.clone()])),
+                }
+            }
+        }
+    }
+    for case in all {
+        let gate = gate(&caps, &case);
+        for &path in case.paths() {
+            let name = format!("{}::{}", path, case.name);
+            if filter.is_some_and(|f| !name.contains(f)) {
+                continue;
+            }
+            let outcome = match &gate {
+                Gate::Run => {
+                    let ctx = ctx::Ctx::new(
+                        fx.clone(),
+                        caps.clone(),
+                        registry.clone(),
+                        typed.clone(),
+                        path,
+                        sleep.clone(),
+                    );
+                    match (case.run)(ctx).await {
+                        Ok(()) => Outcome::Passed,
+                        Err(e) => Outcome::Failed(e),
+                    }
+                }
+                Gate::Ignore(kind, reason) => Outcome::Ignored {
+                    kind,
+                    reason: reason.clone(),
+                },
+                Gate::Undeclared(features) => Outcome::Undeclared(undeclared_message(features)),
+            };
+            report.cases.push(CaseReport { name, outcome });
+        }
+    }
+    report
+}
+
+/// Whether a [`run_async`] `filter` selects `case`: no filter selects everything; otherwise at
+/// least one of the case's full names (`<path>::<case>`) must contain it. The same test the
+/// run loop applies per path, so `Report::undeclared` and `Report::cases` cover the same cases.
+fn selected<F>(filter: Option<&str>, case: &Case<F>) -> bool {
+    filter.is_none_or(|f| {
+        case.paths()
+            .iter()
+            .any(|path| format!("{path}::{}", case.name).contains(f))
+    })
+}
+
 /// The `conformance::declarations` trial: fails listing every feature a case requires or
-/// consults that the fixture left undeclared. It checks every case, whatever filter the run uses.
+/// consults that the fixture left undeclared. It checks every case, whatever filter the run uses
+/// (the filter can still deselect the trial itself by name).
+#[cfg(not(target_arch = "wasm32"))]
 fn declarations_trial<F>(caps: &FixtureCaps, all: &[Case<F>]) -> Trial {
     let mut missing: Vec<Feature> = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -291,6 +450,22 @@ mod tests {
             Gate::Undeclared(f) => f,
             _ => Vec::new(),
         }
+    }
+
+    #[test]
+    fn filter_selects_by_full_name_on_any_path() {
+        let c = case(&[], &[]); // name "x", both paths: typed::x, registry::x
+        assert!(selected(None, &c));
+        assert!(selected(Some("x"), &c));
+        assert!(selected(Some("typed::"), &c));
+        assert!(selected(Some("registry::x"), &c));
+        assert!(!selected(Some("zz"), &c));
+        let typed_only = Case {
+            both_paths: false,
+            ..case(&[], &[])
+        };
+        assert!(selected(Some("typed::x"), &typed_only));
+        assert!(!selected(Some("registry::"), &typed_only));
     }
 
     #[test]

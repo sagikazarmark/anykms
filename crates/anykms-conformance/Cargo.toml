@@ -12,22 +12,35 @@ categories = ["cryptography", "development-tools::testing"]
 [features]
 # Helpers for backend fixtures: `RunId`, `KeySpecTable`, `FreshKeys` and `typed_handles!`.
 fixture-helpers = []
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): the clock behind
+# `Ctx::settled` and the recipes' clocks and RNG (`anykms-core/js`, `anykms-recipes/js`). A wasm
+# host drives `run_async` on its own executor. No effect on any other target.
+js = ["anykms-core/js", "anykms-recipes/js"]
 
 [dependencies]
 anykms-core.workspace = true
 # The recipe cases (envelope, JOSE), and an RSA backend for the RSA cases (LocalVerifier,
 # CachedVerifier, JOSE).
-anykms-recipes = { workspace = true, features = ["jose", "envelope", "rsa-aws-lc-rs"] }
+anykms-recipes = { workspace = true, features = ["jose", "envelope"] }
 
 trait-variant.workspace = true
 zeroize.workspace = true
-tokio.workspace = true
-libtest-mimic.workspace = true
 base64.workspace = true
 # Independent envelope v1 decoder (recipes::envelope::format).
 aes-gcm.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
+
+# The libtest-style runner (`run`, `run_or_skip`): one tokio runtime per test binary. Native
+# targets only; on wasm32 a host drives [`run_async`] itself and reports the `Report`.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+libtest-mimic.workspace = true
+anykms-recipes = { workspace = true, features = ["rsa-aws-lc-rs"] }
+
+# wasm32: the pure-Rust RSA backend (aws-lc-rs has no C toolchain there).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+anykms-recipes = { workspace = true, features = ["rsa-rustcrypto"] }
 
 [dev-dependencies]
 # examples/minimal_backend.rs: key material and nonces for its toy KMS.

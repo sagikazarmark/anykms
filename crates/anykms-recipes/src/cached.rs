@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use anykms_core::time::Instant;
 use anykms_core::{
     Digest, DigestVerifier, Error, ErrorKind, KeyVersion, MessageVerifier, Operation, PublicKey,
     PublicKeys, Result, Signature, SignatureAlgorithm,
@@ -134,8 +135,8 @@ struct State {
 /// algorithm fails with `InvalidArgument` before any lookup, and a public key of another type
 /// fails with `KeyMismatch`.
 ///
-/// Needs a working `std::time::Instant` (cache expiry and the refresh interval read it directly),
-/// so it is not usable on `wasm32-unknown-unknown`, where `Instant::now` panics.
+/// Cache expiry and the refresh interval read a monotonic clock directly (`anykms_core::time`:
+/// `std::time::Instant`, or `performance.now()` on `wasm32-unknown-unknown` with the `js` feature).
 ///
 /// # Rotation
 ///

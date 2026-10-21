@@ -420,6 +420,7 @@ mod tests {
                 Registry::builder().build().unwrap(),
                 typed,
                 Path::Typed,
+                anykms_core::instant_sleep(),
             );
             let uri = KeyUri::parse("fake://k").unwrap();
             ctx.mac(&uri, MacAlgorithm::HmacSha256)

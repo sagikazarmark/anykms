@@ -11,6 +11,12 @@ categories = ["cryptography", "development-tools::testing"]
 # Tests are not published: no test sources or test keys in the package.
 exclude = ["tests/"]
 
+[features]
+# `wasm32-unknown-unknown` on a JS host (browsers, Node.js, Cloudflare Workers): keyset
+# timestamps read `Date.now()` (`anykms-core/js`) and `getrandom` uses `crypto.getRandomValues()`.
+# No effect on any other target.
+js = ["anykms-core/js", "getrandom/wasm_js"]
+
 [dependencies]
 anykms-core.workspace = true
 

@@ -44,15 +44,22 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   credential types (`aws-sdk-credentials`) are held by Cargo's MSRV-aware resolver on releases
   that support it; newer releases need a newer compiler.
 - The HTTP backends (transit, aws, gcp, azure) need a tokio runtime; outside one an operation
-  fails with `Configuration` (see [From synchronous code](guide.md#from-synchronous-code)). Core, recipes and local are runtime-agnostic (any
-  async executor; you supply `Retry`'s sleep function and, optionally, its clock). They assume
-  a working std clock and OS RNG, so `wasm32-unknown-unknown` is only partly usable:
-  `std::time::Instant::now` and `SystemTime::now` panic there. Give `Retry` a clock
-  (`RetryLayer::with_clock`; the default uses `Instant`). `CachedVerifier` reads `Instant`
-  directly and cannot be used there; JWT signing reads `SystemTime` unless
-  `JwtOptions::with_now` sets the time; local keysets read `SystemTime` when keys are created or rotated. Recipes and
-  local draw randomness from `getrandom`, which only builds on that target with its `wasm_js`
-  feature enabled by the application.
+  fails with `Configuration` (see [From synchronous code](guide.md#from-synchronous-code)). Core,
+  recipes and local are runtime-agnostic (any async executor; you supply `Retry`'s sleep function
+  and, optionally, its clock).
+- **`wasm32-unknown-unknown` on a JS host** (browsers, Node.js, Cloudflare Workers): core,
+  recipes, local and conformance build and run there with their `js` feature. `std::time` has no
+  clock on that target, so the feature routes every clock read through `anykms_core::time`:
+  `performance.now()` for the monotonic clock (`Retry`'s default clock, `CachedVerifier`, the DEK
+  cache) and `Date.now()` for the wall clock (JWT `iat`/`exp`, local keyset timestamps), with no
+  extra dependencies beyond the `js-sys`/`wasm-bindgen` that `getrandom`'s JS backend already
+  brings. The same feature enables that backend. The RSA backend must be `rsa-rustcrypto` (aws-lc-rs does
+  not build for wasm32). The conformance runner (`run`, `run_or_skip`) is native-only; a wasm host
+  drives `anykms_conformance::run_async` on its own executor and reports the `Report`. Cloudflare
+  Workers advance both clocks only across I/O. Without `js`, the target behaves as before (the
+  std clock panics on first use); WASI targets have a working clock and never need it. The HTTP
+  backends are **not** supported there: they need TLS control the host does not offer (see the
+  `HttpTransport` discussion in the issue tracker).
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
   `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its

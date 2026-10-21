@@ -109,6 +109,35 @@ jobs:
       - name: Features
         run: just features
 
+  wasm:
+    name: wasm32 (JS host)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The `wasm` profile drops lld (devenv.nix): its `-fuse-ld=lld` is not a wasm linker flag.
+        shell: devenv --profile wasm shell -- bash -e {0}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv --profile wasm shell -- {0}
+
+      - name: Install wasm-bindgen-cli (version from Cargo.lock)
+        run: just wasm-bindgen-cli
+
+      - name: Check and test on wasm32-unknown-unknown
+        run: just wasm
+
   # Each published crate's docs as docs.rs builds them: nightly, the features and rustdoc
   # arguments of its [package.metadata.docs.rs] (`--cfg docsrs` turns on `doc_cfg`), one crate
   # at a time, rustdoc warnings denied. docs.rs pages are frozen per published version.

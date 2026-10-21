@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use anykms_core::time::Instant;
 use anykms_core::{Ciphertext, KeyVersion, KeyWrap, Result, Rewrap};
 use zeroize::Zeroizing;
 
@@ -63,7 +64,8 @@ struct Cache {
 /// [`EnvelopeAead`] checks after unwrapping (data-key length, key commitment, AES-GCM with the
 /// caller's AAD) still runs on every decrypt.
 ///
-/// Needs a working `std::time::Instant`, so it is not usable on `wasm32-unknown-unknown`. Expiry
+/// Expiry reads a monotonic clock (`anykms_core::time`; on `wasm32-unknown-unknown` the `js`
+/// feature is required, otherwise `Instant::now` panics there). Expiry
 /// is checked on lookup and eviction scans the whole map only when it is full. Concurrent misses
 /// for the same wrapped key are not coalesced: each calls the KMS once.
 ///

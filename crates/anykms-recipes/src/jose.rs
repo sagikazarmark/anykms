@@ -114,8 +114,9 @@
 //! bytes or signature (replay caches, revocation lists); use a claim such as `jti`.
 
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use anykms_core::time::unix_now;
 use anykms_core::{
     AsymmetricKeyType, Describe, DigestSigner, Error, ErrorKind, KeyState, KeyVersion,
     MessageSigner, Operation, PublicKey, PublicKeys, Result, Signature, SignatureAlgorithm,
@@ -136,9 +137,7 @@ fn invalid(op: Operation, m: &'static str) -> Error {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+    unix_now().as_secs()
 }
 
 /// The default key id: `<key name>.<version>`.
@@ -458,9 +457,9 @@ impl JwtOptions {
         self
     }
 
-    /// Uses `unix_seconds` as the current time instead of the system clock (for tests, and where
-    /// `SystemTime::now` panics, such as `wasm32-unknown-unknown`: signing reads the clock
-    /// unless this is set).
+    /// Uses `unix_seconds` as the current time instead of the system clock (for tests). On
+    /// `wasm32-unknown-unknown` the clock is `Date.now()` with the `js` feature
+    /// (`anykms_core::time`); without it, signing reads `SystemTime` and panics there.
     pub fn with_now(mut self, unix_seconds: u64) -> Self {
         self.now = Some(unix_seconds);
         self
