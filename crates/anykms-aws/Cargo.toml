@@ -22,22 +22,25 @@ exclude = [
 ]
 
 [features]
-default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs"]
-# TLS crypto provider, used when neither `AwsProviderBuilder::crypto_provider` nor a process-wide
-# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
-# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
-# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
-# with `default-features = false` and `rustls-ring`.
-rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
-rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+default = ["reqwest", "rustls-aws-lc-rs", "rsa-aws-lc-rs"]
+# The built-in HTTP transport (`anykms_http::ReqwestTransport`), used when
+# `AwsProviderBuilder::http_transport` is not set. Without it a transport must be injected.
+reqwest = ["anykms-http/reqwest"]
+# TLS crypto provider for the built-in transport, used when neither a configured provider nor a
+# process-wide default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win
+# over the features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http
+# selects it. aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring
+# is opt-in with `default-features = false` and `rustls-ring`. `ReqwestTransport`-only.
+rustls-ring = ["anykms-http/rustls-ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs"]
 # RSA-OAEP-SHA-256 for the local wrap of RSA `KeyWrap` keys (anykms-recipes'
 # `rsa_oaep_sha256_encrypt`). With neither, wrapping with an RSA key fails with `Unsupported`.
 rsa-aws-lc-rs = ["anykms-recipes/rsa-aws-lc-rs"]
 rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
 # Spans and events for every operation (field allowlist; never data).
 tracing = ["dep:tracing", "anykms-http/tracing"]
-# Allow HttpVersion::Http2.
-http2 = ["reqwest/http2", "anykms-http/http2"]
+# Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
+http2 = ["anykms-http/http2"]
 # Credentials from the AWS SDK (`credentials::SdkCredentials` over any
 # `aws_credential_types` provider, e.g. one built with `aws-config`): SSO, role chaining,
 # `credential_process` and the rest of the SDK chain. Only credentials come from the SDK; KMS
@@ -65,20 +68,14 @@ base64.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 getrandom.workspace = true
-reqwest.workspace = true
 aws-credential-types = { version = "1", optional = true }
 httpdate = "1"
-url = "2"
-rustls.workspace = true
 tracing = { workspace = true, optional = true }
-# The lazily built link-local client (`OnceCell`); reqwest
-# already depends on tokio.
-tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 # The tests and examples administer keys through the hidden `__test-fixtures` API. A path-only
 # dev-dependency: `cargo publish` strips it.
-anykms-aws = { path = ".", features = ["__test-fixtures"] }
+anykms-aws = { path = ".", features = ["__test-fixtures", "reqwest"] }
 anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
 # Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
 anykms-testkit = { path = "../anykms-testkit" }

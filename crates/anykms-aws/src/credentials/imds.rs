@@ -63,7 +63,7 @@ impl ImdsCredentials {
         }
     }
 
-    fn base(&self) -> Result<reqwest::Url> {
+    fn base(&self) -> Result<anykms_http::url::Url> {
         let raw = match &self.endpoint {
             Some(e) => e.clone(),
             None => match self.vars.get("AWS_EC2_METADATA_SERVICE_ENDPOINT") {
@@ -80,7 +80,7 @@ impl ImdsCredentials {
                 },
             },
         };
-        let url = reqwest::Url::parse(&raw)
+        let url = anykms_http::url::Url::parse(&raw)
             .map_err(|_| config_err("the instance metadata endpoint is not a valid URL"))?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
@@ -95,15 +95,18 @@ impl ImdsCredentials {
     }
 
     pub(crate) async fn fetch(&self, cx: &SourceContext) -> Result<Credentials> {
+        use anykms_http::client::empty;
+        use anykms_http::http::Method;
         let base = self.base()?;
-        let client = cx.http.local().await?;
         let url = |p: &str| {
             let mut u = base.clone();
             u.set_path(p);
             u
         };
-        let transport = |e: reqwest::Error| {
-            let mut err = anykms_http::client::transport_error(BACKEND, Operation::Configure, e);
+        // A link-local request that fails fast (`Http::local`). A TLS or request-building
+        // failure against the metadata service is not a configuration the operator can fix
+        // here: report it as the service being unreachable.
+        let transport = |mut err: Error| {
             if err.kind() == ErrorKind::Configuration {
                 err = Error::new(
                     ErrorKind::Unavailable,
@@ -117,37 +120,50 @@ impl ImdsCredentials {
         let limit = MAX_CREDENTIAL_BYTES;
         let op = Operation::Configure;
         // IMDSv2 session token.
-        let resp = client
-            .put(url("/latest/api/token"))
-            .header("x-aws-ec2-metadata-token-ttl-seconds", TOKEN_TTL)
-            .send()
+        let resp = cx
+            .http
+            .send(
+                crate::client::Http::local(Method::PUT, &url("/latest/api/token"))
+                    .header("x-aws-ec2-metadata-token-ttl-seconds", TOKEN_TTL)
+                    .body(empty()),
+                4096,
+                op,
+            )
             .await
             .map_err(transport)?;
-        if !resp.status().is_success() {
-            return Err(match resp.status().as_u16() {
+        if !resp.status.is_success() {
+            return Err(match resp.status.as_u16() {
                 403 => {
                     config_err("instance metadata service refused a session token (IMDS disabled?)")
                 }
                 _ => unavailable("instance metadata service failed to issue a session token"),
             });
         }
-        let token = crate::client::read_body(resp, 4096, op).await?;
+        let token = resp.body;
         let token = std::str::from_utf8(&token)
             .ok()
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .ok_or_else(|| unavailable("instance metadata service returned a malformed token"))?;
-        let mut token_header = reqwest::header::HeaderValue::from_str(token)
+        let mut token_header = anykms_http::http::HeaderValue::from_str(token)
             .map_err(|_| unavailable("instance metadata service returned a malformed token"))?;
         token_header.set_sensitive(true);
         // The instance profile's role.
-        let resp = client
-            .get(url("/latest/meta-data/iam/security-credentials/"))
-            .header("x-aws-ec2-metadata-token", token_header.clone())
-            .send()
+        let resp = cx
+            .http
+            .send(
+                crate::client::Http::local(
+                    Method::GET,
+                    &url("/latest/meta-data/iam/security-credentials/"),
+                )
+                .header("x-aws-ec2-metadata-token", token_header.clone())
+                .body(empty()),
+                4096,
+                op,
+            )
             .await
             .map_err(transport)?;
-        match resp.status().as_u16() {
+        match resp.status.as_u16() {
             200 => {}
             404 => {
                 return Err(config_err(
@@ -160,7 +176,7 @@ impl ImdsCredentials {
                 ));
             }
         }
-        let role = crate::client::read_body(resp, 4096, op).await?;
+        let role = resp.body;
         let role = std::str::from_utf8(&role)
             .ok()
             .and_then(|r| r.lines().next())
@@ -172,21 +188,28 @@ impl ImdsCredentials {
             })
             .ok_or_else(|| unavailable("instance metadata service returned a malformed role name"))?
             .to_owned();
-        let resp = client
-            .get(url(&format!(
-                "/latest/meta-data/iam/security-credentials/{role}"
-            )))
-            .header("x-aws-ec2-metadata-token", token_header)
-            .send()
+        let resp = cx
+            .http
+            .send(
+                crate::client::Http::local(
+                    Method::GET,
+                    &url(&format!(
+                        "/latest/meta-data/iam/security-credentials/{role}"
+                    )),
+                )
+                .header("x-aws-ec2-metadata-token", token_header)
+                .body(empty()),
+                limit,
+                op,
+            )
             .await
             .map_err(transport)?;
-        if !resp.status().is_success() {
+        if !resp.status.is_success() {
             return Err(unavailable(
                 "instance metadata service failed to return credentials",
             ));
         }
-        let body = crate::client::read_body(resp, limit, op).await?;
-        JsonCredentials::parse(&body, "the instance metadata service")
+        JsonCredentials::parse(&resp.body, "the instance metadata service")
     }
 }
 

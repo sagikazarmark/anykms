@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use super::EnvGet;
 use crate::config::AzureCloud;
 use crate::credential::{
-    AccessToken, AzureCredential, LazyClient, cred_config_err, cred_err, form_body,
+    AccessToken, AzureCredential, TransportSlot, cred_config_err, cred_err, form_body,
     send_token_request, validate_authority, validate_client_id, validate_tenant,
 };
 
@@ -21,9 +21,10 @@ const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer
 /// The most a federated token file may hold.
 const MAX_TOKEN_FILE: usize = 64 * 1024;
 
-fn entra_client() -> LazyClient {
-    LazyClient::new(Duration::from_secs(5), Duration::from_secs(30), true)
-}
+/// The per-request timeout of a token-endpoint request (a
+/// [`RequestTimeout`](anykms_http::RequestTimeout)): the exchange may take longer than a Key
+/// Vault call.
+pub const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A set, non-empty variable.
 fn env(get: EnvGet<'_>, name: &str) -> Option<String> {
@@ -47,7 +48,7 @@ struct Client {
     tenant: String,
     client_id: String,
     authority: String,
-    http: LazyClient,
+    http: TransportSlot,
 }
 
 impl Client {
@@ -58,7 +59,7 @@ impl Client {
             tenant,
             client_id,
             authority: AzureCloud::Public.authority_host().to_owned(),
-            http: entra_client(),
+            http: TransportSlot::new(),
         })
     }
 
@@ -80,18 +81,19 @@ impl Client {
         pairs.push(secret_field);
         let body = form_body(&pairs);
         let url = format!("{}/{}/oauth2/v2.0/token", self.authority, self.tenant);
-        let req = self
-            .http
-            .get()?
-            .post(url)
+        let url = anykms_http::url::Url::parse(&url)
+            .map_err(|_| cred_config_err("invalid token endpoint URL"))?;
+        let http = self.http.get()?;
+        // The body stays in a zeroizing buffer up to the transport (which may copy it).
+        let req = anykms_http::client::request(anykms_http::http::Method::POST, &url)
             .header(
-                reqwest::header::CONTENT_TYPE,
+                anykms_http::http::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
             )
-            .header(reqwest::header::ACCEPT, "application/json")
-            // reqwest copies the body into its own buffer, which cannot be wiped.
-            .body(body.to_vec());
-        send_token_request(req, kind).await
+            .header(anykms_http::http::header::ACCEPT, "application/json")
+            .extension(anykms_http::RequestTimeout(TOKEN_REQUEST_TIMEOUT))
+            .body(body);
+        send_token_request(&*http, req, kind).await
     }
 }
 
@@ -230,6 +232,10 @@ impl AzureCredential for WorkloadIdentity {
         "workload_identity"
     }
 
+    fn bind_transport(&self, transport: std::sync::Arc<dyn anykms_http::HttpTransport>) {
+        self.client.http.bind(transport);
+    }
+
     fn tenant_id(&self) -> Option<&str> {
         Some(&self.client.tenant)
     }
@@ -324,6 +330,10 @@ impl AzureCredential for ClientSecret {
 
     fn kind(&self) -> &'static str {
         "client_secret"
+    }
+
+    fn bind_transport(&self, transport: std::sync::Arc<dyn anykms_http::HttpTransport>) {
+        self.client.http.bind(transport);
     }
 
     fn tenant_id(&self) -> Option<&str> {

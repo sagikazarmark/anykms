@@ -86,11 +86,18 @@
 //!   using the current token). A 401 refreshes the
 //!   token and retries the request **once** if the token changed; there are no other retries
 //!   (use `RetryLayer`). `429 Throttled` carries `Retry-After` when Azure sends it.
-//! - **Transport.** No redirects are followed (a 3xx is `Configuration`, no token or body is sent
-//!   on). TLS uses rustls with the system roots (see [TLS crypto provider](#tls-crypto-provider));
-//!   there is no way to skip verification. Plain HTTP exists only for loopback test hosts.
-//! - **Runtime.** Requires a tokio runtime (reqwest); called outside one, an operation fails
-//!   with `Configuration` instead of panicking.
+//! - **Transport.** Every request (vaults, the Entra ID token endpoint, IMDS) goes through one
+//!   [`HttpTransport`](anykms_http::HttpTransport): [`AzureProviderBuilder::http_transport`], or
+//!   a default [`ReqwestTransport`](anykms_http::ReqwestTransport) (feature `reqwest`); the
+//!   built-in credentials receive it from the provider ([`AzureCredential::bind_transport`]).
+//!   TLS trust (a test host's CA included), the crypto provider, proxying, timeouts and the HTTP
+//!   version are the transport's settings ([`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder)).
+//!   The built-in transport follows no redirects (a 3xx is `Configuration`, no token or body is
+//!   sent on), uses rustls with the system roots (see [TLS crypto provider](#tls-crypto-provider))
+//!   with no way to skip verification, and never proxies IMDS. Plain HTTP exists only for
+//!   loopback test hosts.
+//! - **Runtime.** The built-in transport requires a tokio runtime; called outside one, an
+//!   operation fails with `Configuration` instead of panicking, before the credential is asked.
 //!
 //! # Credentials
 //!
@@ -103,25 +110,28 @@
 //!
 //! # Features
 //!
-//! `rustls-aws-lc-rs` (default) or `rustls-ring`: the TLS crypto provider. `rsa-aws-lc-rs`
+//! `reqwest` (default): the built-in transport; without it [`AzureProviderBuilder::http_transport`]
+//! is required. `rustls-aws-lc-rs` (default) or `rustls-ring`: its TLS crypto provider. `rsa-aws-lc-rs`
 //! (default) or `rsa-rustcrypto`: local RSA verification. `tracing`: spans and events (see
 //! `docs/operations-azure.md`, "Tracing"). `http2`, `azure-identity`, and the experimental
 //! `mhsm-hmac`.
 //!
 //! # TLS crypto provider
 //!
-//! As anykms-transit: [`AzureProviderBuilder::crypto_provider`], else the process default
+//! As anykms-transit, for the built-in transport:
+//! [`ReqwestTransportBuilder::crypto_provider`](anykms_http::ReqwestTransportBuilder::crypto_provider),
+//! else the process default
 //! ([`CryptoProvider::install_default`]), else aws-lc-rs (`rustls-aws-lc-rs`, default), else
 //! ring (`rustls-ring`). Never installed process-wide.
 //!
 //! # Zeroization limits
 //!
 //! Request and response bodies, decoded plaintexts, data keys, tokens and secrets are held in
-//! zeroizing buffers. Copies outside anykms' control are not wiped: the body reqwest sends, the
-//! `Authorization` header value, the process environment (`AZURE_CLIENT_SECRET`), hyper and
-//! rustls buffers, kernel socket buffers.
+//! zeroizing buffers. Copies outside anykms' control are not wiped: with the built-in transport,
+//! the body reqwest sends, the `Authorization` header value and hyper and rustls buffers; the
+//! process environment (`AZURE_CLIENT_SECRET`), kernel socket buffers.
 //!
-//! [`CryptoProvider::install_default`]: rustls::crypto::CryptoProvider::install_default
+//! [`CryptoProvider::install_default`]: anykms_http::rustls::crypto::CryptoProvider::install_default
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
@@ -140,12 +150,16 @@ mod uri;
 
 pub(crate) const BACKEND: &str = "azure";
 
-pub use config::{ApiVersion, AzureCloud, AzureOptions, HttpVersion, Proxy, TestHost, VaultKind};
+/// The HTTP plumbing: the [`HttpTransport`](anykms_http::HttpTransport) seam and the built-in
+/// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`AzureProviderBuilder::http_transport`].
+pub use anykms_http;
+pub use config::{ApiVersion, AzureCloud, AzureOptions, TestHost, VaultKind};
 #[cfg(feature = "azure-identity")]
 pub use cred::AzureIdentity;
 pub use cred::{
-    ClientSecret, EnvCredentialKind, IMDS_ENDPOINT, ManagedIdentity, WorkloadIdentity,
-    credential_from_env, credential_from_env_with, env_credential_kind, env_credential_kind_with,
+    ClientSecret, EnvCredentialKind, IMDS_ENDPOINT, IMDS_TIMEOUT, ManagedIdentity,
+    TOKEN_REQUEST_TIMEOUT, WorkloadIdentity, credential_from_env, credential_from_env_with,
+    env_credential_kind, env_credential_kind_with,
 };
 pub use credential::{AccessToken, AzureCredential, StaticToken};
 #[cfg(feature = "mhsm-hmac")]
@@ -153,8 +167,6 @@ pub use handles::AzureMacKey;
 pub use handles::{AzureAeadKey, AzureDigestKey, AzureKeyWrapKey};
 pub use keyinfo::{AzureKeyInfo, AzureKeyType, AzureVersionInfo};
 pub use provider::{AzureProvider, AzureProviderBuilder};
-/// The rustls version used for TLS, for [`AzureProviderBuilder::crypto_provider`].
-pub use rustls;
 pub use uri::{AzureKeyRef, SCHEME, SCHEMES};
 
 /// Internal parsers exposed for the fuzz targets. Not part of the public API.

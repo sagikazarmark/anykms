@@ -31,6 +31,16 @@ const EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
 const EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
 const EC_D: &str = "jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI";
 
+/// The built-in transport with a per-request timeout (timeouts live on the transport), without
+/// system roots (the mock server is plain HTTP on loopback).
+fn transport(request_timeout: Duration) -> anykms_azure::anykms_http::ReqwestTransport {
+    anykms_azure::anykms_http::ReqwestTransport::builder()
+        .require_roots(false)
+        .request_timeout(request_timeout)
+        .build()
+        .unwrap()
+}
+
 fn b64u(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
@@ -90,7 +100,7 @@ impl Env {
         AzureProvider::builder()
             .credential(cred)
             .test_host(h)
-            .request_timeout(Duration::from_secs(5))
+            .http_transport(transport(Duration::from_secs(5)))
             .build()
             .unwrap()
     }
@@ -1760,7 +1770,7 @@ async fn slow_server_times_out_and_oversize_responses_are_refused() {
     let p = AzureProvider::builder()
         .credential(StaticToken::new("t"))
         .test_host(env.test_host())
-        .request_timeout(Duration::from_millis(300))
+        .http_transport(transport(Duration::from_millis(300)))
         .max_response_bytes(64 * 1024)
         .build()
         .unwrap();
@@ -1860,9 +1870,6 @@ fn host_allowlist_is_enforced_at_open() {
         AzureProvider::builder()
             .credential(StaticToken::new("t"))
             .allowed_vaults(["evil.example.com"]),
-        AzureProvider::builder()
-            .credential(StaticToken::new("t"))
-            .ca_pem(b"x".to_vec()),
         AzureProvider::builder()
             .credential(StaticToken::new("t"))
             .test_host(TestHost::loopback_http("10.0.0.1:80", SCOPE)),

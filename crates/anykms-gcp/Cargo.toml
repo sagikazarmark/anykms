@@ -12,14 +12,17 @@ categories = ["cryptography", "api-bindings"]
 exclude = ["tests/"]
 
 [features]
-default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs", "service-account-key"]
-# TLS crypto provider, used when neither `GcpProviderBuilder::crypto_provider` nor a process-wide
-# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
-# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
-# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
-# with `default-features = false` and `rustls-ring`.
-rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
-rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+default = ["reqwest", "rustls-aws-lc-rs", "rsa-aws-lc-rs", "service-account-key"]
+# The built-in HTTP transport (`anykms_http::ReqwestTransport`), used when
+# `GcpProviderBuilder::http_transport` is not set. Without it a transport must be injected.
+reqwest = ["anykms-http/reqwest"]
+# TLS crypto provider for the built-in transport, used when neither a configured provider nor a
+# process-wide default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win
+# over the features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http
+# selects it. aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring
+# is opt-in with `default-features = false` and `rustls-ring`. `ReqwestTransport`-only.
+rustls-ring = ["anykms-http/rustls-ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs"]
 # RSA backend for local signature verification (`LocalVerifier`) and the local RSA-OAEP wrap of
 # `asymmetricDecrypt` KEKs. Without either, RSA signing, verifying and public-key handles and RSA
 # KEKs fail to open with `Configuration` naming these features (ECDSA and Ed25519 are unaffected).
@@ -30,8 +33,8 @@ rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
 service-account-key = ["dep:aws-lc-rs"]
 # Spans and events for every request and token fetch (field allowlist; never data or tokens).
 tracing = ["dep:tracing", "anykms-http/tracing"]
-# Allow HttpVersion::Http2.
-http2 = ["reqwest/http2", "anykms-http/http2"]
+# Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
+http2 = ["anykms-http/http2"]
 # Credentials from Google's official auth library (`Credentials::google_cloud_auth` over a
 # `google_cloud_auth::credentials::AccessTokenCredentials`): AWS- and executable-sourced
 # workload identity federation, `external_account_authorized_user` and whatever else it supports.
@@ -40,7 +43,7 @@ google-cloud-auth = ["dep:google-cloud-auth"]
 
 [dependencies]
 anykms-core.workspace = true
-# TLS provider selection, the reqwest client, zeroizing buffers, transport errors, the
+# The transport seam and the built-in transport, zeroizing buffers, transport errors, the
 # single-flight credential cache.
 anykms-http.workspace = true
 # Local verification (LocalVerifier), PEM/SPKI parsing and the local RSA-OAEP wrap; no `jose`,
@@ -52,18 +55,18 @@ serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-reqwest.workspace = true
-url = "2"
-rustls.workspace = true
 rustls-pki-types = { workspace = true, features = ["std"] }
 aws-lc-rs = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 # 1.3: the first release with `credentials::AccessTokenCredentials`, which the bridge uses.
 google-cloud-auth = { version = "1.3", optional = true, default-features = false }
-# Single-flight token refresh; reqwest already depends on tokio.
+# Single-flight token refresh.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
+# The tests run against mock servers over the built-in transport (a path-only dev-dependency on
+# this crate, which `cargo publish` strips).
+anykms-gcp = { path = ".", features = ["reqwest"] }
 # The conformance suite (tests/conformance.rs over the fake server, tests/conformance_live.rs).
 anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
 # Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.

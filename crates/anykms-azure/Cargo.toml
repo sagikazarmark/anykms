@@ -13,15 +13,17 @@ categories = ["cryptography", "api-bindings"]
 exclude = ["tests/"]
 
 [features]
-default = ["rustls-aws-lc-rs", "rsa-aws-lc-rs"]
-# TLS crypto provider, used when neither `AzureProviderBuilder::crypto_provider` nor a
+default = ["reqwest", "rustls-aws-lc-rs", "rsa-aws-lc-rs"]
+# The built-in HTTP transport (`anykms_http::ReqwestTransport`), used when
+# `AzureProviderBuilder::http_transport` is not set. Without it a transport must be injected.
+reqwest = ["anykms-http/reqwest"]
+# TLS crypto provider for the built-in transport, used when neither a configured provider nor a
 # process-wide default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win
 # over the features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http
-# selects it.
-# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
-# with `default-features = false` and `rustls-ring`.
-rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
-rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+# selects it. aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring
+# is opt-in with `default-features = false` and `rustls-ring`. `ReqwestTransport`-only.
+rustls-ring = ["anykms-http/rustls-ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs"]
 # The RSA backend for local verification (`AzureOptions::local_verify` with an RSA key):
 # aws-lc-rs (default) or RustCrypto's `rsa`, through anykms-recipes. With neither, opening an
 # RSA algorithm for local verification is `Configuration`; server-side verification needs none.
@@ -29,8 +31,8 @@ rsa-aws-lc-rs = ["anykms-recipes/rsa-aws-lc-rs"]
 rsa-rustcrypto = ["anykms-recipes/rsa-rustcrypto"]
 # Spans and events for every request (field allowlist; never data, tokens or bodies).
 tracing = ["dep:tracing", "anykms-http/tracing"]
-# Allow HttpVersion::Http2.
-http2 = ["reqwest/http2", "anykms-http/http2"]
+# Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
+http2 = ["anykms-http/http2"]
 # Credentials from the Azure SDK (`AzureIdentity` over any `azure_core` `TokenCredential`, e.g.
 # from `azure_identity`: the Azure CLI, certificates, Azure Pipelines, ...). Only access tokens
 # come from it; Key Vault calls stay on this crate's client.
@@ -44,7 +46,7 @@ mhsm-hmac = []
 anykms-core.workspace = true
 # KeyWrapDataKeys, EmulatedDataKeys, LocalVerifier, ECDSA DER helpers, SPKI checks.
 anykms-recipes.workspace = true
-# TLS provider selection, the reqwest client, zeroizing buffers, Retry-After, CredentialCache.
+# The transport seam and the built-in transport, zeroizing buffers, Retry-After, CredentialCache.
 anykms-http.workspace = true
 
 zeroize.workspace = true
@@ -56,15 +58,15 @@ getrandom.workspace = true
 p256.workspace = true
 p384.workspace = true
 p521.workspace = true
-reqwest.workspace = true
-url = "2"
-rustls.workspace = true
 tracing = { workspace = true, optional = true }
 azure_core = { version = "1", optional = true, default-features = false }
-# Single-flight token refresh (through anykms-http); reqwest already depends on tokio.
+# Single-flight token refresh (through anykms-http).
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
+# The tests run against mock servers over the built-in transport (a path-only dev-dependency on
+# this crate, which `cargo publish` strips).
+anykms-azure = { path = ".", features = ["reqwest"] }
 anykms-conformance = { workspace = true, features = ["fixture-helpers"] }
 # Unpublished test helpers: a path-only dev-dependency, which `cargo publish` strips.
 anykms-testkit = { path = "../anykms-testkit" }

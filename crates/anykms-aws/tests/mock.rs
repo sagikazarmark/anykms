@@ -1700,8 +1700,15 @@ async fn malformed_oversized_and_slow_responses() {
         .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
         .mount(&server)
         .await;
+    // The per-request timeout lives on the transport.
     let p = builder(&server)
-        .request_timeout(Duration::from_millis(200))
+        .http_transport(
+            anykms_aws::anykms_http::ReqwestTransport::builder()
+                .require_roots(false)
+                .request_timeout(Duration::from_millis(200))
+                .build()
+                .unwrap(),
+        )
         .build()
         .unwrap();
     let k = p

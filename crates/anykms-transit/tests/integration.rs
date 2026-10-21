@@ -322,6 +322,21 @@ async fn sealed_server_is_unavailable(addr: String) {
     assert_eq!(e.detail().and_then(|d| d.http_status), Some(503));
 }
 
+/// The built-in transport trusting only `ca`. The integration targets run against real servers and
+/// need it (`reqwest` feature).
+#[cfg(feature = "reqwest")]
+fn transport_trusting(ca: &[u8]) -> anykms_transit::anykms_http::ReqwestTransport {
+    anykms_transit::anykms_http::ReqwestTransport::builder()
+        .ca_pem(ca)
+        .build()
+        .unwrap()
+}
+
+#[cfg(not(feature = "reqwest"))]
+fn transport_trusting(_ca: &[u8]) -> anykms_testkit::ScriptedTransport {
+    unreachable!("the integration tests need the `reqwest` feature")
+}
+
 async fn tls_case(flavor: Flavor, addr: String, ca: Vec<u8>) {
     // Set up a key with the root token over the verified TLS connection itself.
     let p = TransitProvider::builder()
@@ -329,7 +344,7 @@ async fn tls_case(flavor: Flavor, addr: String, ca: Vec<u8>) {
             "default",
             ServerConfig::new(&addr, flavor)
                 .token("root")
-                .ca_pem(ca.clone()),
+                .http_transport(transport_trusting(&ca)),
         )
         .build()
         .unwrap();

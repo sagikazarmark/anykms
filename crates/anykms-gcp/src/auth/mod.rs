@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
+use anykms_http::HttpTransport;
 use anykms_http::credentials::{Credential, CredentialCache, Expiring};
+use anykms_http::url::Url;
 use zeroize::Zeroizing;
 
 use crate::BACKEND;
@@ -125,14 +127,14 @@ pub(crate) fn auth_err(kind: ErrorKind, m: impl Into<std::borrow::Cow<'static, s
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AuthEndpoints {
-    pub(crate) oauth2_token: url::Url,
-    pub(crate) sts_token: url::Url,
-    pub(crate) iam_credentials: url::Url,
+    pub(crate) oauth2_token: Url,
+    pub(crate) sts_token: Url,
+    pub(crate) iam_credentials: Url,
     /// The metadata server origin (`http://host[:port]`); `None`: `GCE_METADATA_HOST` or
     /// `169.254.169.254`.
-    pub(crate) metadata: Option<url::Url>,
+    pub(crate) metadata: Option<Url>,
     /// The custom origin, which credential-file URLs may also name.
-    pub(crate) custom: Option<url::Url>,
+    pub(crate) custom: Option<Url>,
 }
 
 impl Default for AuthEndpoints {
@@ -146,7 +148,7 @@ impl AuthEndpoints {
     /// `https://iamcredentials.googleapis.com`, and the metadata server at `GCE_METADATA_HOST`
     /// or `169.254.169.254`.
     pub fn google() -> Self {
-        let u = |s: &str| url::Url::parse(s).expect("fixed URL");
+        let u = |s: &str| Url::parse(s).expect("fixed URL");
         Self {
             oauth2_token: u("https://oauth2.googleapis.com/token"),
             sts_token: u("https://sts.googleapis.com/v1/token"),
@@ -166,7 +168,7 @@ impl AuthEndpoints {
     /// (checked by `build`), as for [`Endpoint::Custom`](crate::Endpoint::Custom); other origins
     /// must be `https://`.
     pub fn custom(origin: &str) -> Result<Self> {
-        let base = url::Url::parse(origin)
+        let base = Url::parse(origin)
             .map_err(|_| config_err("the auth endpoint origin is not a valid URL"))?;
         if !matches!(base.path(), "" | "/") || base.query().is_some() || base.fragment().is_some() {
             return Err(config_err(
@@ -216,7 +218,7 @@ impl AuthEndpoints {
     ///
     /// Never a query, a fragment, userinfo or a port. With [`custom`](Self::custom) endpoints,
     /// the same paths on the custom origin, and nothing else.
-    fn allowed_url(&self, u: &url::Url, field: UrlField) -> Option<url::Url> {
+    fn allowed_url(&self, u: &Url, field: UrlField) -> Option<Url> {
         if u.query().is_some()
             || u.fragment().is_some()
             || !u.username().is_empty()
@@ -240,7 +242,7 @@ impl AuthEndpoints {
                     && u.scheme() == "https"
                     && u.port().is_none()
                     && u.path() == "/v1/token"
-                    && matches!(u.host(), Some(url::Host::Domain(h)) if h
+                    && matches!(u.host(), Some(anykms_http::url::Host::Domain(h)) if h
                         .strip_prefix("sts.")
                         .and_then(|h| h.strip_suffix(".rep.googleapis.com"))
                         .is_some_and(crate::uri::location_ok));
@@ -259,9 +261,9 @@ impl AuthEndpoints {
 
     /// Parses a URL a credential file supplies for `field` and checks it against the fixed URLs
     /// for that field (see [`allowed_url`](Self::allowed_url)).
-    pub(crate) fn checked_url(&self, s: &str, field: UrlField) -> Result<url::Url> {
+    pub(crate) fn checked_url(&self, s: &str, field: UrlField) -> Result<Url> {
         let name = field.name();
-        let u = url::Url::parse(s).map_err(|_| {
+        let u = Url::parse(s).map_err(|_| {
             config_err(format!("credential file field `{name}` is not a valid URL"))
         })?;
         if let Some(u) = self.allowed_url(&u, field) {
@@ -317,13 +319,11 @@ impl UrlField {
     }
 }
 
-/// What every credential source needs: the HTTP clients, the endpoints and where environment
+/// What every credential source needs: the HTTP transport, the endpoints and where environment
 /// variables come from.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct AuthCtx {
-    pub(crate) http: reqwest::Client,
-    /// For the metadata server: a 1 s connect timeout.
-    pub(crate) metadata_http: reqwest::Client,
+    pub(crate) http: Arc<dyn HttpTransport>,
     pub(crate) endpoints: AuthEndpoints,
     /// The variables ADC and the metadata server read on first use.
     pub(crate) env: EnvVars,

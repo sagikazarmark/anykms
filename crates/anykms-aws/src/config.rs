@@ -3,55 +3,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anykms_core::Result;
-use rustls::crypto::CryptoProvider;
-use zeroize::Zeroizing;
+use anykms_http::HttpTransport;
 
-use crate::client::HttpSettings;
 use crate::credentials::{CredentialSource, DefaultChain, Vars, config_err};
-
-/// HTTP version for KMS requests.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HttpVersion {
-    /// HTTP/1.1 (default).
-    #[default]
-    Http1,
-    /// HTTP/2 (negotiated with TLS ALPN; needs the `http2` feature).
-    Http2,
-}
-
-/// An outbound proxy for KMS and STS requests (never for the link-local credential endpoints).
-#[derive(Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Proxy {
-    /// Connect directly; proxy environment variables are ignored.
-    #[default]
-    None,
-    /// Use this proxy URL for every request.
-    Url(String),
-}
 
 /// `scheme://host:port` of a URL that may carry credentials, a path or a query (P1-1).
 pub(crate) fn redacted_url(u: &str) -> String {
     anykms_http::redact::url_origin(u)
 }
 
-impl fmt::Debug for Proxy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Proxy::None => f.write_str("None"),
-            // Proxy URLs may carry credentials.
-            Proxy::Url(u) => write!(f, "Url({})", redacted_url(u)),
-        }
-    }
-}
-
-/// Builds an [`AwsProvider`](crate::AwsProvider). Building does no network I/O: it builds the
-/// KMS HTTP client (reading the trust store), and credentials are resolved on the first
-/// operation.
+/// Builds an [`AwsProvider`](crate::AwsProvider). Building does no network I/O (without an
+/// injected transport it builds the default one, which reads the trust store); credentials are
+/// resolved on the first operation.
 #[derive(Clone)]
 pub struct AwsProviderBuilder {
     pub(crate) credentials: Option<Arc<dyn CredentialSource>>,
@@ -61,9 +26,8 @@ pub struct AwsProviderBuilder {
     pub(crate) endpoint_url: Option<String>,
     pub(crate) fips: bool,
     pub(crate) dual_stack: bool,
-    pub(crate) http: HttpSettings,
-    pub(crate) http_version: HttpVersion,
-    pub(crate) proxy: Proxy,
+    pub(crate) http_transport: Option<Arc<dyn HttpTransport>>,
+    pub(crate) max_response_bytes: usize,
     pub(crate) allow_loopback_http: bool,
     pub(crate) vars: Option<Vars>,
     pub(crate) request_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -96,8 +60,9 @@ impl fmt::Debug for AwsProviderBuilder {
             )
             .field("fips", &self.fips)
             .field("dual_stack", &self.dual_stack)
-            .field("http_version", &self.http_version)
-            .field("proxy", &self.proxy)
+            .field("http_transport", &self.http_transport.is_some())
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("allow_loopback_http", &self.allow_loopback_http)
             .finish_non_exhaustive()
     }
 }
@@ -112,9 +77,8 @@ impl Default for AwsProviderBuilder {
             endpoint_url: None,
             fips: false,
             dual_stack: false,
-            http: HttpSettings::default(),
-            http_version: HttpVersion::Http1,
-            proxy: Proxy::None,
+            http_transport: None,
+            max_response_bytes: 256 * 1024,
             allow_loopback_http: false,
             vars: None,
             request_counter: None,
@@ -135,7 +99,7 @@ impl AwsProviderBuilder {
     /// | credentials (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_CONTAINER_CREDENTIALS_*`, `AWS_EC2_METADATA_*`, ...) | the [`DefaultChain`] |
     /// | `AWS_USE_FIPS_ENDPOINT`, `AWS_USE_DUALSTACK_ENDPOINT` | `true`/`false`: [`fips`](Self::fips), [`dual_stack`](Self::dual_stack) |
     /// | `AWS_ENDPOINT_URL_KMS`, else `AWS_ENDPOINT_URL` | [`endpoint_url`](Self::endpoint_url) |
-    /// | `AWS_CA_BUNDLE` | a PEM file that replaces the system roots ([`ca_pem`](Self::ca_pem)) |
+    /// | `AWS_CA_BUNDLE` | a PEM file that replaces the system roots, on a built-in transport ([`ReqwestTransportBuilder::ca_pem`](anykms_http::ReqwestTransportBuilder::ca_pem); needs the `reqwest` feature) |
     /// | `ANYKMS_AWS_ALLOWED_ACCOUNTS`, `ANYKMS_AWS_ALLOWED_REGIONS` | comma-separated allowlists (an empty list is `Configuration` at `build()`) |
     /// | `ANYKMS_AWS_ALLOW_LOOPBACK_HTTP` | `1`/`true`: [`allow_loopback_http`](Self::allow_loopback_http) (emulators) |
     ///
@@ -168,7 +132,7 @@ impl AwsProviderBuilder {
                 anykms_http::zbuf::read_file(std::path::Path::new(path), 4 << 20).map_err(|e| {
                     config_err(format!("cannot read AWS_CA_BUNDLE {path}: {}", e.kind()))
                 })?;
-            b.http.ca_pem = Some(Arc::new(pem));
+            b.http_transport = Some(ca_bundle_transport(&pem)?);
         }
         let list = |k: &str| {
             vars.get(k).map(|v| {
@@ -266,59 +230,23 @@ impl AwsProviderBuilder {
         self
     }
 
-    /// Connect timeout (default 2 s).
-    pub fn connect_timeout(mut self, d: Duration) -> Self {
-        self.http.connect_timeout = d;
-        self
-    }
-
-    /// Per-request timeout (default 10 s). The overall deadline belongs to `Retry`.
-    pub fn request_timeout(mut self, d: Duration) -> Self {
-        self.http.request_timeout = d;
-        self
-    }
-
-    /// How long idle pooled connections are kept (default 50 s).
-    pub fn pool_idle_timeout(mut self, d: Duration) -> Self {
-        self.http.pool_idle_timeout = d;
-        self
-    }
-
-    /// TCP keepalive interval (default 30 s).
-    pub fn tcp_keepalive(mut self, d: Duration) -> Self {
-        self.http.tcp_keepalive = d;
-        self
-    }
-
-    /// HTTP version (default HTTP/1.1).
-    pub fn http_version(mut self, v: HttpVersion) -> Self {
-        self.http_version = v;
-        self
-    }
-
-    /// An outbound proxy for KMS and STS (default: none, proxy variables ignored).
-    pub fn proxy(mut self, p: Proxy) -> Self {
-        self.proxy = p;
-        self
-    }
-
-    /// PEM CA certificates that replace the system roots.
-    pub fn ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.http.ca_pem = Some(Arc::new(Zeroizing::new(pem.into())));
-        self
-    }
-
-    /// The rustls crypto provider (default: the process default, else aws-lc-rs or ring by
-    /// feature).
-    pub fn crypto_provider(mut self, p: Arc<CryptoProvider>) -> Self {
-        self.http.crypto_provider = Some(p);
+    /// The HTTP transport KMS, STS and the credential endpoints are reached through. It owns TLS
+    /// trust, the crypto provider, timeouts, proxying and the HTTP version: configure them on
+    /// [`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder) (the built-in transport,
+    /// feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
+    /// `ReqwestTransport` is built; without the `reqwest` feature, building fails with
+    /// `Configuration`. The link-local credential endpoints (IMDS, ECS) carry a short per-request
+    /// [`RequestTimeout`](anykms_http::RequestTimeout) and are never proxied by the built-in
+    /// transport.
+    pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
+        self.http_transport = Some(Arc::new(transport));
         self
     }
 
     /// The largest response accepted (default 256 KiB; at least 64 KiB, `Configuration` at
     /// `build()` otherwise).
     pub fn max_response_bytes(mut self, n: usize) -> Self {
-        self.http.max_response_bytes = n;
+        self.max_response_bytes = n;
         self
     }
 
@@ -373,28 +301,31 @@ impl AwsProviderBuilder {
         if let Some(u) = &self.endpoint_url {
             crate::endpoint::validate_url(u, self.allow_loopback_http, "the KMS endpoint")?;
         }
-        if self.http.connect_timeout.is_zero() || self.http.request_timeout.is_zero() {
-            return Err(config_err("timeouts must be greater than zero"));
-        }
-        if self.http.max_response_bytes < anykms_http::client::MIN_RESPONSE_BYTES {
+        if self.max_response_bytes < anykms_http::client::MIN_RESPONSE_BYTES {
             return Err(config_err(
                 "max_response_bytes must be at least 64 KiB (anykms_http::client::MIN_RESPONSE_BYTES)",
             ));
         }
-        if self.http_version == HttpVersion::Http2 && !cfg!(feature = "http2") {
-            return Err(config_err("HttpVersion::Http2 needs the `http2` feature"));
-        }
-        self.http.http2 = self.http_version == HttpVersion::Http2;
-        self.http.proxy = match &self.proxy {
-            Proxy::None => None,
-            Proxy::Url(u) => {
-                reqwest::Url::parse(u).map_err(|_| config_err("invalid proxy URL"))?;
-                Some(u.clone())
-            }
-        };
-        self.http.loopback_http = self.allow_loopback_http;
         Ok(())
     }
+}
+
+/// The built-in transport trusting only `AWS_CA_BUNDLE`.
+#[cfg(feature = "reqwest")]
+fn ca_bundle_transport(pem: &zeroize::Zeroizing<Vec<u8>>) -> Result<Arc<dyn HttpTransport>> {
+    Ok(Arc::new(
+        anykms_http::ReqwestTransport::builder()
+            .ca_pem(pem.to_vec())
+            .build()?,
+    ))
+}
+
+#[cfg(not(feature = "reqwest"))]
+fn ca_bundle_transport(_pem: &zeroize::Zeroizing<Vec<u8>>) -> Result<Arc<dyn HttpTransport>> {
+    Err(config_err(
+        "AWS_CA_BUNDLE configures the built-in transport, which needs the `reqwest` feature; \
+         configure TLS on the transport passed to AwsProviderBuilder::http_transport instead",
+    ))
 }
 
 #[cfg(test)]
@@ -428,17 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn proxy_debug_hides_credentials() {
-        let p = Proxy::Url("http://user:secret@proxy.example:3128".into());
-        assert!(!format!("{p:?}").contains("secret"));
-    }
-
-    #[test]
     fn builder_debug_hides_endpoint_credentials() {
         let b = AwsProviderBuilder::new()
             .endpoint("eu-west-1", "https://u:secret1@vpce.example/?q=secret2")
-            .endpoint_url("https://u:secret3@kms.example/")
-            .proxy(Proxy::Url("http://u:secret4@proxy.example:3128".into()));
+            .endpoint_url("https://u:secret3@kms.example/");
         let d = format!("{b:?}");
         assert!(!d.contains("secret"), "{d}");
         assert!(

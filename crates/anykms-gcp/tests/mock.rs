@@ -510,8 +510,15 @@ async fn timeouts() {
         .respond_with(encrypt_ok(b"c").set_delay(Duration::from_secs(2)))
         .mount(&server)
         .await;
+    // The per-request timeout lives on the transport.
     let k = builder(&server)
-        .request_timeout(Duration::from_millis(200))
+        .http_transport(
+            anykms_gcp::anykms_http::ReqwestTransport::builder()
+                .require_roots(false)
+                .request_timeout(Duration::from_millis(200))
+                .build()
+                .unwrap(),
+        )
         .build()
         .unwrap()
         .aead_key(format!("gcp-kms://{KEY}"))

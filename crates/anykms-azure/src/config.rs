@@ -99,7 +99,8 @@ pub struct TestHost {
 
 impl TestHost {
     /// A test host reached over HTTPS (`host:port`, e.g. `localhost:8443`), trusting the
-    /// provider's [`ca_pem`](crate::AzureProviderBuilder::ca_pem) (or the system roots), with
+    /// transport's roots (the system roots, or the `ca_pem` of a `ReqwestTransportBuilder` passed to
+    /// [`AzureProviderBuilder::http_transport`](crate::AzureProviderBuilder::http_transport)), with
     /// tokens for `scope` (e.g. `https://vault.azure.net/.default`).
     pub fn https(host_port: impl Into<String>, scope: impl Into<String>) -> Self {
         Self {
@@ -230,41 +231,6 @@ impl HostPolicy {
                 plain_http: false,
             })
         })
-    }
-}
-
-/// The HTTP version spoken to vaults.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HttpVersion {
-    /// HTTP/1.1 only (default).
-    #[default]
-    Http1,
-    /// Negotiate HTTP/2 through ALPN (needs the `http2` feature).
-    Http2,
-}
-
-/// The proxy for vault requests. Environment proxy variables are ignored unless configured
-/// explicitly. Managed-identity requests never use a proxy.
-///
-/// `Debug` prints the proxy URL's origin only (`scheme://host:port`): proxy URLs may carry
-/// credentials.
-#[non_exhaustive]
-#[derive(Clone, Default, PartialEq, Eq)]
-pub enum Proxy {
-    /// Connect directly (default).
-    #[default]
-    None,
-    /// Send every vault request through this proxy URL.
-    Url(String),
-}
-
-impl std::fmt::Debug for Proxy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Proxy::None => f.write_str("None"),
-            Proxy::Url(u) => write!(f, "Url({})", anykms_http::redact::url_origin(u)),
-        }
     }
 }
 

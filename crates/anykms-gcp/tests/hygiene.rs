@@ -24,9 +24,7 @@ use anykms_core::prelude::*;
 use anykms_core::{
     BoxFuture, Ciphertext, Digest, KeyVersion, MacAlgorithm, SignatureAlgorithm, Tag,
 };
-use anykms_gcp::{
-    AuthEndpoints, CredentialSource, Credentials, Endpoint, GcpProvider, Proxy, Token,
-};
+use anykms_gcp::{AuthEndpoints, CredentialSource, Credentials, Endpoint, GcpProvider, Token};
 use anykms_testkit::SpanRecorder;
 use base64::Engine as _;
 use common::fake::{self, FakeKms};
@@ -96,11 +94,14 @@ impl CredentialSource for Custom {
 /// userinfo, a custom endpoint with userinfo, a token or a secret prints none of them.
 #[test]
 fn debug_output_redacts_secrets() {
-    let proxy = Proxy::Url(format!(
+    // Proxies live on the transport: its builder redacts the URL's userinfo and query.
+    let proxy = anykms_gcp::anykms_http::ReqwestTransport::builder().proxy(Some(format!(
         "http://user:{PROXY_SECRET}@proxy.example:3128/p?token={PROXY_SECRET}"
-    ));
+    )));
+    let transport = || proxy.clone().require_roots(false).build().unwrap();
     let secrets = [PROXY_SECRET, TOKEN, CLIENT_SECRET, fake::REFRESH_TOKEN];
     anykms_testkit::assert_debug_redacts(&proxy, &secrets);
+    anykms_testkit::assert_debug_redacts(&transport(), &secrets);
     let endpoint = Endpoint::custom(format!("https://u:{PROXY_SECRET}@kms.example/?t={TOKEN}"));
     anykms_testkit::assert_debug_redacts(&endpoint, &secrets);
     let creds = [
@@ -120,7 +121,7 @@ fn debug_output_redacts_secrets() {
         anykms_testkit::assert_debug_redacts(&c, &secrets);
         let b = GcpProvider::builder()
             .credentials(c)
-            .proxy(proxy.clone())
+            .http_transport(transport())
             .endpoint(endpoint.clone());
         anykms_testkit::assert_debug_redacts(&b, &secrets);
     }
@@ -142,7 +143,7 @@ fn debug_output_redacts_secrets() {
     anykms_testkit::assert_debug_redacts(&Token::new(TOKEN, None), &secrets);
     let p = GcpProvider::builder()
         .credentials(Credentials::static_token(TOKEN))
-        .proxy(proxy)
+        .http_transport(transport())
         .build()
         .unwrap();
     anykms_testkit::assert_debug_redacts(&p, &secrets);

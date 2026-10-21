@@ -1,25 +1,34 @@
 //! HTTP plumbing shared by the anykms backends.
 //!
-//! **When to use this crate.** Never from an application: depend on the [`anykms`] facade (or a
-//! backend crate), which pulls this crate in where it is needed. **This API is for anykms
-//! backends (`anykms-transit`, the cloud backends) only.** It is published only because the
-//! backends that use it are. It is versioned in lockstep with the other anykms crates and follows
-//! the same semver rules, which CI checks: a breaking change comes only in a `0.(x+1)` release,
-//! never a patch, but it can come in any such release, whenever a backend needs it.
+//! **When to use this crate.** Never from an application, except to build a transport: depend on
+//! the [`anykms`] facade (or a backend crate), which pulls this crate in where it is needed.
+//! **The rest of this API is for anykms backends (`anykms-transit`, the cloud backends) only.**
+//! It is published only because the backends that use it are. It is versioned in lockstep with
+//! the other anykms crates and follows the same semver rules, which CI checks: a breaking change
+//! comes only in a `0.(x+1)` release, never a patch, but it can come in any such release,
+//! whenever a backend needs it.
 //!
 //! Every in-house anykms REST client follows the same rules (the backend checklist in
 //! `docs/cloud/shared.md` §5); this crate holds the code that implements them once:
 //!
-//! - [`tls`]: the rustls crypto provider precedence ([`select_provider`]: configured → process
-//!   default → aws-lc-rs → ring) and the client TLS configuration ([`TlsOptions`]); the provider
-//!   is never installed process-wide. [`is_missing_system_roots`] tells an empty system trust
-//!   store from the other TLS configuration errors.
-//! - [`client`]: a reqwest client that never follows redirects, with connect and per-attempt
-//!   timeouts ([`ClientOptions`]); sending a request and reading its response into a bounded
-//!   zeroizing buffer ([`send`], [`read_body`]); transport-error classification with fixed
-//!   messages and no URL ([`transport_error`]); `Retry-After` parsing ([`retry_after`]); the
-//!   least response limit a backend accepts ([`MIN_RESPONSE_BYTES`]). No retries: those belong
-//!   to `anykms_core::Retry`.
+//! - [`transport`]: the seam between the backends and the network. [`HttpTransport`] moves one
+//!   bounded, zeroizing request/response pair; [`SendError`] is the fixed set of failure classes
+//!   the backends map to `anykms_core::Error`; [`RequestTimeout`] is the per-request timeout a
+//!   probe sets; [`BodyBuffer`] is the bounded zeroizing body every transport reads into.
+//!   Backends take any transport through their builders (`.http_transport(..)`).
+//! - [`reqwest`](mod@reqwest) (feature `reqwest`, default): the built-in transport
+//!   ([`ReqwestTransport`]), reqwest over a preconfigured rustls configuration, never following
+//!   redirects. It owns TLS trust and client certificates, the crypto provider, timeouts, proxying
+//!   and the HTTP version ([`ReqwestTransportBuilder`]); the backends know none of these.
+//! - [`tls`] (feature `rustls`): the rustls crypto provider precedence ([`select_provider`]:
+//!   configured → process default → aws-lc-rs → ring) and the client TLS configuration
+//!   ([`TlsOptions`]); the provider is never installed process-wide. [`is_missing_system_roots`]
+//!   tells an empty system trust store from the other TLS configuration errors.
+//! - [`pem`]: private keys from PEM into zeroizing buffers ([`private_key_from_pem`]).
+//! - [`client`]: sending a request through a transport and reading its response ([`send`],
+//!   which re-checks the body limit); `Retry-After` parsing ([`retry_after`]); the least response
+//!   limit a backend accepts ([`MIN_RESPONSE_BYTES`]). No retries: those belong to
+//!   `anykms_core::Retry`.
 //! - [`zbuf`]: zeroizing buffers that grow without leaving unwiped copies, a JSON writer into
 //!   them ([`json_body`]), bounded secret-file reads, and the classification of token-file
 //!   failures ([`token_file_error_kind`]).
@@ -39,23 +48,22 @@
 //!
 //! | Feature | Default | Effect |
 //! |---|---|---|
-//! | `rustls-aws-lc-rs` | yes | aws-lc-rs as the fallback TLS crypto provider (wins over ring) |
-//! | `rustls-ring` | | ring as the fallback provider (opt-in, with `default-features = false`) |
+//! | `reqwest` | yes | [`ReqwestTransport`], the built-in transport; without it every backend needs `.http_transport(..)` |
+//! | `rustls` | (by `reqwest`) | the [`tls`] module |
+//! | `rustls-aws-lc-rs` | yes | aws-lc-rs as the fallback TLS crypto provider (wins over ring); `ReqwestTransport`-only |
+//! | `rustls-ring` | | ring as the fallback provider (opt-in, with `default-features = false`); `ReqwestTransport`-only |
 //! | `tracing` | | a debug event naming the provider chosen; the [`span`] schema (no-ops without it) |
-//! | `http2` | | [`ClientOptions::http2`] may negotiate HTTP/2 |
+//! | `http2` | | [`ReqwestTransportBuilder::http2`] may negotiate HTTP/2; `ReqwestTransport`-only |
 //!
 //! aws-lc-rs builds C and assembly (aws-lc-sys), so the default build needs a C compiler.
 //!
-//! Backends forward their own `rustls-*`, `tracing` and `http2` features to these.
+//! Backends forward their own `reqwest`, `rustls-*`, `tracing` and `http2` features to these.
 //!
 //! [`select_provider`]: tls::select_provider
 //! [`TlsOptions`]: tls::TlsOptions
 //! [`is_missing_system_roots`]: tls::is_missing_system_roots
-//! [`ClientOptions`]: client::ClientOptions
-//! [`ClientOptions::http2`]: client::ClientOptions::http2
+//! [`private_key_from_pem`]: pem::private_key_from_pem
 //! [`send`]: client::send
-//! [`transport_error`]: client::transport_error
-//! [`read_body`]: client::read_body
 //! [`retry_after`]: client::retry_after
 //! [`MIN_RESPONSE_BYTES`]: client::MIN_RESPONSE_BYTES
 //! [`json_body`]: zbuf::json_body
@@ -73,15 +81,31 @@
 pub mod cache;
 pub mod client;
 pub mod credentials;
+pub mod pem;
 pub mod redact;
+#[cfg(feature = "reqwest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
+pub mod reqwest;
 pub mod span;
+#[cfg(feature = "rustls")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rustls")))]
 pub mod tls;
+pub mod transport;
 pub mod zbuf;
 
-/// The reqwest version the clients are built with.
-pub use reqwest;
-/// The rustls version used for TLS.
+pub use transport::{BodyBuffer, HttpTransport, RequestTimeout, SendError, default_transport};
+
+#[cfg(feature = "reqwest")]
+pub use self::reqwest::{ReqwestTransport, ReqwestTransportBuilder};
+
+/// The `http` types in [`HttpTransport`]'s signature.
+pub use http;
+/// The rustls version used for TLS (`ReqwestTransportBuilder::crypto_provider` takes its
+/// `CryptoProvider`).
+#[cfg(feature = "rustls")]
 pub use rustls;
+/// The URL parser the backends build request URLs with.
+pub use url;
 
 /// What the span macros expand through. Not part of the API.
 #[doc(hidden)]

@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/anykms-aws?style=flat-square)](https://crates.io/crates/anykms-aws)
 [![docs.rs](https://img.shields.io/docsrs/anykms-aws?style=flat-square)](https://docs.rs/anykms-aws)
 
-The AWS KMS backend: an in-house SigV4 client on `reqwest` and rustls (ring or aws-lc-rs); KMS
+The AWS KMS backend: an in-house SigV4 client over the `HttpTransport` seam (built in: `reqwest` and rustls, ring or aws-lc-rs); KMS
 calls use no AWS SDK (it retries internally and brings its own HTTP and TLS stack). Symmetric
 keys (`Aead`, `Rewrap`, data keys, envelope KEKs), ECDSA and RSA signing keys, Ed25519, HMAC,
 RSA-OAEP key wrapping, native encryption contexts and grant tokens. Built-in credentials, resolved

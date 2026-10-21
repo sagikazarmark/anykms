@@ -5,14 +5,14 @@
 //! `ca.pem` signs `server.pem` (`DNS:anykms.test`) and `loopback.pem` (`IP:127.0.0.1`), both for
 //! server and client auth; `other-ca.pem` is unrelated.
 
-#![cfg(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))]
+#![cfg(feature = "reqwest")]
 
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 
 use anykms_core::prelude::*;
 use anykms_core::{Error, ErrorKind, KeyUri};
-use anykms_transit::rustls;
+use anykms_transit::anykms_http::{ReqwestTransport, ReqwestTransportBuilder, rustls};
 use anykms_transit::{Flavor, ServerConfig, TransitProvider};
 use rustls::crypto::CryptoProvider;
 use rustls_pki_types::pem::PemObject;
@@ -24,6 +24,14 @@ const SERVER_CERT: &[u8] = include_bytes!("data/server.pem");
 const SERVER_KEY: &[u8] = include_bytes!("data/server-key.pem");
 const LOOPBACK_CERT: &[u8] = include_bytes!("data/loopback.pem");
 const LOOPBACK_KEY: &[u8] = include_bytes!("data/loopback-key.pem");
+
+/// The built-in transport, configured by `f` (TLS settings live on the transport, not on
+/// `ServerConfig`).
+fn transport(
+    f: impl FnOnce(ReqwestTransportBuilder) -> ReqwestTransportBuilder,
+) -> ReqwestTransport {
+    f(ReqwestTransport::builder()).build().unwrap()
+}
 
 fn crypto() -> Arc<CryptoProvider> {
     #[cfg(feature = "rustls-aws-lc-rs")]
@@ -101,8 +109,11 @@ fn assert_err(e: &Error, kind: ErrorKind, msg: &str) {
 #[tokio::test]
 async fn unknown_issuer_is_configuration() {
     let addr = tls_server(SERVER_CERT, SERVER_KEY, false);
-    let e =
-        encrypt(ServerConfig::new(format!("https://{addr}"), Flavor::Vault).ca_pem(OTHER_CA)).await;
+    let e = encrypt(
+        ServerConfig::new(format!("https://{addr}"), Flavor::Vault)
+            .http_transport(transport(|b| b.ca_pem(OTHER_CA))),
+    )
+    .await;
     assert_err(
         &e,
         ErrorKind::Configuration,
@@ -115,7 +126,11 @@ async fn unknown_issuer_is_configuration() {
 async fn name_mismatch_is_configuration() {
     let addr = tls_server(SERVER_CERT, SERVER_KEY, false);
     // Trusted CA, but the certificate names anykms.test, not 127.0.0.1.
-    let e = encrypt(ServerConfig::new(format!("https://{addr}"), Flavor::Vault).ca_pem(CA)).await;
+    let e = encrypt(
+        ServerConfig::new(format!("https://{addr}"), Flavor::Vault)
+            .http_transport(transport(|b| b.ca_pem(CA))),
+    )
+    .await;
     assert_err(
         &e,
         ErrorKind::Configuration,
@@ -126,10 +141,12 @@ async fn name_mismatch_is_configuration() {
 #[tokio::test]
 async fn client_certificate_rejection_is_configuration() {
     let addr = tls_server(LOOPBACK_CERT, LOOPBACK_KEY, true);
-    let cfg = || ServerConfig::new(format!("https://{addr}"), Flavor::Vault).ca_pem(CA);
+    let cfg = |t: ReqwestTransport| {
+        ServerConfig::new(format!("https://{addr}"), Flavor::Vault).http_transport(t)
+    };
     // Without a client certificate the server sends an alert (in TLS 1.3 after the client's
     // side of the handshake, so it arrives with the response).
-    let e = encrypt(cfg()).await;
+    let e = encrypt(cfg(transport(|b| b.ca_pem(CA)))).await;
     assert_err(
         &e,
         ErrorKind::Configuration,
@@ -137,7 +154,10 @@ async fn client_certificate_rejection_is_configuration() {
     );
     // Control: with a trusted client certificate the handshake succeeds; the server then hangs
     // up without answering, which is a transient failure.
-    let e = encrypt(cfg().client_identity(SERVER_CERT.to_vec(), SERVER_KEY.to_vec())).await;
+    let e = encrypt(cfg(transport(|b| {
+        b.ca_pem(CA).client_identity(SERVER_CERT, SERVER_KEY)
+    })))
+    .await;
     assert_eq!(e.kind(), ErrorKind::Unavailable, "{e}");
 }
 
@@ -149,13 +169,9 @@ async fn explicit_crypto_provider_is_used() {
         cipher_suites: vec![],
         ..(*crypto()).clone()
     };
-    let e = TransitProvider::builder()
-        .server(
-            "default",
-            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-                .ca_pem(CA)
-                .crypto_provider(Arc::new(empty)),
-        )
+    let e = ReqwestTransport::builder()
+        .ca_pem(CA)
+        .crypto_provider(Arc::new(empty))
         .build()
         .unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
@@ -163,8 +179,7 @@ async fn explicit_crypto_provider_is_used() {
     let addr = tls_server(SERVER_CERT, SERVER_KEY, false);
     let e = encrypt(
         ServerConfig::new(format!("https://{addr}"), Flavor::Vault)
-            .ca_pem(OTHER_CA)
-            .crypto_provider(crypto()),
+            .http_transport(transport(|b| b.ca_pem(OTHER_CA).crypto_provider(crypto()))),
     )
     .await;
     assert_err(&e, ErrorKind::Configuration, "unknown issuer");
@@ -172,26 +187,15 @@ async fn explicit_crypto_provider_is_used() {
 
 #[tokio::test]
 async fn client_identity_loads_into_rustls() {
-    TransitProvider::builder()
-        .server(
-            "default",
-            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-                .ca_pem(CA)
-                .client_identity(SERVER_CERT.to_vec(), SERVER_KEY.to_vec()),
-        )
+    ReqwestTransport::builder()
+        .ca_pem(CA)
+        .client_identity(SERVER_CERT, SERVER_KEY)
         .build()
         .unwrap();
     // A key that does not match the certificate is refused.
-    let e = TransitProvider::builder()
-        .server(
-            "default",
-            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-                .ca_pem(CA)
-                .client_identity(
-                    SERVER_CERT.to_vec(),
-                    include_bytes!("data/sec1-key.pem").to_vec(),
-                ),
-        )
+    let e = ReqwestTransport::builder()
+        .ca_pem(CA)
+        .client_identity(SERVER_CERT, include_bytes!("data/sec1-key.pem"))
         .build()
         .unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
@@ -199,13 +203,7 @@ async fn client_identity_loads_into_rustls() {
 
 #[test]
 fn ca_pem_without_certificates_is_named() {
-    let e = TransitProvider::builder()
-        .server(
-            "default",
-            ServerConfig::new("https://anykms.test:8200", Flavor::Vault).ca_pem(b"".to_vec()),
-        )
-        .build()
-        .unwrap_err();
+    let e = ReqwestTransport::builder().ca_pem(b"").build().unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
     assert!(e.to_string().contains("contains no certificates"), "{e}");
 }
@@ -213,9 +211,11 @@ fn ca_pem_without_certificates_is_named() {
 #[tokio::test]
 async fn dns_failure_is_unavailable() {
     // `.invalid` never resolves (RFC 6761).
-    let e =
-        encrypt(ServerConfig::new("https://anykms-test.invalid:8200", Flavor::Vault).ca_pem(CA))
-            .await;
+    let e = encrypt(
+        ServerConfig::new("https://anykms-test.invalid:8200", Flavor::Vault)
+            .http_transport(transport(|b| b.ca_pem(CA))),
+    )
+    .await;
     assert_err(&e, ErrorKind::Unavailable, "DNS lookup failed");
     assert!(e.is_retryable());
 }

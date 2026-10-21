@@ -191,6 +191,12 @@ pub use anykms_transit as transit;
 /// provider built explicitly (`AwsProvider::from_env()`, a builder) still fails with
 /// `Configuration` there.
 ///
+/// Every HTTP backend registered here shares one built-in transport
+/// (`anykms_http::ReqwestTransport` with its defaults; the TLS roots are loaded once), except
+/// where the environment configures one of its own: transit's `VAULT_CACERT`, `VAULT_CAPATH` or
+/// client certificate, and `AWS_CA_BUNDLE`. Without the `reqwest` feature there is no transport
+/// to share, and every HTTP backend is skipped with [`SkipCause::FeatureDisabled`].
+///
 /// A **malformed** variable (`AWS_USE_FIPS_ENDPOINT=maybe`, an unparsable `ANYKMS_GCP_ENDPOINT`,
 /// `ANYKMS_AZURE_CREDENTIAL=bogus`, a transit address without a token source, ...) is an error
 /// returned from this function, never a silent skip.
@@ -254,7 +260,29 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
         claimed: Vec::new(),
         skipped: Vec::new(),
     };
-    #[cfg(feature = "transit")]
+    // One built-in transport for every HTTP backend (its TLS roots are loaded once).
+    #[cfg(any(
+        feature = "transit",
+        feature = "aws",
+        feature = "gcp",
+        feature = "azure"
+    ))]
+    let shared = shared_transport()?;
+    #[cfg(any(
+        feature = "transit",
+        feature = "aws",
+        feature = "gcp",
+        feature = "azure"
+    ))]
+    let _ = &shared; // unused with `transit` alone and no `reqwest`
+    #[cfg(all(feature = "transit", not(feature = "reqwest")))]
+    d.skipped.push(SkippedProvider {
+        backend: "transit",
+        reason: NO_TRANSPORT,
+        cause: SkipCause::FeatureDisabled,
+        schemes: anykms_transit::SCHEMES,
+    });
+    #[cfg(all(feature = "transit", feature = "reqwest"))]
     {
         let set = |v: &str| {
             match lookup {
@@ -272,15 +300,9 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
                      BAO_ADDR"
                 );
             }
-            d = d.provider(match lookup {
-                None => anykms_transit::TransitProvider::from_env()?,
-                Some(l) => anykms_transit::TransitProvider::from_env_with(share(l))?,
-            });
+            d = d.transit(&anykms_transit::EnvConfig::vault(), lookup, &shared)?;
         } else if set("BAO_ADDR") {
-            d = d.provider(match lookup {
-                None => anykms_transit::TransitProvider::from_env_openbao()?,
-                Some(l) => anykms_transit::TransitProvider::from_env_openbao_with(share(l))?,
-            });
+            d = d.transit(&anykms_transit::EnvConfig::openbao(), lookup, &shared)?;
         } else {
             d.skipped.push(SkippedProvider {
                 backend: "transit",
@@ -301,10 +323,23 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
     #[cfg(feature = "aws")]
     {
         let built = match lookup {
-            None => anykms_aws::AwsProvider::from_env(),
-            Some(l) => anykms_aws::AwsProvider::from_env_with(share(l)),
+            None => anykms_aws::AwsProviderBuilder::from_env(),
+            Some(l) => anykms_aws::AwsProviderBuilder::from_env_with(share(l)),
         };
-        d = d.cloud("aws", anykms_aws::SCHEMES, built)?;
+        // `AWS_CA_BUNDLE` configures a transport of its own (the builder keeps it), so the shared
+        // one, and whether it could be built, does not matter to AWS then.
+        let own_transport = match lookup {
+            Some(l) => l("AWS_CA_BUNDLE"),
+            None => std::env::var("AWS_CA_BUNDLE").ok(),
+        }
+        .is_some_and(|v| !v.is_empty());
+        d = if own_transport {
+            d.provider(built?.build()?)
+        } else {
+            d.cloud("aws", anykms_aws::SCHEMES, &shared, built, |b, t| {
+                b.http_transport(t)
+            })?
+        };
     }
     #[cfg(not(feature = "aws"))]
     d.skipped.push(SkippedProvider {
@@ -317,10 +352,12 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
     #[cfg(feature = "gcp")]
     {
         let built = match lookup {
-            None => anykms_gcp::GcpProvider::from_env(),
-            Some(l) => anykms_gcp::GcpProvider::from_env_with(share(l)),
+            None => anykms_gcp::GcpProviderBuilder::from_env(),
+            Some(l) => anykms_gcp::GcpProviderBuilder::from_env_with(share(l)),
         };
-        d = d.cloud("gcp", anykms_gcp::SCHEMES, built)?;
+        d = d.cloud("gcp", anykms_gcp::SCHEMES, &shared, built, |b, t| {
+            b.http_transport(t)
+        })?;
     }
     #[cfg(not(feature = "gcp"))]
     d.skipped.push(SkippedProvider {
@@ -346,10 +383,12 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
             });
         } else {
             let built = match lookup {
-                None => anykms_azure::AzureProvider::from_env(),
-                Some(l) => anykms_azure::AzureProvider::from_env_with(share(l)),
+                None => anykms_azure::AzureProviderBuilder::from_env(),
+                Some(l) => anykms_azure::AzureProviderBuilder::from_env_with(share(l)),
             };
-            d = d.cloud("azure", anykms_azure::SCHEMES, built)?;
+            d = d.cloud("azure", anykms_azure::SCHEMES, &shared, built, |b, t| {
+                b.http_transport(t)
+            })?;
         }
     }
     #[cfg(not(feature = "azure"))]
@@ -434,6 +473,89 @@ pub enum SkipCause {
     TlsRoots,
 }
 
+/// Without the `reqwest` feature the HTTP backends have no transport to be built on.
+#[cfg(any(
+    feature = "transit",
+    feature = "aws",
+    feature = "gcp",
+    feature = "azure"
+))]
+#[cfg_attr(feature = "reqwest", allow(dead_code))]
+const NO_TRANSPORT: &str = "the anykms `reqwest` feature is not enabled (no HTTP transport)";
+
+/// The built-in transport the default cloud providers share, or why none could be built.
+#[cfg(any(
+    feature = "transit",
+    feature = "aws",
+    feature = "gcp",
+    feature = "azure"
+))]
+#[allow(
+    dead_code,
+    reason = "which variant and fields are read depends on the backend and `reqwest` features"
+)]
+enum SharedTransport {
+    Ready(std::sync::Arc<dyn anykms_http::HttpTransport>),
+    Skip {
+        cause: SkipCause,
+        reason: &'static str,
+    },
+}
+
+/// Builds the shared transport: a missing trust store is a skip, not an error; so is a missing
+/// `reqwest` feature. Anything else is `Configuration`.
+#[cfg(any(
+    feature = "transit",
+    feature = "aws",
+    feature = "gcp",
+    feature = "azure"
+))]
+fn shared_transport() -> Result<SharedTransport> {
+    #[cfg(feature = "reqwest")]
+    {
+        match anykms_http::ReqwestTransport::new() {
+            Ok(t) => Ok(SharedTransport::Ready(std::sync::Arc::new(t))),
+            Err(e) if anykms_http::tls::is_missing_system_roots(&e) => Ok(SharedTransport::Skip {
+                cause: SkipCause::TlsRoots,
+                reason: "no trusted CA certificates (system roots unavailable)",
+            }),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(feature = "reqwest"))]
+    Ok(SharedTransport::Skip {
+        cause: SkipCause::FeatureDisabled,
+        reason: NO_TRANSPORT,
+    })
+}
+
+/// The cloud builders' `build()`, for [`DefaultProviders::cloud`].
+#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+trait BuildProvider<P> {
+    fn build_provider(self) -> Result<P>;
+}
+
+#[cfg(feature = "aws")]
+impl BuildProvider<anykms_aws::AwsProvider> for anykms_aws::AwsProviderBuilder {
+    fn build_provider(self) -> Result<anykms_aws::AwsProvider> {
+        self.build()
+    }
+}
+
+#[cfg(feature = "gcp")]
+impl BuildProvider<anykms_gcp::GcpProvider> for anykms_gcp::GcpProviderBuilder {
+    fn build_provider(self) -> Result<anykms_gcp::GcpProvider> {
+        self.build()
+    }
+}
+
+#[cfg(feature = "azure")]
+impl BuildProvider<anykms_azure::AzureProvider> for anykms_azure::AzureProviderBuilder {
+    fn build_provider(self) -> Result<anykms_azure::AzureProvider> {
+        self.build()
+    }
+}
+
 /// A [`RegistryBuilder`] from [`with_default_providers`] that remembers which default providers
 /// were skipped.
 ///
@@ -480,27 +602,65 @@ impl DefaultProviders {
         &self.skipped
     }
 
-    /// Registers a cloud provider built from the environment, or skips it with
-    /// [`SkipCause::TlsRoots`] when it failed only for want of system TLS roots.
+    /// Registers the transit server `env` configures, over the shared transport unless the
+    /// variables configured one of their own (`VAULT_CACERT`, a client certificate: `EnvConfig`
+    /// then builds it) or the shared one could not be built (the server then builds its default,
+    /// which a plain-HTTP loopback address does not need roots for).
+    #[cfg(all(feature = "transit", feature = "reqwest"))]
+    fn transit(
+        self,
+        env: &anykms_transit::EnvConfig,
+        lookup: Option<&Lookup>,
+        shared: &SharedTransport,
+    ) -> Result<Self> {
+        let mut server = match lookup {
+            None => env.load()?,
+            Some(l) => {
+                let l = l.clone();
+                env.load_with(move |k| l(k))?
+            }
+        };
+        if let SharedTransport::Ready(t) = shared
+            && !server.has_http_transport()
+        {
+            server = server.http_transport(t.clone());
+        }
+        let provider = anykms_transit::TransitProvider::builder()
+            .server("default", server)
+            .build()?;
+        Ok(self.provider(provider))
+    }
+
+    /// Registers a cloud provider configured from the environment (`builder`) over the shared
+    /// transport (`with` attaches it), or skips it when there is no transport: no system TLS
+    /// roots ([`SkipCause::TlsRoots`]) or no `reqwest` feature ([`SkipCause::FeatureDisabled`]).
+    /// A malformed environment is an error.
     #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
-    fn cloud(
+    fn cloud<B, P: Provider + 'static>(
         mut self,
         backend: &'static str,
         schemes: &'static [&'static str],
-        built: Result<impl Provider + 'static>,
-    ) -> Result<Self> {
-        match built {
-            Ok(p) => Ok(self.provider(p)),
-            Err(e) if anykms_http::tls::is_missing_system_roots(&e) => {
+        shared: &SharedTransport,
+        builder: Result<B>,
+        with: impl FnOnce(B, std::sync::Arc<dyn anykms_http::HttpTransport>) -> B,
+    ) -> Result<Self>
+    where
+        B: BuildProvider<P>,
+    {
+        let builder = builder?;
+        match shared {
+            SharedTransport::Ready(t) => {
+                Ok(self.provider(with(builder, t.clone()).build_provider()?))
+            }
+            SharedTransport::Skip { cause, reason } => {
                 self.skipped.push(SkippedProvider {
                     backend,
-                    cause: SkipCause::TlsRoots,
-                    reason: "no trusted CA certificates (system roots unavailable)",
+                    cause: *cause,
+                    reason,
                     schemes,
                 });
                 Ok(self)
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -746,13 +906,13 @@ mod tests {
                 .find(|s| s.backend() == b)
                 .map(|s| (s.cause(), s.reason()))
         };
-        if cfg!(feature = "transit") {
+        if cfg!(all(feature = "transit", feature = "reqwest")) {
             assert_eq!(
                 reason("transit"),
                 Some((SkipCause::NotConfigured, "VAULT_ADDR/BAO_ADDR not set"))
             );
         }
-        if cfg!(feature = "azure") {
+        if cfg!(all(feature = "azure", feature = "reqwest")) {
             assert_eq!(
                 reason("azure"),
                 Some((
@@ -761,22 +921,45 @@ mod tests {
                 ))
             );
         }
+        // Without the `reqwest` feature there is no transport: every HTTP backend is skipped as a
+        // disabled feature, naming `reqwest`.
+        let no_transport = !cfg!(feature = "reqwest");
         for b in ["transit", "aws", "gcp", "azure"] {
-            if let Some((cause, _)) = reason(b) {
+            if let Some((cause, why)) = reason(b) {
                 let enabled = match b {
                     "transit" => cfg!(feature = "transit"),
                     "aws" => cfg!(feature = "aws"),
                     "gcp" => cfg!(feature = "gcp"),
                     _ => cfg!(feature = "azure"),
-                };
-                assert_eq!(cause == SkipCause::FeatureDisabled, !enabled, "{b}");
+                } && !no_transport;
+                // The Azure opt-out is decided before the transport is looked at.
+                if cause != SkipCause::OptedOut {
+                    assert_eq!(cause == SkipCause::FeatureDisabled, !enabled, "{b}");
+                }
+                if enabled {
+                    assert!(!why.contains("`reqwest`"), "{b}: {why}");
+                }
             }
         }
-        if cfg!(feature = "aws") {
+        if cfg!(all(feature = "aws", feature = "reqwest")) {
             assert_eq!(reason("aws"), None);
         }
-        if cfg!(feature = "gcp") {
+        if cfg!(all(feature = "gcp", feature = "reqwest")) {
             assert_eq!(reason("gcp"), None);
+        }
+        if no_transport {
+            for b in ["transit", "aws", "gcp"] {
+                let on = match b {
+                    "transit" => cfg!(feature = "transit"),
+                    "aws" => cfg!(feature = "aws"),
+                    _ => cfg!(feature = "gcp"),
+                };
+                if on {
+                    let (cause, why) = reason(b).unwrap();
+                    assert_eq!(cause, SkipCause::FeatureDisabled, "{b}");
+                    assert!(why.contains("`reqwest`"), "{b}: {why}");
+                }
+            }
         }
     }
 
@@ -803,11 +986,14 @@ mod tests {
     /// R-35: called outside a Tokio runtime, every HTTP backend fails with `Configuration` naming
     /// the fix instead of panicking, before its credential fetch (a transit token, the AWS
     /// default chain, GCP's metadata server, Azure managed identity), so no request is sent.
-    #[cfg(any(
-        feature = "transit",
-        feature = "aws",
-        feature = "gcp",
-        feature = "azure"
+    #[cfg(all(
+        feature = "reqwest",
+        any(
+            feature = "transit",
+            feature = "aws",
+            feature = "gcp",
+            feature = "azure"
+        )
     ))]
     #[test]
     fn http_backends_outside_a_runtime_fail_with_configuration() {
@@ -848,7 +1034,7 @@ mod tests {
         assert_eq!(tested.contains(&"transit"), cfg!(feature = "transit"));
     }
 
-    #[cfg(feature = "transit")]
+    #[cfg(all(feature = "transit", feature = "reqwest"))]
     #[test]
     fn transit_from_a_lookup() {
         let addr = ("BAO_ADDR", "https://bao.example:8200");
@@ -883,7 +1069,7 @@ mod tests {
         assert!(e.message().contains("AWS_USE_FIPS_ENDPOINT"), "{e}");
     }
 
-    #[cfg(feature = "transit")]
+    #[cfg(all(feature = "transit", feature = "reqwest"))]
     #[test]
     fn transit_without_address_is_skipped() {
         isolated("transit_without_address_is_skipped", &[NO_AZURE], || {
@@ -920,7 +1106,7 @@ mod tests {
     }
 
     /// AWS is always registered: no variable needed, no I/O at construction or open.
-    #[cfg(feature = "aws")]
+    #[cfg(all(feature = "aws", feature = "reqwest"))]
     #[test]
     fn aws_is_registered() {
         isolated("aws_is_registered", &[NO_AZURE], || {
@@ -959,6 +1145,7 @@ mod tests {
     /// key does no I/O.
     #[cfg(all(
         feature = "gcp",
+        feature = "reqwest",
         any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
     ))]
     #[test]
@@ -1004,6 +1191,7 @@ mod tests {
     /// Needs `AzureProvider::from_env` to succeed without a credential (shared.md §6.2).
     #[cfg(all(
         feature = "azure",
+        feature = "reqwest",
         any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
     ))]
     #[test]
@@ -1020,6 +1208,7 @@ mod tests {
     /// With a credential configured, Azure is registered.
     #[cfg(all(
         feature = "azure",
+        feature = "reqwest",
         any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
     ))]
     #[test]
@@ -1069,6 +1258,7 @@ mod tests {
     /// keys says why, and a provider built explicitly still fails.
     #[cfg(all(
         any(feature = "aws", feature = "gcp", feature = "azure"),
+        feature = "reqwest",
         any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
     ))]
     #[test]

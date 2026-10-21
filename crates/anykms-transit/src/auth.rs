@@ -2,10 +2,13 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anykms_core::{BoxFuture, Error, ErrorKind, Operation, Result};
-use reqwest::header::HeaderValue;
+use anykms_http::HttpTransport;
+use anykms_http::http::header::{CONTENT_TYPE, HeaderValue};
+use anykms_http::url::Url;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -176,8 +179,8 @@ impl Lease {
 /// client (TLS, proxy, timeouts).
 pub(crate) struct LoginSource {
     login: Login,
-    http: reqwest::Client,
-    base: reqwest::Url,
+    http: Arc<dyn HttpTransport>,
+    base: Url,
     namespace: Option<String>,
     #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     alias: String,
@@ -269,8 +272,8 @@ const OP: Operation = Operation::Configure;
 impl LoginSource {
     pub(crate) fn new(
         login: Login,
-        http: reqwest::Client,
-        base: reqwest::Url,
+        http: Arc<dyn HttpTransport>,
+        base: Url,
         namespace: Option<String>,
         alias: String,
     ) -> Self {
@@ -422,14 +425,12 @@ impl LoginSource {
             .pop_if_empty()
             .push("v1")
             .extend(segments);
-        let mut req = self
-            .http
-            .post(url)
+        let mut req = anykms_http::client::request(anykms_http::http::Method::POST, &url)
             .header("X-Vault-Request", "true")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            // reqwest copies the body into its own buffer, which cannot be zeroized (as for
-            // every request; see the crate docs).
-            .body(body.as_ref().map_or_else(|| b"{}".to_vec(), |b| b.to_vec()));
+            .header(CONTENT_TYPE, "application/json");
+        // The body stays in a zeroizing buffer up to the transport (which may copy it; see the
+        // crate docs).
+        let body = body.unwrap_or_else(|| Zeroizing::new(b"{}".to_vec()));
         if let Some(ns) = &self.namespace {
             req = req.header("X-Vault-Namespace", ns);
         }
@@ -445,9 +446,9 @@ impl LoginSource {
             v.set_sensitive(true);
             req = req.header("X-Vault-Token", v);
         }
-        drop(body);
         let resp = crate::client::send(
-            req,
+            &*self.http,
+            req.body(body),
             MAX_AUTH_RESPONSE,
             OP,
             &self.alias,

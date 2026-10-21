@@ -34,8 +34,8 @@ struct Inner {
     allowed_regions: Option<BTreeSet<String>>,
     /// Configured endpoints, validated at build: per region and global. Derived endpoints are
     /// computed on each open (a `format!`), so nothing grows with the regions of opened URIs.
-    endpoints: BTreeMap<String, Arc<reqwest::Url>>,
-    endpoint_url: Option<Arc<reqwest::Url>>,
+    endpoints: BTreeMap<String, Arc<anykms_http::url::Url>>,
+    endpoint_url: Option<Arc<anykms_http::url::Url>>,
     fips: bool,
     dual_stack: bool,
     #[cfg_attr(not(feature = "__test-fixtures"), allow(dead_code))]
@@ -71,10 +71,10 @@ impl std::fmt::Debug for AwsProvider {
 }
 
 impl AwsProviderBuilder {
-    /// Validates the configuration and builds the KMS HTTP client: the TLS roots (system or
-    /// [`ca_pem`](Self::ca_pem)) and the rustls crypto provider are resolved here, so a broken
-    /// TLS configuration is `Configuration` now. No network I/O: credentials are resolved on
-    /// the first operation.
+    /// Validates the configuration and, without an injected transport, builds the default one
+    /// (the TLS roots and the rustls crypto provider are resolved then, so a broken TLS
+    /// configuration is `Configuration` now). No network I/O: credentials are resolved on the
+    /// first operation.
     pub fn build(mut self) -> Result<AwsProvider> {
         self.validate()?;
         let parse = |u: &str| {
@@ -87,7 +87,16 @@ impl AwsProviderBuilder {
             .map(|(r, u)| Ok((r.clone(), parse(u)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
         let endpoint_url = self.endpoint_url.as_deref().map(parse).transpose()?;
-        let http = Arc::new(Http::new(self.http.clone())?);
+        let transport = match self.http_transport.take() {
+            Some(t) => t,
+            // With loopback `http://` endpoints (emulators) no trusted roots are required.
+            None => anykms_http::default_transport(BACKEND, !self.allow_loopback_http)?,
+        };
+        let http = Arc::new(Http::new(
+            transport,
+            self.max_response_bytes,
+            self.allow_loopback_http,
+        ));
         let source: Arc<dyn CredentialSource> = match self.credentials.take() {
             Some(s) => s,
             None => Arc::new(match self.vars.take() {
@@ -160,7 +169,7 @@ impl AwsProvider {
     }
 
     /// The endpoint for a key: per-region override, global override, derived.
-    fn endpoint_for(&self, r: &AwsKeyRef) -> Result<Arc<reqwest::Url>> {
+    fn endpoint_for(&self, r: &AwsKeyRef) -> Result<Arc<anykms_http::url::Url>> {
         let i = &self.inner;
         if let Some(u) = i.endpoints.get(&r.region).or(i.endpoint_url.as_ref()) {
             return Ok(u.clone());

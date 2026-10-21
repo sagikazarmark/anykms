@@ -11,14 +11,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+anykms-core.workspace = true
 anykms-http = { path = "../anykms-http", default-features = false, features = ["tracing"] }
+zeroize.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # Bridges `log` records (reqwest) into the capturing subscriber.
 tracing-log = "0.2"
-
-[dev-dependencies]
-anykms-core.workspace = true
 
 [lints]
 workspace = true

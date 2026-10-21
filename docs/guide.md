@@ -67,8 +67,8 @@ let registry = anykms::with_default_providers()?
 ```
 
 The deadline bounds the retry schedule, not an attempt in flight, which can run to the
-provider's `request_timeout` (10 s by default): lower that, or wrap the call in
-`tokio::time::timeout`, for a hard bound.
+transport's request timeout (10 s by default, `ReqwestTransportBuilder::request_timeout`): lower
+that, or wrap the call in `tokio::time::timeout`, for a hard bound.
 
 ## Configuring transit in code
 
@@ -76,6 +76,7 @@ To adjust the environment configuration in code, load it with `EnvConfig` and co
 `ServerConfig` builder:
 
 ```rust
+use anykms::transit::anykms_http::ReqwestTransport;
 use anykms::transit::{EnvConfig, TransitProvider};
 
 let server = EnvConfig::vault()
@@ -83,7 +84,12 @@ let server = EnvConfig::vault()
     // .no_token()   // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
     .load()?
     .allowed_namespaces(["team-a"]) // key URIs may select it with ?namespace=team-a
-    .request_timeout(std::time::Duration::from_secs(5));
+    // TLS, timeouts and proxying live on the transport (replaces VAULT_CACERT & co. here).
+    .http_transport(
+        ReqwestTransport::builder()
+            .request_timeout(std::time::Duration::from_secs(5))
+            .build()?,
+    );
 let registry = anykms::Registry::builder()
     .provider(TransitProvider::builder().server("default", server).build()?)
     .layer(anykms::retry_layer())

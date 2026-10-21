@@ -8,7 +8,7 @@ use anykms_core::{BoxFuture, Result};
 use zeroize::Zeroizing;
 
 use crate::credential::{
-    AccessToken, AzureCredential, LazyClient, cred_config_err, resource_of, send_token_request,
+    AccessToken, AzureCredential, TransportSlot, cred_config_err, resource_of, send_token_request,
 };
 
 /// The IMDS token endpoint.
@@ -38,14 +38,15 @@ enum Source {
 /// A managed identity, through IMDS (`169.254.169.254`) or the App Service / Functions identity
 /// endpoint (`IDENTITY_ENDPOINT` with `X-IDENTITY-HEADER`).
 ///
-/// Requests never use a proxy; IMDS connects with a 1 s timeout so that a host off Azure fails
-/// fast (as `Unavailable`). Azure Arc and Cloud Shell are not supported (implement
+/// Requests go through the provider's transport (the built-in one never proxies link-local hosts)
+/// with a per-request timeout of [`IMDS_TIMEOUT`], so that a host off Azure fails as
+/// `Unavailable` rather than stalling. Azure Arc and Cloud Shell are not supported (implement
 /// [`AzureCredential`] for them).
 #[derive(Clone)]
 pub struct ManagedIdentity {
     id: Option<UserAssigned>,
     source: Source,
-    http: LazyClient,
+    http: TransportSlot,
 }
 
 impl fmt::Debug for ManagedIdentity {
@@ -61,9 +62,9 @@ impl fmt::Debug for ManagedIdentity {
     }
 }
 
-fn imds_client() -> LazyClient {
-    LazyClient::new(Duration::from_secs(1), Duration::from_secs(10), false)
-}
+/// The per-request timeout of every managed-identity token request (a
+/// [`RequestTimeout`](anykms_http::RequestTimeout)).
+pub const IMDS_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn id_ok(s: &str) -> Result<()> {
     if (1..=512).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_graphic()) {
@@ -74,7 +75,8 @@ fn id_ok(s: &str) -> Result<()> {
 }
 
 fn endpoint_ok(url: &str, imds: bool) -> Result<String> {
-    let u = url::Url::parse(url).map_err(|_| cred_config_err("invalid identity endpoint URL"))?;
+    let u = anykms_http::url::Url::parse(url)
+        .map_err(|_| cred_config_err("invalid identity endpoint URL"))?;
     if !matches!(u.scheme(), "http" | "https")
         || !u.username().is_empty()
         || u.password().is_some()
@@ -88,7 +90,9 @@ fn endpoint_ok(url: &str, imds: bool) -> Result<String> {
     if imds {
         // Only the real IMDS address or a loopback mock.
         let ok = match u.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.octets() == [169, 254, 169, 254],
+            Some(anykms_http::url::Host::Ipv4(ip)) => {
+                ip.is_loopback() || ip.octets() == [169, 254, 169, 254]
+            }
             _ => false,
         };
         if !ok {
@@ -107,7 +111,7 @@ impl ManagedIdentity {
             source: Source::Imds {
                 endpoint: IMDS_ENDPOINT.to_owned(),
             },
-            http: imds_client(),
+            http: TransportSlot::new(),
         }
     }
 
@@ -180,8 +184,7 @@ impl ManagedIdentity {
         Ok(self)
     }
 
-    fn request(&self, scope: &str) -> Result<reqwest::RequestBuilder> {
-        let http = self.http.get()?;
+    fn request(&self, scope: &str) -> Result<anykms_http::http::request::Builder> {
         let resource = resource_of(scope);
         let (id_param, id_value) = match &self.id {
             None => (None, None),
@@ -199,7 +202,7 @@ impl ManagedIdentity {
             Source::Imds { endpoint } => (endpoint.as_str(), IMDS_API_VERSION),
             Source::AppService { endpoint, .. } => (endpoint.as_str(), APP_SERVICE_API_VERSION),
         };
-        let mut url = url::Url::parse(endpoint)
+        let mut url = anykms_http::url::Url::parse(endpoint)
             .map_err(|_| cred_config_err("invalid identity endpoint URL"))?;
         {
             let mut q = url.query_pairs_mut();
@@ -209,13 +212,13 @@ impl ManagedIdentity {
                 q.append_pair(p, v);
             }
         }
-        let req = http
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json");
+        let req = anykms_http::client::request(anykms_http::http::Method::GET, &url)
+            .header(anykms_http::http::header::ACCEPT, "application/json")
+            .extension(anykms_http::RequestTimeout(IMDS_TIMEOUT));
         Ok(match &self.source {
             Source::Imds { .. } => req.header("Metadata", "true"),
             Source::AppService { header, .. } => {
-                let mut v = reqwest::header::HeaderValue::from_str(header)
+                let mut v = anykms_http::http::HeaderValue::from_str(header)
                     .map_err(|_| cred_config_err("invalid IDENTITY_HEADER"))?;
                 v.set_sensitive(true);
                 req.header("X-IDENTITY-HEADER", v)
@@ -226,10 +229,18 @@ impl ManagedIdentity {
 
 impl AzureCredential for ManagedIdentity {
     fn token<'a>(&'a self, scope: &'a str) -> BoxFuture<'a, Result<AccessToken>> {
-        Box::pin(async move { send_token_request(self.request(scope)?, "managed-identity").await })
+        Box::pin(async move {
+            let http = self.http.get()?;
+            let req = self.request(scope)?.body(anykms_http::client::empty());
+            send_token_request(&*http, req, "managed-identity").await
+        })
     }
 
     fn kind(&self) -> &'static str {
         "managed_identity"
+    }
+
+    fn bind_transport(&self, transport: std::sync::Arc<dyn anykms_http::HttpTransport>) {
+        self.http.bind(transport);
     }
 }

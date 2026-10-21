@@ -443,9 +443,10 @@ impl Respond for Responder {
             return ResponseTemplate::new(200).insert_header("Metadata-Flavor", "Google");
         }
         if path == "/token" || path == "/v1/token" {
-            let form: HashMap<String, String> = url::form_urlencoded::parse(&req.body)
-                .into_owned()
-                .collect();
+            let form: HashMap<String, String> =
+                anykms_gcp::anykms_http::url::form_urlencoded::parse(&req.body)
+                    .into_owned()
+                    .collect();
             let good = match form.get("grant_type").map(String::as_str) {
                 Some("refresh_token") => {
                     form.get("refresh_token").map(String::as_str) == Some(REFRESH_TOKEN)

@@ -50,7 +50,12 @@ async fn live() -> Result<GcpFixture, String> {
     let builder = GcpProvider::builder()
         .allowed_projects([project])
         .public_key_ttl(Duration::ZERO)
-        .request_timeout(Duration::from_secs(30));
+        .http_transport(
+            anykms_gcp::anykms_http::ReqwestTransport::builder()
+                .request_timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| e.to_string())?,
+        );
     let counting_token = std::env::var("ANYKMS_GCP_DATA_TOKEN")
         .ok()
         .filter(|t| !t.is_empty())

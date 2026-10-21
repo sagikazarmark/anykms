@@ -12,22 +12,25 @@ categories = ["cryptography", "api-bindings"]
 exclude = ["tests/"]
 
 [features]
-default = ["rustls-aws-lc-rs"]
-# TLS crypto provider, used when neither `ServerConfig::crypto_provider` nor a process-wide
-# default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win over the
-# features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http selects it.
-# aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring is opt-in
-# with `default-features = false` and `rustls-ring`.
-rustls-ring = ["anykms-http/rustls-ring", "rustls/ring"]
-rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs", "rustls/aws-lc-rs"]
+default = ["reqwest", "rustls-aws-lc-rs"]
+# The built-in HTTP transport (`anykms_http::ReqwestTransport`), used when `ServerConfig::http_transport`
+# is not set. Without it a transport must be injected.
+reqwest = ["anykms-http/reqwest"]
+# TLS crypto provider for the built-in transport, used when neither a configured provider nor a
+# process-wide default (`rustls::crypto::CryptoProvider::install_default`) is set: those two win
+# over the features. Both may be enabled (features unify): aws-lc-rs then wins. anykms-http
+# selects it. aws-lc-rs is the default (it builds C and assembly: a C compiler is needed); ring
+# is opt-in with `default-features = false` and `rustls-ring`. `ReqwestTransport`-only.
+rustls-ring = ["anykms-http/rustls-ring"]
+rustls-aws-lc-rs = ["anykms-http/rustls-aws-lc-rs"]
 # Spans and events for every operation (field allowlist; never data).
 tracing = ["dep:tracing", "anykms-http/tracing"]
-# Allow HttpVersion::Http2.
-http2 = ["reqwest/http2", "anykms-http/http2"]
+# Allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`). `ReqwestTransport`-only.
+http2 = ["anykms-http/http2"]
 
 [dependencies]
 anykms-core.workspace = true
-# TLS provider selection, the reqwest client, zeroizing buffers, transport errors.
+# The transport seam and the built-in transport, zeroizing buffers, transport errors.
 anykms-http.workspace = true
 
 zeroize.workspace = true
@@ -35,12 +38,10 @@ serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-reqwest.workspace = true
-url = "2"
-rustls.workspace = true
+# `*_CAPATH` validation (every file must parse as PEM certificates).
 rustls-pki-types = { workspace = true, features = ["std"] }
 tracing = { workspace = true, optional = true }
-# One login or renewal at a time (`Login`); reqwest already depends on tokio.
+# One login or renewal at a time (`Login`).
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(unix)'.dependencies]

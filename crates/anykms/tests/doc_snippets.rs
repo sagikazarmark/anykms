@@ -116,6 +116,7 @@ async fn interactive_policy() -> anyhow::Result<()> {
 #[rustfmt::skip]
 async fn env_config() -> anyhow::Result<()> {
     // snippet: docs/guide.md
+    use anykms::transit::anykms_http::ReqwestTransport;
     use anykms::transit::{EnvConfig, TransitProvider};
 
     let server = EnvConfig::vault()
@@ -123,7 +124,12 @@ async fn env_config() -> anyhow::Result<()> {
         // .no_token()   // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
         .load()?
         .allowed_namespaces(["team-a"]) // key URIs may select it with ?namespace=team-a
-        .request_timeout(std::time::Duration::from_secs(5));
+        // TLS, timeouts and proxying live on the transport (replaces VAULT_CACERT & co. here).
+        .http_transport(
+            ReqwestTransport::builder()
+                .request_timeout(std::time::Duration::from_secs(5))
+                .build()?,
+        );
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .layer(anykms::retry_layer())

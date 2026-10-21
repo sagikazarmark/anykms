@@ -24,7 +24,7 @@ use anykms_core::{
     Signature, SignatureAlgorithm, Tag,
 };
 use anykms_transit::{
-    FileToken, Flavor, Login, Proxy, ServerConfig, StaticToken, Token, TokenSource, TransitProvider,
+    FileToken, Flavor, Login, ServerConfig, StaticToken, Token, TokenSource, TransitProvider,
 };
 use base64::Engine as _;
 use serde_json::json;
@@ -121,8 +121,9 @@ fn provider(cfg: ServerConfig) -> TransitProvider {
         .unwrap()
 }
 
-/// P1-1: `Debug` of every public config, builder and credential type holding a proxy with
-/// userinfo, an address with userinfo, a token or a JWT path prints none of the secrets.
+/// P1-1: `Debug` of every public config, builder, transport builder and credential type holding
+/// a proxy with userinfo, an address with userinfo, a token, a client key or a JWT path prints
+/// none of the secrets.
 #[test]
 fn debug_output_redacts_secrets() {
     let proxy_url = format!("http://user:{PROXY_SECRET}@proxy.example:3128/p?token={PROXY_SECRET}");
@@ -130,20 +131,27 @@ fn debug_output_redacts_secrets() {
         format!("https://user:{PROXY_SECRET}@vault.example:8200"),
         Flavor::Vault,
     )
-    .token(TOKEN)
-    .proxy(Proxy::Url(proxy_url.clone()));
+    .token(TOKEN);
     let secrets = [PROXY_SECRET, TOKEN];
     anykms_testkit::assert_debug_redacts(&cfg, &secrets);
-    anykms_testkit::assert_debug_redacts(&Proxy::Url(proxy_url), &secrets);
-    assert!(format!("{cfg:?}").contains("proxy.example:3128"), "{cfg:?}");
+    #[cfg(feature = "reqwest")]
+    {
+        let transport = anykms_transit::anykms_http::ReqwestTransport::builder()
+            .proxy(Some(proxy_url))
+            .client_identity(b"cert", format!("KEY {TOKEN}"));
+        anykms_testkit::assert_debug_redacts(&transport, &secrets);
+        assert!(
+            format!("{transport:?}").contains("proxy.example:3128"),
+            "{transport:?}"
+        );
+    }
+    #[cfg(not(feature = "reqwest"))]
+    let _ = proxy_url;
     let builder = TransitProvider::builder().server("default", cfg.clone());
     anykms_testkit::assert_debug_redacts(&builder, &secrets);
     anykms_testkit::assert_debug_redacts(&Token::from(TOKEN), &secrets);
     anykms_testkit::assert_debug_redacts(&StaticToken::new(TOKEN), &secrets);
     let login = ServerConfig::new("https://vault.example:8200", Flavor::Vault)
-        .proxy(Proxy::Url(format!(
-            "http://u:{PROXY_SECRET}@proxy.example:3128"
-        )))
         .login(Login::jwt("ci", "/run/jwt"));
     anykms_testkit::assert_debug_redacts(&login, &secrets);
     anykms_testkit::assert_debug_redacts(&FileToken::new("/run/token"), &secrets);
@@ -448,7 +456,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
     );
     writeln!(text, "{rp:?}\n{rk:?}").unwrap();
 
-    // Transport error: nothing listens on the port; the error carries a reqwest source.
+    // Transport error: nothing listens on the port; the error carries its transport source.
     let dead = provider(ServerConfig::new("http://127.0.0.1:1", Flavor::Vault).token(TOKEN));
     let e = dead
         .aead_key(uri("k"))
@@ -460,7 +468,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
     assert_eq!(e.kind(), anykms_core::ErrorKind::Unavailable, "{e}");
     assert!(
         std::error::Error::source(&e).is_some(),
-        "transport errors carry their reqwest source"
+        "transport errors carry their source"
     );
     text.push_str(&render(&e));
 

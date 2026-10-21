@@ -10,8 +10,8 @@ use anykms_core::{
     PublicKeys, Result, Rewrap, Signature, SignatureAlgorithm, Tag, WrappedDataKeys,
 };
 use anykms_http::cache::SingleFlight;
+use anykms_http::http::Method;
 use base64::Engine as _;
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 

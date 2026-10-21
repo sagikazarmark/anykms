@@ -166,8 +166,6 @@ dependencies = [
  "hmac 0.13.0",
  "httpdate",
  "p256 0.14.0",
- "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -176,7 +174,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trait-variant",
- "url",
  "wiremock",
  "zeroize",
 ]
@@ -186,6 +183,7 @@ name = "anykms-azure"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "anykms-azure",
  "anykms-conformance",
  "anykms-core",
  "anykms-http",
@@ -207,7 +205,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
  "wiremock",
  "zeroize",
 ]
@@ -251,6 +248,7 @@ version = "0.1.0"
 dependencies = [
  "anykms-conformance",
  "anykms-core",
+ "anykms-gcp",
  "anykms-http",
  "anykms-recipes",
  "anykms-testkit",
@@ -260,7 +258,6 @@ dependencies = [
  "google-cloud-auth",
  "http 1.5.0",
  "reqwest",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -268,7 +265,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
  "wiremock",
  "zeroize",
 ]
@@ -281,6 +277,7 @@ dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "http 1.5.0",
  "httpdate",
  "reqwest",
  "rustls",
@@ -291,6 +288,7 @@ dependencies = [
  "sha2 0.11.1",
  "tokio",
  "tracing",
+ "url",
  "zeroize",
 ]
 
@@ -356,6 +354,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -380,7 +379,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
  "wiremock",
  "zeroize",
 ]

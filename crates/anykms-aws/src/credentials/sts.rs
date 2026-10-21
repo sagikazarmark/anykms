@@ -116,7 +116,7 @@ impl WebIdentityCredentials {
         self
     }
 
-    pub(crate) fn endpoint_url(&self, allow_loopback_http: bool) -> Result<reqwest::Url> {
+    pub(crate) fn endpoint_url(&self, allow_loopback_http: bool) -> Result<anykms_http::url::Url> {
         let raw = match self
             .endpoint
             .as_deref()
@@ -171,7 +171,7 @@ impl WebIdentityCredentials {
     }
 
     pub(crate) async fn fetch(&self, cx: &SourceContext) -> Result<Credentials> {
-        let url = self.endpoint_url(cx.http.settings.loopback_http)?;
+        let url = self.endpoint_url(cx.http.loopback_allowed)?;
         if !self.role_arn.starts_with("arn:") || self.role_arn.len() > 2048 {
             return Err(config_err("the web identity role is not an ARN"));
         }
@@ -196,32 +196,31 @@ impl WebIdentityCredentials {
         body.push_str(&enc(&session));
         body.push_str("&WebIdentityToken=");
         body.push_str(&Zeroizing::new(enc(token)));
-        let client = cx.http.main();
-        let resp = client
-            .post(url)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
+        let resp = cx
+            .http
+            .send(
+                anykms_http::client::request(anykms_http::http::Method::POST, &url)
+                    .header(
+                        anykms_http::http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Zeroizing::new(body.as_bytes().to_vec())),
+                MAX_CREDENTIAL_BYTES,
+                Operation::Configure,
             )
-            .body(body.as_bytes().to_vec())
-            .send()
             .await
-            .map_err(|e| {
-                let err = anykms_http::client::transport_error(BACKEND, Operation::Configure, e);
-                match err.kind() {
-                    ErrorKind::Configuration | ErrorKind::Timeout => err,
-                    _ => Error::new(
-                        ErrorKind::Unavailable,
-                        BACKEND,
-                        Operation::Configure,
-                        "STS unreachable",
-                    ),
-                }
+            .map_err(|err| match err.kind() {
+                ErrorKind::Configuration | ErrorKind::Timeout => err,
+                _ => Error::new(
+                    ErrorKind::Unavailable,
+                    BACKEND,
+                    Operation::Configure,
+                    "STS unreachable",
+                ),
             })?;
-        let status = resp.status().as_u16();
-        let rid = crate::errors::request_id(resp.headers());
-        let body =
-            crate::client::read_body(resp, MAX_CREDENTIAL_BYTES, Operation::Configure).await?;
+        let status = resp.status.as_u16();
+        let rid = crate::errors::request_id(&resp.headers);
+        let body = resp.body;
         let text = std::str::from_utf8(&body).unwrap_or("");
         if (200..300).contains(&status) {
             return parse_sts_success(text);

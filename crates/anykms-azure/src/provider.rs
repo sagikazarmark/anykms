@@ -11,9 +11,10 @@ use anykms_core::{
 
 use crate::BACKEND;
 use crate::client::Client;
+use anykms_http::HttpTransport;
+
 use crate::config::{
-    ApiVersion, AzureCloud, AzureOptions, HostPolicy, HttpVersion, Proxy, TestHost, VaultKind,
-    config_err,
+    ApiVersion, AzureCloud, AzureOptions, HostPolicy, TestHost, VaultKind, config_err,
 };
 use crate::credential::{AzureCredential, Tokens};
 use crate::handles::{
@@ -52,21 +53,14 @@ impl std::fmt::Debug for AzureProvider {
     }
 }
 
-/// Builds an [`AzureProvider`]. No I/O happens at build beyond loading the system's root
-/// certificates.
+/// Builds an [`AzureProvider`]. No I/O happens at build (without an injected transport the
+/// default one is built, which loads the system's root certificates).
 #[derive(Clone)]
 pub struct AzureProviderBuilder {
     credential: Option<Arc<dyn AzureCredential>>,
     policy: HostPolicy,
     api_version: ApiVersion,
-    connect_timeout: Duration,
-    request_timeout: Duration,
-    pool_idle_timeout: Duration,
-    tcp_keepalive: Duration,
-    proxy: Proxy,
-    http_version: HttpVersion,
-    crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
-    ca_pem: Option<Vec<u8>>,
+    http_transport: Option<Arc<dyn HttpTransport>>,
     max_response_bytes: usize,
     key_cache_ttl: Duration,
     request_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -84,7 +78,7 @@ impl std::fmt::Debug for AzureProviderBuilder {
             )
             .field("policy", &self.policy)
             .field("api_version", &self.api_version)
-            .field("proxy", &self.proxy)
+            .field("http_transport", &self.http_transport.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -95,14 +89,7 @@ impl Default for AzureProviderBuilder {
             credential: None,
             policy: HostPolicy::default(),
             api_version: ApiVersion::default(),
-            connect_timeout: Duration::from_secs(2),
-            request_timeout: Duration::from_secs(10),
-            pool_idle_timeout: Duration::from_secs(50),
-            tcp_keepalive: Duration::from_secs(30),
-            proxy: Proxy::None,
-            http_version: HttpVersion::Http1,
-            crypto_provider: None,
-            ca_pem: None,
+            http_transport: None,
             max_response_bytes: 1024 * 1024,
             key_cache_ttl: Duration::from_secs(600),
             request_counter: None,
@@ -201,59 +188,23 @@ impl AzureProviderBuilder {
         self
     }
 
-    /// Trusts only the certificates in `pem` for **test hosts** (Azure hosts always use the
-    /// system roots). Needs at least one test host.
-    pub fn ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.ca_pem = Some(pem.into());
-        self
-    }
-
     /// The REST API version (one supported value in 0.x).
     pub fn api_version(mut self, v: ApiVersion) -> Self {
         self.api_version = v;
         self
     }
 
-    /// Connect timeout per attempt (default 2 s).
-    pub fn connect_timeout(mut self, d: Duration) -> Self {
-        self.connect_timeout = d;
-        self
-    }
-
-    /// Whole-request timeout per attempt (default 10 s). The overall deadline belongs to
-    /// `Retry`.
-    pub fn request_timeout(mut self, d: Duration) -> Self {
-        self.request_timeout = d;
-        self
-    }
-
-    /// How long idle connections are kept (default 50 s).
-    pub fn pool_idle_timeout(mut self, d: Duration) -> Self {
-        self.pool_idle_timeout = d;
-        self
-    }
-
-    /// TCP keepalive (default 30 s).
-    pub fn tcp_keepalive(mut self, d: Duration) -> Self {
-        self.tcp_keepalive = d;
-        self
-    }
-
-    /// The proxy for vault requests (default none; environment variables are ignored).
-    pub fn proxy(mut self, p: Proxy) -> Self {
-        self.proxy = p;
-        self
-    }
-
-    /// The HTTP version (default HTTP/1.1; HTTP/2 needs the `http2` feature).
-    pub fn http_version(mut self, v: HttpVersion) -> Self {
-        self.http_version = v;
-        self
-    }
-
-    /// The rustls crypto provider (first in the precedence; see the crate docs).
-    pub fn crypto_provider(mut self, provider: Arc<rustls::crypto::CryptoProvider>) -> Self {
-        self.crypto_provider = Some(provider);
+    /// The HTTP transport the vaults and the token endpoints are reached through. It owns TLS
+    /// trust (a test host's CA included), the crypto provider, timeouts, proxying and the HTTP
+    /// version: configure them on
+    /// [`ReqwestTransportBuilder`](anykms_http::ReqwestTransportBuilder) (the built-in transport,
+    /// feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
+    /// `ReqwestTransport` is built; without the `reqwest` feature, building fails with
+    /// `Configuration`. The built-in credentials fetch their tokens through the same transport
+    /// ([`AzureCredential::bind_transport`]); IMDS requests carry a per-request timeout and are
+    /// never proxied by the built-in transport.
+    pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
+        self.http_transport = Some(Arc::new(transport));
         self
     }
 
@@ -283,33 +234,18 @@ impl AzureProviderBuilder {
         self
     }
 
-    /// Validates the configuration and builds the HTTP clients.
+    /// Validates the configuration and, without an injected transport, builds the default one.
     pub fn build(self) -> Result<AzureProvider> {
         let credential = self
             .credential
             .ok_or_else(|| config_err("no credential configured"))?;
-        if self.connect_timeout.is_zero() || self.request_timeout.is_zero() {
-            return Err(config_err(
-                "connect_timeout and request_timeout must be greater than zero",
-            ));
-        }
         if self.max_response_bytes < anykms_http::client::MIN_RESPONSE_BYTES {
             return Err(config_err(
                 "max_response_bytes must be at least 64 KiB (anykms_http::client::MIN_RESPONSE_BYTES)",
             ));
         }
-        if self.http_version == HttpVersion::Http2 && !cfg!(feature = "http2") {
-            return Err(config_err(
-                "HttpVersion::Http2 requires the `http2` feature",
-            ));
-        }
         for t in &self.policy.test_hosts {
             t.validate()?;
-        }
-        if self.ca_pem.is_some() && self.policy.test_hosts.is_empty() {
-            return Err(config_err(
-                "ca_pem applies to test hosts only, and none is configured",
-            ));
         }
         if let Some(v) = &self.policy.allowed_vaults {
             if v.is_empty() {
@@ -325,38 +261,17 @@ impl AzureProviderBuilder {
                 }
             }
         }
-        let setting = "AzureProviderBuilder::crypto_provider";
-        let tls = anykms_http::tls::TlsOptions::new()
-            .crypto_provider(self.crypto_provider.clone(), setting)
-            .http2(self.http_version == HttpVersion::Http2)
-            .build(BACKEND)?;
-        let opts = anykms_http::client::ClientOptions::new()
-            .connect_timeout(self.connect_timeout)
-            .request_timeout(self.request_timeout)
-            .pool_idle_timeout(self.pool_idle_timeout)
-            .tcp_keepalive(self.tcp_keepalive);
-        let http = opts
-            .clone()
-            .http2(self.http_version == HttpVersion::Http2)
-            .proxy(match &self.proxy {
-                Proxy::None => None,
-                Proxy::Url(u) => Some(u.clone()),
-            })
-            .build(BACKEND, tls)?;
-        let test_http = if self.policy.test_hosts.is_empty() {
-            None
-        } else {
-            let tls = anykms_http::tls::TlsOptions::new()
-                .ca_pem(self.ca_pem.as_deref())
-                .crypto_provider(self.crypto_provider.clone(), setting)
-                .require_roots(false)
-                .build(BACKEND)?;
-            Some(opts.build(BACKEND, tls)?)
+        // With only plain-HTTP loopback test hosts, no trusted roots are needed.
+        let require_roots = self.policy.test_hosts.is_empty()
+            || !self.policy.test_hosts.iter().all(|t| t.plain_http);
+        let http = match self.http_transport {
+            Some(t) => t,
+            None => anykms_http::default_transport(BACKEND, require_roots)?,
         };
+        let tokens = Tokens::new(credential, &http);
         let mut client = Client::new(
             http,
-            test_http,
-            Tokens::new(credential),
+            tokens,
             self.api_version,
             self.max_response_bytes,
             self.key_cache_ttl,

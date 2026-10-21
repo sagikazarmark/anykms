@@ -169,7 +169,12 @@ pub fn lowkey_builder(host: &str, ca_pem: &str) -> AzureProviderBuilder {
     AzureProvider::builder()
         .credential(StaticToken::new(LOWKEY_TOKEN))
         .test_host(TestHost::https(host, LOWKEY_SCOPE))
-        .ca_pem(ca_pem.as_bytes().to_vec())
+        .http_transport(
+            anykms_azure::anykms_http::ReqwestTransport::builder()
+                .ca_pem(ca_pem.as_bytes())
+                .build()
+                .expect("Lowkey Vault transport"),
+        )
         .key_cache_ttl(Duration::ZERO)
 }
 
