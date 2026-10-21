@@ -176,7 +176,7 @@ fn rsa_keys() -> &'static [rsa::RsaPrivateKey; 2] {
     static KEYS: std::sync::OnceLock<[rsa::RsaPrivateKey; 2]> = std::sync::OnceLock::new();
     KEYS.get_or_init(|| {
         let mut rng = rsa::rand_core::UnwrapErr(getrandom::SysRng);
-        [(); 2].map(|_| rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap())
+        [(); 2].map(|()| rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap())
     })
 }
 
@@ -232,7 +232,7 @@ impl PublicKeys for RsaKey {
     }
 
     async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey> {
-        Ok(self.pk(version.as_u64().unwrap() as usize))
+        Ok(self.pk(usize::try_from(version.as_u64().unwrap()).unwrap()))
     }
 }
 

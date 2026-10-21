@@ -791,7 +791,7 @@ mod tests {
 
     use super::*;
 
-    fn load(cfg: EnvConfig, vars: &[(&str, &str)]) -> Result<ServerConfig> {
+    fn load(cfg: &EnvConfig, vars: &[(&str, &str)]) -> Result<ServerConfig> {
         let vars: HashMap<String, String> = vars
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -815,7 +815,7 @@ mod tests {
                     if with_new {
                         vars.push((new, "1"));
                     }
-                    let e = load(EnvConfig::vault(), &vars).unwrap_err();
+                    let e = load(&EnvConfig::vault(), &vars).unwrap_err();
                     assert_eq!(e.kind(), ErrorKind::Configuration, "{old}: {e}");
                     assert!(
                         e.message().contains(&format!("{old} was renamed to {new}")),
@@ -824,7 +824,7 @@ mod tests {
                 }
             }
         }
-        assert!(load(EnvConfig::vault(), &base).is_ok());
+        assert!(load(&EnvConfig::vault(), &base).is_ok());
     }
 
     #[tokio::test]
@@ -860,7 +860,7 @@ mod tests {
         let login = |vars: &[(&str, &str)]| {
             let mut all = vec![addr, ("VAULT_TOKEN", "ignored")];
             all.extend_from_slice(vars);
-            load(EnvConfig::vault(), &all).map(|c| format!("{:?}", c.login))
+            load(&EnvConfig::vault(), &all).map(|c| format!("{:?}", c.login))
         };
         let k8s = login(&[
             ("ANYKMS_TRANSIT_AUTH", "kubernetes"),
@@ -952,25 +952,25 @@ mod tests {
         ];
         let strict =
             |c: &ServerConfig| token_debug(c).contains("allow_insecure_permissions: false");
-        assert!(strict(&load(EnvConfig::vault(), &vars).unwrap()));
-        let c = load(EnvConfig::vault().allow_insecure_token_file(), &vars).unwrap();
+        assert!(strict(&load(&EnvConfig::vault(), &vars).unwrap()));
+        let c = load(&EnvConfig::vault().allow_insecure_token_file(), &vars).unwrap();
         assert!(!strict(&c), "{c:?}");
         for v in ["1", "true", "TRUE"] {
             let mut with = vars.to_vec();
             with.push(("ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE", v));
-            let c = load(EnvConfig::vault(), &with).unwrap();
+            let c = load(&EnvConfig::vault(), &with).unwrap();
             assert!(!strict(&c), "{v}: {c:?}");
         }
         let mut off = vars.to_vec();
         off.push(("ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE", "0"));
-        assert!(strict(&load(EnvConfig::vault(), &off).unwrap()));
+        assert!(strict(&load(&EnvConfig::vault(), &off).unwrap()));
     }
 
     #[test]
     fn openbao_settings_come_from_the_address_prefix() {
         let addr = ("BAO_ADDR", "https://bao.example:8200");
         let c = load(
-            EnvConfig::openbao(),
+            &EnvConfig::openbao(),
             &[
                 addr,
                 ("VAULT_TOKEN", "v"),
@@ -981,7 +981,7 @@ mod tests {
         assert!(token_debug(&c).contains("/run/bao/token"), "{c:?}");
 
         let c = load(
-            EnvConfig::openbao(),
+            &EnvConfig::openbao(),
             &[
                 addr,
                 ("BAO_TOKEN", "b"),
@@ -996,7 +996,7 @@ mod tests {
 
         // With BAO_ADDR, a VAULT_TOKEN is never used (it would go to the OpenBao address).
         let e = load(
-            EnvConfig::openbao(),
+            &EnvConfig::openbao(),
             &[
                 addr,
                 ("VAULT_TOKEN", "v"),
@@ -1013,14 +1013,14 @@ mod tests {
         // With VAULT_ADDR, OpenBao reads VAULT_* and refuses stray BAO_* settings.
         let vault_addr = ("VAULT_ADDR", "https://vault.example:8200");
         let c = load(
-            EnvConfig::openbao(),
+            &EnvConfig::openbao(),
             &[vault_addr, ("VAULT_TOKEN_FILE", "/run/vault/token")],
         )
         .unwrap();
         assert!(token_debug(&c).contains("/run/vault/token"), "{c:?}");
         for stray in ["BAO_TOKEN", "BAO_NAMESPACE", "BAO_CACERT"] {
             let e = load(
-                EnvConfig::openbao(),
+                &EnvConfig::openbao(),
                 &[vault_addr, ("VAULT_TOKEN", "v"), (stray, "x")],
             )
             .unwrap_err();
@@ -1029,7 +1029,7 @@ mod tests {
 
         // Vault never reads BAO_*.
         let e = load(
-            EnvConfig::vault().no_home_token(),
+            &EnvConfig::vault().no_home_token(),
             &[vault_addr, ("BAO_TOKEN", "b")],
         )
         .unwrap_err();
@@ -1043,7 +1043,7 @@ mod tests {
     #[test]
     fn missing_token_fails_unless_opted_out() {
         let addr = ("VAULT_ADDR", "https://vault.example:8200");
-        let e = load(EnvConfig::vault(), &[addr]).unwrap_err();
+        let e = load(&EnvConfig::vault(), &[addr]).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Configuration);
         let m = e.to_string();
         assert!(
@@ -1055,22 +1055,22 @@ mod tests {
             "{m}"
         );
 
-        let c = load(EnvConfig::vault().no_token(), &[addr]).unwrap();
+        let c = load(&EnvConfig::vault().no_token(), &[addr]).unwrap();
         assert_eq!(token_debug(&c), "NoToken");
         for v in ["1", "true"] {
-            let c = load(EnvConfig::vault(), &[addr, ("ANYKMS_TRANSIT_NO_TOKEN", v)]).unwrap();
+            let c = load(&EnvConfig::vault(), &[addr, ("ANYKMS_TRANSIT_NO_TOKEN", v)]).unwrap();
             assert_eq!(token_debug(&c), "NoToken");
         }
         // The opt-out wins over token variables: nothing is sent.
         let c = load(
-            EnvConfig::vault(),
+            &EnvConfig::vault(),
             &[addr, ("VAULT_TOKEN", "t"), ("ANYKMS_TRANSIT_NO_TOKEN", "1")],
         )
         .unwrap();
         assert_eq!(token_debug(&c), "NoToken");
         assert!(
             load(
-                EnvConfig::vault(),
+                &EnvConfig::vault(),
                 &[addr, ("ANYKMS_TRANSIT_NO_TOKEN", "0")]
             )
             .is_err()
@@ -1080,14 +1080,14 @@ mod tests {
         let home = scratch("home");
         write(&home.join(".vault-token"), b"hvs.x");
         let c = load(
-            EnvConfig::vault(),
+            &EnvConfig::vault(),
             &[addr, ("HOME", home.to_str().unwrap())],
         )
         .unwrap();
         assert!(token_debug(&c).contains(".vault-token"), "{c:?}");
         assert!(
             load(
-                EnvConfig::vault().no_home_token(),
+                &EnvConfig::vault().no_home_token(),
                 &[addr, ("HOME", home.to_str().unwrap())],
             )
             .is_err()
@@ -1122,7 +1122,7 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         let mut vars = base.to_vec();
         vars.push(("VAULT_CAPATH", dir.to_str().unwrap()));
-        let c = load(EnvConfig::vault(), &vars).unwrap();
+        let c = load(&EnvConfig::vault(), &vars).unwrap();
         let pem = c.ca_pem.as_deref().unwrap();
         assert_eq!(
             rustls_pki_types::CertificateDer::pem_slice_iter(pem).count(),
@@ -1132,24 +1132,24 @@ mod tests {
 
         // A file without certificates fails closed.
         write(&dir.join("README"), b"not a certificate");
-        let e = load(EnvConfig::vault(), &vars).unwrap_err();
+        let e = load(&EnvConfig::vault(), &vars).unwrap_err();
         assert!(e.to_string().contains("VAULT_CAPATH"), "{e}");
         std::fs::remove_file(dir.join("README")).unwrap();
 
         // CACERT takes precedence (as in the Vault CLI).
         let ca = dir.join("a.pem");
         vars.push(("VAULT_CACERT", ca.to_str().unwrap()));
-        let c = load(EnvConfig::vault(), &vars).unwrap();
+        let c = load(&EnvConfig::vault(), &vars).unwrap();
         assert_eq!(c.ca_pem.as_deref(), Some(TEST_CA.as_bytes()));
 
         // Empty and missing directories fail.
         let empty = scratch("capath-empty");
         let mut vars = base.to_vec();
         vars.push(("VAULT_CAPATH", empty.to_str().unwrap()));
-        assert!(load(EnvConfig::vault(), &vars).is_err());
+        assert!(load(&EnvConfig::vault(), &vars).is_err());
         let mut vars = base.to_vec();
         vars.push(("VAULT_CAPATH", "/nonexistent/anykms"));
-        assert!(load(EnvConfig::vault(), &vars).is_err());
+        assert!(load(&EnvConfig::vault(), &vars).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&empty).unwrap();
     }
@@ -1174,7 +1174,7 @@ mod tests {
         ] {
             let mut all = base.to_vec();
             all.extend(vars);
-            let e = load(EnvConfig::vault(), &all).unwrap_err();
+            let e = load(&EnvConfig::vault(), &all).unwrap_err();
             let m = e.to_string();
             assert!(
                 m.contains(&format!("cannot read the {what} {missing} (VAULT_"))
@@ -1184,7 +1184,8 @@ mod tests {
             assert!(!m.contains("secret-token"), "{m}");
             let src = std::error::Error::source(&e).expect("io source");
             assert_eq!(
-                src.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                src.downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
                 Some(std::io::ErrorKind::NotFound)
             );
         }
@@ -1198,7 +1199,7 @@ mod tests {
         let key_s = dir.to_str().unwrap().to_owned(); // a directory: reading it fails
         all.push(("VAULT_CLIENT_CERT", &cert_s));
         all.push(("VAULT_CLIENT_KEY", &key_s));
-        let m = load(EnvConfig::vault(), &all).unwrap_err().to_string();
+        let m = load(&EnvConfig::vault(), &all).unwrap_err().to_string();
         assert!(
             m.contains(&format!(
                 "cannot read the client key file {key_s} (VAULT_CLIENT_KEY): "
@@ -1239,14 +1240,14 @@ mod tests {
     #[test]
     fn loopback_http_scheme_is_case_insensitive() {
         let c = load(
-            EnvConfig::vault().no_token(),
+            &EnvConfig::vault().no_token(),
             &[("VAULT_ADDR", "HTTP://127.0.0.1:8100")],
         )
         .unwrap();
         assert!(c.allow_loopback_http);
         assert!(
             load(
-                EnvConfig::vault().no_token(),
+                &EnvConfig::vault().no_token(),
                 &[("VAULT_ADDR", "HTTP://vault.example:8200")],
             )
             .is_err()

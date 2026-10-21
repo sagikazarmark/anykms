@@ -24,8 +24,7 @@ impl RunId {
         static RUNS: AtomicU64 = AtomicU64::new(0);
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         Self {
             prefix: format!(
                 "anykms-{secs}-{}-{}",
@@ -126,18 +125,26 @@ impl<K> FreshKeys<K> {
     pub fn push(&self, key: K) {
         self.keys
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(key);
     }
 
     /// Takes every recorded key, leaving none.
     pub fn take(&self) -> Vec<K> {
-        std::mem::take(&mut *self.keys.lock().unwrap_or_else(|p| p.into_inner()))
+        std::mem::take(
+            &mut *self
+                .keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// How many keys are recorded.
     pub fn len(&self) -> usize {
-        self.keys.lock().unwrap_or_else(|p| p.into_inner()).len()
+        self.keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Whether no key is recorded.
@@ -361,6 +368,11 @@ mod tests {
         struct Opener;
 
         impl Opener {
+            #[allow(
+                clippy::unused_self,
+                clippy::unnecessary_wraps,
+                reason = "mirrors the opener method shape `typed_handles!` delegates to"
+            )]
             fn mac_key(&self, _: &KeyUri, _: MacAlgorithm) -> Result<FakeMac> {
                 Ok(FakeMac(KeySemantics::new(
                     VersionModel::Single,
@@ -388,7 +400,7 @@ mod tests {
         struct NoFixture;
 
         impl Fixture for NoFixture {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "none"
             }
 
@@ -447,6 +459,6 @@ mod tests {
         f.push("b");
         assert_eq!(f.len(), 2);
         assert_eq!(f.take(), ["a", "b"]);
-        assert!(f.take().is_empty());
+        assert_eq!(f.take(), [] as [&str; 0]);
     }
 }

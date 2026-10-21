@@ -94,7 +94,7 @@ pub(crate) fn endpoint_error(what: &'static str, status: u16, body: &[u8]) -> Er
         .and_then(safe_code)
         .or_else(|| {
             // Google APIs (IAM credentials) answer with a google.rpc.Status instead.
-            crate::errors::Status::parse(body).status
+            crate::errors::Status::parse(body).code
         });
     if let Some(c) = code {
         detail = detail.with_code(c);
@@ -102,7 +102,7 @@ pub(crate) fn endpoint_error(what: &'static str, status: u16, body: &[u8]) -> Er
     auth_err(kind, format!("{what}: {msg}")).with_detail(detail)
 }
 
-fn expires_in(v: &Option<serde_json::Value>) -> Option<Duration> {
+fn expires_in(v: Option<&serde_json::Value>) -> Option<Duration> {
     match v {
         Some(serde_json::Value::Number(n)) => n.as_u64().map(Duration::from_secs),
         Some(serde_json::Value::String(s)) => s.parse().ok().map(Duration::from_secs),
@@ -124,7 +124,7 @@ pub(crate) fn parse_oauth_token(what: &'static str, body: &[u8]) -> Result<Expir
     if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(bad());
     }
-    let lifetime = expires_in(&t.expires_in).unwrap_or(Duration::from_secs(3600));
+    let lifetime = expires_in(t.expires_in.as_ref()).unwrap_or(Duration::from_secs(3600));
     Ok(Fetched::valid_for(token, lifetime))
 }
 
@@ -170,11 +170,11 @@ pub(crate) async fn send(
     Ok(body)
 }
 
-/// A `POST` of a zeroizing form body.
+/// A `POST` of a form body. The caller keeps (and wipes) its zeroizing buffer.
 pub(crate) fn post_form(
     http: &reqwest::Client,
     url: &url::Url,
-    body: Zeroizing<Vec<u8>>,
+    body: &[u8],
 ) -> reqwest::RequestBuilder {
     // reqwest copies the body into its own buffer; that copy is not wiped (see the crate docs on
     // zeroization limits).

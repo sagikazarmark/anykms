@@ -176,7 +176,7 @@ pub mod __fuzz {
         let messages = serde_json::from_slice::<E>(body)
             .map(|e| e.errors)
             .unwrap_or_default();
-        crate::errors::classify(crate::errors::Failure {
+        crate::errors::classify(&crate::errors::Failure {
             status,
             messages: &messages,
             retry_after: None,

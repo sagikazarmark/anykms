@@ -17,6 +17,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anykms_core::prelude::*;
@@ -169,7 +170,7 @@ fn render(e: &anykms_core::Error) -> String {
     let mut out = format!("{e}\n{e:?}\n{e:#?}\n");
     let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     while let Some(s) = src {
-        out.push_str(&format!("{s}\n{s:?}\n"));
+        writeln!(out, "{s}\n{s:?}").unwrap();
         src = s.source();
     }
     out
@@ -205,7 +206,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
     );
     let e = k.decrypt(&ct, b"wrong").await.unwrap_err();
     text.push_str(&render(&e));
-    text.push_str(&format!("{p:?}\n{k:?}\n"));
+    writeln!(text, "{p:?}\n{k:?}").unwrap();
 
     // Signing, verification, MAC, RSA key wrapping.
     let ec = fake.create_key("EC_SIGN_P256_SHA256");
@@ -275,12 +276,12 @@ async fn trace_output_and_errors_never_contain_secrets() {
         Credentials::custom(Arc::new(Custom)),
     ];
     for c in creds {
-        text.push_str(&format!("{c:?}\n"));
+        writeln!(text, "{c:?}").unwrap();
         let p = with_creds(&fake, c);
         let k = p.aead_key(uri(&aead)).unwrap();
         let ct = k.encrypt(PT.as_bytes(), AAD.as_bytes()).await.unwrap();
         k.decrypt(&ct, AAD.as_bytes()).await.unwrap();
-        text.push_str(&format!("{p:?}\n"));
+        writeln!(text, "{p:?}").unwrap();
     }
     // The 401 refresh: the fake forgets the metadata token.
     let p = with_creds(&fake, Credentials::metadata_server());
@@ -487,7 +488,7 @@ async fn google_cloud_auth_tokens_never_appear_in_trace_output_or_errors() {
         "{tokens:?}"
     );
     all.push_str(&render(&e));
-    all.push_str(&format!("{p:?}\n{k:?}\n{failing:?}\n"));
+    writeln!(all, "{p:?}\n{k:?}\n{failing:?}").unwrap();
     for m in [LIB_TOKEN, PT, AAD] {
         assert!(!all.contains(m), "marker {m} leaked:\n{all}");
     }

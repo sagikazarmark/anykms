@@ -127,7 +127,7 @@ pub fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 
 /// The only signature algorithm a key of this type can produce, or `None` when there are several
 /// (RSA: PSS or PKCS#1 v1.5, each with three hashes).
-pub(crate) fn implied_algorithm(key_type: &AsymmetricKeyType) -> Option<SignatureAlgorithm> {
+pub(crate) fn implied_algorithm(key_type: AsymmetricKeyType) -> Option<SignatureAlgorithm> {
     match key_type {
         AsymmetricKeyType::EcP256 => Some(SignatureAlgorithm::EcdsaP256Sha256),
         AsymmetricKeyType::EcP384 => Some(SignatureAlgorithm::EcdsaP384Sha384),
@@ -255,7 +255,7 @@ impl LocalVerifier {
     /// (P-256/SHA-256, P-384/SHA-384, P-521/SHA-512) or Ed25519. RSA keys have several
     /// algorithms and fail with `InvalidArgument`; use [`new`](Self::new). Otherwise as `new`.
     pub fn for_key(key: PublicKey) -> Result<Self> {
-        let alg = implied_algorithm(&key.key_type()).ok_or_else(|| {
+        let alg = implied_algorithm(key.key_type()).ok_or_else(|| {
             invalid("RSA keys have several signature algorithms; name one with LocalVerifier::new")
         })?;
         Self::new(key, alg)
@@ -377,10 +377,11 @@ mod tests {
 
     /// DER length octets.
     fn der_len(n: usize) -> Vec<u8> {
+        let [hi, lo] = u16::try_from(n).unwrap().to_be_bytes();
         match n {
-            0..=0x7f => vec![n as u8],
-            0x80..=0xff => vec![0x81, n as u8],
-            _ => vec![0x82, (n >> 8) as u8, n as u8],
+            0..=0x7f => vec![lo],
+            0x80..=0xff => vec![0x81, lo],
+            _ => vec![0x82, hi, lo],
         }
     }
 

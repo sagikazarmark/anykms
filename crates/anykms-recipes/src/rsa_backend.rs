@@ -21,11 +21,15 @@ pub(crate) struct RsaParts<'a> {
 }
 
 impl RsaParts<'_> {
-    /// The exact modulus size in bits.
+    /// The exact modulus size in bits, saturating at `u32::MAX` for an absurdly large modulus.
     pub(crate) fn bits(&self) -> u32 {
         match self.n.first() {
             None => 0,
-            Some(b) => (self.n.len() as u32 - 1) * 8 + (8 - b.leading_zeros()),
+            Some(b) => u32::try_from(self.n.len() - 1)
+                .ok()
+                .and_then(|bytes| bytes.checked_mul(8))
+                .and_then(|bits| bits.checked_add(8 - b.leading_zeros()))
+                .unwrap_or(u32::MAX),
         }
     }
 }
@@ -93,7 +97,10 @@ impl RsaVerifier {
     pub(crate) fn new(spki_der: &[u8], alg: SignatureAlgorithm) -> Result<Self> {
         #[cfg(feature = "rsa-aws-lc-rs")]
         {
-            use SignatureAlgorithm::*;
+            use SignatureAlgorithm::{
+                RsaPkcs1v15Sha256, RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256,
+                RsaPssSha384, RsaPssSha512,
+            };
             use aws_lc_rs::signature::{self as sig, RsaParameters};
             let params: &'static RsaParameters = match alg {
                 RsaPssSha256 => &sig::RSA_PSS_2048_8192_SHA256,
@@ -110,7 +117,10 @@ impl RsaVerifier {
         }
         #[cfg(all(feature = "rsa-rustcrypto", not(feature = "rsa-aws-lc-rs")))]
         {
-            use SignatureAlgorithm::*;
+            use SignatureAlgorithm::{
+                RsaPkcs1v15Sha256, RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256,
+                RsaPssSha384, RsaPssSha512,
+            };
             use rsa::{pkcs1v15, pss};
             use spki::DecodePublicKey as _;
             let k = rsa::RsaPublicKey::from_public_key_der(spki_der)

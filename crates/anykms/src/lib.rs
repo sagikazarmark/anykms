@@ -229,7 +229,8 @@ pub fn with_default_providers() -> Result<DefaultProviders> {
 pub fn with_default_providers_from(
     lookup: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
 ) -> Result<DefaultProviders> {
-    defaults(Some(Arc::new(lookup)))
+    let lookup: Lookup = Arc::new(lookup);
+    defaults(Some(&lookup))
 }
 
 /// An environment lookup shared by the backends.
@@ -237,7 +238,11 @@ type Lookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// [`with_default_providers`] (`lookup` is `None`: the process environment) and
 /// [`with_default_providers_from`].
-fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "fallible whenever a backend feature is enabled; infallible only without any"
+)]
+fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
     // A backend's `from_env_with` takes its own copy of the lookup.
     #[allow(dead_code)] // unused without any backend feature
     fn share(l: &Lookup) -> impl Fn(&str) -> Option<String> + Send + Sync + 'static + use<> {
@@ -252,7 +257,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
     #[cfg(feature = "transit")]
     {
         let set = |v: &str| {
-            match &lookup {
+            match lookup {
                 Some(l) => l(v),
                 None => std::env::var(v).ok(),
             }
@@ -267,12 +272,12 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
                      BAO_ADDR"
                 );
             }
-            d = d.provider(match &lookup {
+            d = d.provider(match lookup {
                 None => anykms_transit::TransitProvider::from_env()?,
                 Some(l) => anykms_transit::TransitProvider::from_env_with(share(l))?,
             });
         } else if set("BAO_ADDR") {
-            d = d.provider(match &lookup {
+            d = d.provider(match lookup {
                 None => anykms_transit::TransitProvider::from_env_openbao()?,
                 Some(l) => anykms_transit::TransitProvider::from_env_openbao_with(share(l))?,
             });
@@ -295,7 +300,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
     });
     #[cfg(feature = "aws")]
     {
-        let built = match &lookup {
+        let built = match lookup {
             None => anykms_aws::AwsProvider::from_env(),
             Some(l) => anykms_aws::AwsProvider::from_env_with(share(l)),
         };
@@ -311,7 +316,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
     });
     #[cfg(feature = "gcp")]
     {
-        let built = match &lookup {
+        let built = match lookup {
             None => anykms_gcp::GcpProvider::from_env(),
             Some(l) => anykms_gcp::GcpProvider::from_env_with(share(l)),
         };
@@ -328,7 +333,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
     #[cfg(feature = "azure")]
     {
         // A malformed ANYKMS_AZURE_CREDENTIAL is an error; `none` is the explicit opt-out.
-        let kind = match &lookup {
+        let kind = match lookup {
             None => anykms_azure::env_credential_kind()?,
             Some(l) => anykms_azure::env_credential_kind_with(share(l))?,
         };
@@ -340,7 +345,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
                 schemes: anykms_azure::SCHEMES,
             });
         } else {
-            let built = match &lookup {
+            let built = match lookup {
                 None => anykms_azure::AzureProvider::from_env(),
                 Some(l) => anykms_azure::AzureProvider::from_env_with(share(l)),
             };
@@ -374,7 +379,7 @@ fn defaults(lookup: Option<Lookup>) -> Result<DefaultProviders> {
             );
         }
     }
-    let _ = &lookup; // unused without any backend feature
+    let _ = lookup; // unused without any backend feature
     Ok(d)
 }
 
@@ -812,7 +817,11 @@ mod tests {
             ("ANYKMS_AZURE_MANAGED_IDENTITY", "1"),
         ]))
         .unwrap();
-        let skipped: Vec<_> = d.skipped().iter().map(|s| s.backend()).collect();
+        let skipped: Vec<_> = d
+            .skipped()
+            .iter()
+            .map(super::SkippedProvider::backend)
+            .collect();
         let r = d.build().unwrap();
         let mut tested = Vec::new();
         for (backend, uri) in [
@@ -1071,7 +1080,7 @@ mod tests {
                 .skipped()
                 .iter()
                 .filter(|s| s.cause() == SkipCause::TlsRoots)
-                .map(|s| s.backend())
+                .map(super::SkippedProvider::backend)
                 .collect();
             let enabled: Vec<_> = [
                 ("aws", cfg!(feature = "aws")),

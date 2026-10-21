@@ -309,8 +309,7 @@ impl AzureKeyInfo {
     fn state_of(enabled: Option<bool>, nbf: Option<u64>, exp: Option<u64>) -> Option<KeyState> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         match enabled? {
             false => Some(KeyState::Disabled),
             true if nbf.is_some_and(|n| n > now) => {
@@ -490,6 +489,10 @@ pub(crate) fn parse_versions_page(
 // ---------------------------------------------------------------------------------------------
 // JWK -> SubjectPublicKeyInfo DER
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "each branch bounds `len` to its width; callers' content is under 64 KiB (RSA moduli are at most 2048 bytes, EC points 133)"
+)]
 fn push_len(out: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
         out.push(len as u8);
@@ -530,7 +533,7 @@ pub(crate) fn rsa_spki(n_b64: &str, e_b64: &str) -> Option<(Vec<u8>, u32)> {
     if n_trim.len() > 2048 || e.len() > 8 {
         return None;
     }
-    let bits = (n_trim.len() as u32 - 1) * 8 + (8 - n_trim[0].leading_zeros());
+    let bits = (u32::try_from(n_trim.len()).ok()? - 1) * 8 + (8 - n_trim[0].leading_zeros());
     let mut rsa_key = uint(n_trim)?;
     rsa_key.extend_from_slice(&uint(&e)?);
     let rsa_key = tlv(0x30, &rsa_key);

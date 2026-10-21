@@ -166,9 +166,9 @@ async fn main() {
             .await
             .unwrap();
         if status == 200 {
-            lo = mid
+            lo = mid;
         } else {
-            hi = mid - 1
+            hi = mid - 1;
         }
     }
     std::fs::write(

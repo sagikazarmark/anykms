@@ -14,6 +14,7 @@
 
 #![cfg(feature = "tracing")]
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -59,7 +60,7 @@ fn render(e: &anykms_core::Error) -> String {
     let mut src: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
     let mut depth = 0;
     while let Some(s) = src {
-        out.push_str(&format!("source[{depth}]: {s}\n{s:?}\n"));
+        writeln!(out, "source[{depth}]: {s}\n{s:?}").unwrap();
         src = s.source();
         depth += 1;
     }
@@ -312,7 +313,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .unwrap_err();
     assert_eq!(e.kind(), anykms_core::ErrorKind::Backend, "{e}");
     text.push_str(&render(&e));
-    text.push_str(&format!("{dk:?}\n{p:?}\n{k:?}\n"));
+    writeln!(text, "{dk:?}\n{p:?}\n{k:?}").unwrap();
 
     // Oversized response carrying the plaintext.
     let small = provider(
@@ -349,7 +350,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         Some(KeyVersion::from_u64(1)),
         vec![0u8; 64],
     );
-    text.push_str(&format!("{ec:?}\n{ed:?}\n{sig:?}\n{forged:?}\n"));
+    writeln!(text, "{ec:?}\n{ed:?}\n{sig:?}\n{forged:?}").unwrap();
 
     // HMAC.
     let mac = p.mac_key(uri("mac"), MacAlgorithm::HmacSha256).unwrap();
@@ -362,7 +363,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         Some(KeyVersion::from_u64(1)),
         vec![0u8; 32],
     );
-    text.push_str(&format!("{mac:?}\n{tag:?}\n{other:?}\n"));
+    writeln!(text, "{mac:?}\n{tag:?}\n{other:?}").unwrap();
 
     // Token file.
     let dir = std::env::temp_dir().join(format!("anykms-hygiene-{}", std::process::id()));
@@ -383,7 +384,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .unwrap()
         .with_key_type_check(KeyTypeCheck::TrustCaller);
     fk.encrypt(PT.as_bytes(), b"").await.unwrap();
-    text.push_str(&format!("{fp:?}\n{fk:?}\n"));
+    writeln!(text, "{fp:?}\n{fk:?}").unwrap();
     // A refused (group-readable) token file: the error names the path, never the contents.
     #[cfg(unix)]
     {
@@ -414,7 +415,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
         .unwrap()
         .with_key_type_check(KeyTypeCheck::TrustCaller);
     lk.encrypt(PT.as_bytes(), b"").await.unwrap();
-    text.push_str(&format!("{lp:?}\n{lk:?}\n"));
+    writeln!(text, "{lp:?}\n{lk:?}").unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
     let missing = provider(
         ServerConfig::new(server.uri(), Flavor::Vault)
@@ -445,7 +446,7 @@ async fn trace_output_and_errors_never_contain_secrets() {
             .as_bytes(),
         b"vault:v2:CCCC"
     );
-    text.push_str(&format!("{rp:?}\n{rk:?}\n"));
+    writeln!(text, "{rp:?}\n{rk:?}").unwrap();
 
     // Transport error: nothing listens on the port; the error carries a reqwest source.
     let dead = provider(ServerConfig::new("http://127.0.0.1:1", Flavor::Vault).token(TOKEN));
@@ -599,7 +600,7 @@ fn weak_kek_warns_on_wrap() {
             let opts = anykms_core::OpenOptions::default();
             let strong = anykms_core::Provider::key_wrap(&p, &uri("strong"), &opts).unwrap();
             strong.wrap_key(&[7; 32]).await.unwrap();
-            assert!(buf.contents().is_empty());
+            assert_eq!(buf.contents(), "");
             assert!(strong.supports_rewrap());
 
             let weak = anykms_core::Provider::key_wrap(&p, &uri("weak"), &opts).unwrap();
@@ -636,7 +637,7 @@ async fn cancelled_calls_are_recorded() {
     let observe = anykms_core::ObserveLayer::new(move |ev: &anykms_core::OpEvent<'_>| {
         e.lock()
             .unwrap()
-            .push((ev.is_ok(), ev.is_cancelled(), ev.outcome()))
+            .push((ev.is_ok(), ev.is_cancelled(), ev.outcome()));
     });
     let p = provider(ServerConfig::new(server.uri(), Flavor::Vault).token("s.mock-token"));
     let opts = anykms_core::OpenOptions::default();

@@ -191,7 +191,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.cache_key());
     }
 
@@ -200,7 +200,7 @@ impl KeyCtx {
         self.cache
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.cache_key())
             .filter(|(exp, _)| now < *exp)
             .map(|(_, b)| b.clone())
@@ -313,7 +313,11 @@ impl KeyCtx {
     /// Caches `b` as the bundle of the URI's version (or the current one).
     fn store(&self, b: Arc<KeyBundle>) {
         let now = Instant::now();
-        let mut cache = self.cache.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self
+            .cache
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.retain(|_, (exp, _)| now < *exp);
         cache.insert(
             self.cache_key(),
@@ -589,7 +593,10 @@ fn check_usable(info: &AzureKeyInfo, op: Operation) -> Result<()> {
 
 /// Azure's name for a signature algorithm.
 fn azure_sig_alg(alg: SignatureAlgorithm, op: Operation) -> Result<&'static str> {
-    use SignatureAlgorithm::*;
+    use SignatureAlgorithm::{
+        EcdsaP256Sha256, EcdsaP384Sha384, EcdsaP521Sha512, RsaPkcs1v15Sha256, RsaPkcs1v15Sha384,
+        RsaPkcs1v15Sha512, RsaPssSha256, RsaPssSha384, RsaPssSha512,
+    };
     Ok(match alg {
         EcdsaP256Sha256 => "ES256",
         EcdsaP384Sha384 => "ES384",
@@ -705,7 +712,9 @@ impl LocalVerifiers {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, LocalState> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The cached verifier of `version`, or the error it is known to fail with. Expired entries
@@ -818,30 +827,27 @@ impl AzureDigestKey {
         let raw = B64URL
             .decode(r.value.as_bytes())
             .map_err(|_| self.k.bad_response(op, "unexpected sign response format"))?;
-        let bytes = match anykms_recipes::ecdsa_der::ecdsa_scalar_len(self.alg) {
-            Some(n) => {
-                if raw.len() != 2 * n {
-                    self.k.forget();
-                    return Err(self
-                        .k
-                        .bad_response(op, "ECDSA signature has an unexpected size"));
-                }
-                anykms_recipes::ecdsa_der::fixed_to_der(&raw, n)
-                    .map_err(|_| self.k.bad_response(op, "unexpected ECDSA signature"))?
+        let bytes = if let Some(n) = anykms_recipes::ecdsa_der::ecdsa_scalar_len(self.alg) {
+            if raw.len() != 2 * n {
+                self.k.forget();
+                return Err(self
+                    .k
+                    .bad_response(op, "ECDSA signature has an unexpected size"));
             }
-            None => {
-                let ok = match modulus_len(bundle.as_ref()) {
-                    Some(k) => raw.len() == k,
-                    None => (256..=2048).contains(&raw.len()),
-                };
-                if !ok {
-                    self.k.forget();
-                    return Err(self
-                        .k
-                        .bad_response(op, "RSA signature has an unexpected size"));
-                }
-                raw
+            anykms_recipes::ecdsa_der::fixed_to_der(&raw, n)
+                .map_err(|_| self.k.bad_response(op, "unexpected ECDSA signature"))?
+        } else {
+            let ok = match modulus_len(bundle.as_ref()) {
+                Some(k) => raw.len() == k,
+                None => (256..=2048).contains(&raw.len()),
+            };
+            if !ok {
+                self.k.forget();
+                return Err(self
+                    .k
+                    .bad_response(op, "RSA signature has an unexpected size"));
             }
+            raw
         };
         Ok(Signature::from_parts(
             self.alg,
@@ -866,15 +872,14 @@ impl AzureDigestKey {
             )
         })?;
         let version = self.k.input_version(v.as_str(), op)?;
-        let raw = match anykms_recipes::ecdsa_der::ecdsa_scalar_len(self.alg) {
-            Some(n) => anykms_recipes::ecdsa_der::der_to_fixed(sig.as_bytes(), n)
-                .map_err(|_| verification_failed("malformed ECDSA signature"))?,
-            None => {
-                if !(256..=2048).contains(&sig.as_bytes().len()) {
-                    return Err(verification_failed("malformed RSA signature"));
-                }
-                sig.as_bytes().to_vec()
+        let raw = if let Some(n) = anykms_recipes::ecdsa_der::ecdsa_scalar_len(self.alg) {
+            anykms_recipes::ecdsa_der::der_to_fixed(sig.as_bytes(), n)
+                .map_err(|_| verification_failed("malformed ECDSA signature"))?
+        } else {
+            if !(256..=2048).contains(&sig.as_bytes().len()) {
+                return Err(verification_failed("malformed RSA signature"));
             }
+            sig.as_bytes().to_vec()
         };
         Ok((version, raw))
     }

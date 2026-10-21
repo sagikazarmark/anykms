@@ -1,6 +1,7 @@
 //! Error taxonomy and hygiene cases, one per key family.
 
 use std::error::Error as _;
+use std::fmt::Write as _;
 
 use anykms_core::prelude::*;
 use anykms_core::{
@@ -280,11 +281,7 @@ pub(crate) async fn parse_uri_is_configuration<F: Fixture>(
 /// gets decimal digits, which every shape accepts. Distinct for each `i` below 1000.
 fn forged_version(own: &KeyVersion, i: u64) -> KeyVersion {
     let s = own.as_str();
-    let run = s
-        .bytes()
-        .rev()
-        .take_while(|b| b.is_ascii_hexdigit())
-        .count();
+    let run = s.bytes().rev().take_while(u8::is_ascii_hexdigit).count();
     let head = &s[..s.len() - run];
     if run >= 8 {
         let keep = &s[s.len() - run..s.len() - 8];
@@ -495,10 +492,25 @@ fn rendered(e: &anykms_core::Error) -> String {
     let mut s = format!("{e}\n{e:?}\n{e:#?}\n");
     let mut src = e.source();
     while let Some(x) = src {
-        s.push_str(&format!("{x}\n{x:?}\n{x:#?}\n"));
+        write!(s, "{x}\n{x:?}\n{x:#?}\n").expect("writing to a String cannot fail");
         src = x.source();
     }
     s
+}
+
+/// Hex of `bytes`, two digits per byte, lowercase or uppercase.
+fn hex(bytes: &[u8], upper: bool) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            if upper {
+                write!(s, "{b:02X}")
+            } else {
+                write!(s, "{b:02x}")
+            }
+            .expect("writing to a String cannot fail");
+            s
+        })
 }
 
 /// The ways a secret could show up in text, each trimmed to a distinctive prefix.
@@ -507,13 +519,13 @@ fn encodings(secret: &[u8]) -> Vec<String> {
     let mut v = vec![
         STANDARD.encode(secret),
         URL_SAFE_NO_PAD.encode(secret),
-        secret.iter().map(|b| format!("{b:02x}")).collect(),
-        secret.iter().map(|b| format!("{b:02X}")).collect(),
+        hex(secret, false),
+        hex(secret, true),
         // `{:?}` of a byte slice or Vec.
         secret
             .iter()
             .take(8)
-            .map(|b| b.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(", "),
     ];

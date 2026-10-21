@@ -31,7 +31,7 @@ pub(crate) fn generate_url(endpoints: &AuthEndpoints, target: &str) -> Result<ur
     }
     let mut u = endpoints.iam_credentials.clone();
     u.path_segments_mut()
-        .map_err(|_| config_err("invalid IAM credentials endpoint"))?
+        .map_err(|()| config_err("invalid IAM credentials endpoint"))?
         .pop_if_empty()
         .extend([
             "v1",

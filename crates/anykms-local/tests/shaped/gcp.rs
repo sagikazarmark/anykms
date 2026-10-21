@@ -831,12 +831,18 @@ fn fixture_err(msg: &'static str) -> anykms_core::Error {
 }
 
 impl Fixture for GcpFixture {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "gcp-shaped"
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, DescribeVersionState, Disable, DisableVersion, EmptyMessage,
+            EmptyPlaintext, Extension, KeyWrap, KeyWrapRewrap, Mac, MinDecryptionVersion,
+            NativeCiphertext, PreflightState, RequestCount, Rewrap, Rotate, RotateKeyWrap,
+            RotateMac, RotateSigning, ServerErrorMessages, Signing, Throttle, UnauthorizedProvider,
+            WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .not_applicable(Feature::BackendInfo, "local keys carry no backend metadata")
             .not_applicable(Feature::KeyWrapPublicKeys, "no RSA key-wrapping keys")

@@ -20,7 +20,7 @@ fn observing() -> (ObserveLayer, Events) {
     let layer = ObserveLayer::new(move |e: &OpEvent<'_>| {
         ev.lock()
             .expect("events")
-            .push((e.part(), e.extension_name(), e.is_ok()))
+            .push((e.part(), e.extension_name(), e.is_ok()));
     });
     (layer, events)
 }
@@ -125,7 +125,7 @@ pub(crate) async fn extension_calls_are_layered<F: Fixture>(c: Ctx<F>) -> CaseRe
         .expect("events")
         .iter()
         .filter(|(p, _, _)| *p == PartKind::Extension)
-        .cloned()
+        .copied()
         .collect();
     ensure!(
         below.len() == 1 && below[0].2,

@@ -217,7 +217,7 @@ impl<T: Clone + Send> CredentialCache<T> {
             }),
             flight: SingleFlight::new(),
             rejected: AtomicU64::new(0),
-            refresh_ahead: Duration::from_secs(5 * 60),
+            refresh_ahead: Duration::from_mins(5),
             refresh_backoff: Duration::from_secs(5),
             forced_interval: Duration::from_secs(30),
         }
@@ -343,15 +343,14 @@ impl<T: Clone + Send> CredentialCache<T> {
             }
             Err(e) => {
                 st.retry_at = now.checked_add(self.refresh_backoff);
-                match st.current.as_ref().filter(|c| !c.expired(now)) {
+                if let Some(c) = st.current.as_ref().filter(|c| !c.expired(now)) {
                     // Still valid: keep using it rather than fail the request. A rejected one
                     // is returned too: its generation is unchanged, so the caller reports the
                     // rejection instead of retrying.
-                    Some(c) => Ok(c.credential()),
-                    None => {
-                        st.last_error = Some(e.clone());
-                        Err(e)
-                    }
+                    Ok(c.credential())
+                } else {
+                    st.last_error = Some(e.clone());
+                    Err(e)
                 }
             }
         }
@@ -366,6 +365,10 @@ impl<T: Clone + Send> CredentialCache<T> {
 
     /// Drops the cached credential and any remembered failure: the next [`get`](Self::get)
     /// fetches.
+    #[allow(
+        clippy::unused_async,
+        reason = "public API: making it synchronous would be a breaking change"
+    )]
     pub async fn clear(&self) {
         let mut st = self.lock();
         st.current = None;
@@ -376,6 +379,7 @@ impl<T: Clone + Send> CredentialCache<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Ready, ready};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
@@ -394,23 +398,31 @@ mod tests {
     }
 
     impl Source {
-        async fn ok(&self, lifetime: Option<Duration>) -> Result<Expiring<String>> {
+        // Ready futures: `CredentialCache::get` awaits the fetch future as soon as it creates it.
+        fn ok(&self, lifetime: Option<Duration>) -> Ready<Result<Expiring<String>>> {
             let n = self.fetches.fetch_add(1, Ordering::SeqCst) + 1;
             let v = format!("token-{n}");
-            Ok(match lifetime {
+            ready(Ok(match lifetime {
                 Some(l) => Expiring::valid_for(v, l),
                 None => Expiring::never_expires(v),
-            })
+            }))
         }
 
-        async fn fail(&self) -> Result<Expiring<String>> {
+        fn fail(&self) -> Ready<Result<Expiring<String>>> {
             self.fetches.fetch_add(1, Ordering::SeqCst);
-            Err(down())
+            ready(Err(down()))
         }
 
         fn count(&self) -> usize {
             self.fetches.load(Ordering::SeqCst)
         }
+    }
+
+    /// How a fetch in [`callers`] ends: success with a lifetime (`None`: never expires) or failure.
+    #[derive(Clone, Copy)]
+    enum Fetch {
+        Ok(Option<Duration>),
+        Fail,
     }
 
     type Shared = (Arc<CredentialCache<String>>, Arc<Source>);
@@ -419,13 +431,13 @@ mod tests {
         (Arc::new(cache), Arc::new(Source::default()))
     }
 
-    /// `n` concurrent callers whose fetch takes `delay` and then succeeds (`lifetime`) or fails
-    /// (`None`); each returns its result and how long it waited.
+    /// `n` concurrent callers whose fetch takes `delay` and then succeeds (`Fetch::Ok(lifetime)`) or fails
+    /// (`Fetch::Fail`); each returns its result and how long it waited.
     async fn callers(
         (cache, src): &Shared,
         n: usize,
         delay: Duration,
-        ok: Option<Option<Duration>>,
+        ok: Fetch,
     ) -> Vec<(Result<Credential<String>>, Duration)> {
         let tasks: Vec<_> = (0..n)
             .map(|_| {
@@ -436,8 +448,8 @@ mod tests {
                         .get(|| async {
                             sleep(delay).await;
                             match ok {
-                                Some(lifetime) => src.ok(lifetime).await,
-                                None => src.fail().await,
+                                Fetch::Ok(lifetime) => src.ok(lifetime).await,
+                                Fetch::Fail => src.fail().await,
                             }
                         })
                         .await;
@@ -455,7 +467,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn lazy_cached_and_single_flight() {
         let s = shared(CredentialCache::new());
-        for (r, _) in callers(&s, 16, Duration::from_millis(20), Some(None)).await {
+        for (r, _) in callers(&s, 16, Duration::from_millis(20), Fetch::Ok(None)).await {
             let c = r.unwrap();
             assert_eq!(c.value(), "token-1");
             assert_eq!(c.generation(), 1);
@@ -474,7 +486,7 @@ mod tests {
     async fn failures_are_shared_and_cached_briefly() {
         let s = shared(CredentialCache::new());
         let started = tokio::time::Instant::now();
-        for (r, waited) in callers(&s, 8, Duration::from_secs(1), None).await {
+        for (r, waited) in callers(&s, 8, Duration::from_secs(1), Fetch::Fail).await {
             assert_eq!(r.unwrap_err().kind(), ErrorKind::Unavailable);
             assert!(waited <= Duration::from_millis(1010), "{waited:?}");
         }
@@ -583,7 +595,7 @@ mod tests {
             .await
             .unwrap();
         // 5 minutes before expiry: due.
-        advance(Duration::from_secs(56 * 60)).await;
+        advance(Duration::from_mins(56)).await;
         let refresh = start_refresh(&s, Duration::from_secs(10)).await;
         let started = tokio::time::Instant::now();
         for _ in 0..8 {
@@ -629,7 +641,7 @@ mod tests {
         let (cache, src) = &s;
         let first = cache.get(|| src.ok(None)).await.unwrap();
         cache.invalidate(&first);
-        for (r, _) in callers(&s, 8, Duration::from_millis(50), Some(None)).await {
+        for (r, _) in callers(&s, 8, Duration::from_millis(50), Fetch::Ok(None)).await {
             assert_eq!(r.unwrap().generation(), 2);
         }
         assert_eq!(src.count(), 2);
@@ -690,7 +702,7 @@ mod tests {
             .get(|| src.ok(Some(Duration::from_secs(3600))))
             .await
             .unwrap();
-        advance(Duration::from_secs(56 * 60)).await;
+        advance(Duration::from_mins(56)).await;
         let refresh = start_refresh(&s, Duration::from_secs(60)).await;
         refresh.abort();
         assert!(refresh.await.unwrap_err().is_cancelled());

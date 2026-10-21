@@ -25,7 +25,7 @@ use crate::fixture::{Feature, Fixture, TestKeyKind};
 ///
 /// [`KeySemantics`]: anykms_core::KeySemantics
 pub(crate) async fn semantics_match_caps<F: Fixture>(c: Ctx<F>) -> CaseResult {
-    use Feature::*;
+    use Feature::{Aead, KeyWrap, Mac, MacInputLimit, MessageInputLimit, Signing, UsedPrimary};
     let has = |f| c.caps.has(f);
     let mut kinds = Vec::new();
     if has(Aead) {
@@ -131,7 +131,10 @@ fn kek_semantics(s: &anykms_core::KeySemantics, what: &str) -> CaseResult {
 /// fixture counts them), and `describe`'s capability bits agree with the declaration. A
 /// backend whose handles claim parts it lacks, or lack parts it has, fails here.
 pub(crate) async fn handles_match_declaration<F: Fixture>(c: Ctx<F>) -> CaseResult {
-    use Feature::*;
+    use Feature::{
+        Aead, DataKeys, Describe, KeyWrap, KeyWrapRewrap, Mac, RequestCount, Rewrap, Signing,
+        WrappedDataKeys,
+    };
     // Probes of missing parts go through a counted provider where there is one.
     let (cc, requests): (Ctx<F>, Option<RequestCounter>) = if c.caps.has(RequestCount) {
         let (cc, r) = c.counting()?;
@@ -338,7 +341,7 @@ fn bits(info: &KeyInfo, bit: Capabilities, expected: bool, what: &str) -> CaseRe
 /// fixture declares (AEAD, key wrapping, then P-256 signing), through the registry and the typed
 /// path alike.
 pub(crate) async fn backend_info<F: Fixture>(c: Ctx<F>) -> CaseResult {
-    use Feature::*;
+    use Feature::{Aead, KeyWrap, Signing};
     let want = c
         .fx
         .backend_info_type()

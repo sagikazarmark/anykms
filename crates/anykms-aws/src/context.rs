@@ -224,6 +224,8 @@ impl GrantTokens {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// The context as JSON, as it goes on the wire.
@@ -245,10 +247,10 @@ mod tests {
         let every_byte: Vec<u8> = (0..=255).collect();
         let every_hex = format!(
             r#"{{"associatedData":"{}"}}"#,
-            every_byte
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            every_byte.iter().fold(String::new(), |mut s, b| {
+                write!(s, "{b:02x}").unwrap();
+                s
+            })
         );
         assert!(
             every_hex.contains("00010203")

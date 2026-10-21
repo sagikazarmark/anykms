@@ -8,7 +8,7 @@ use anykms_core::{
 
 use super::aead::{ensure_version_disabled, state_per_version};
 use super::util::two;
-use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind};
+use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind, require_semantics};
 use crate::fixture::{Feature, Fixture, TestKeyKind};
 
 const DATA: &[u8] = b"token-id-1234";
@@ -50,7 +50,7 @@ pub(crate) async fn failures<F: Fixture>(c: Ctx<F>, alg: MacAlgorithm) -> CaseRe
     let [ka, kb] = two(c.keys(TestKeyKind::Hmac(alg), 2).await?);
     let a = c.mac(&ka.uri, alg).ctx("open a")?;
     let b = c.mac(&kb.uri, alg).ctx("open b")?;
-    let sem = c.semantics_or_caps(a.semantics(), ka.kind)?;
+    let sem = require_semantics(a.semantics(), ka.kind)?;
     let tag = a.mac(DATA).await.ctx("mac")?;
     expect_kind(
         a.verify_mac(b"other", &tag).await,
@@ -182,8 +182,7 @@ pub(crate) async fn rotation<F: Fixture>(c: Ctx<F>, alg: MacAlgorithm) -> CaseRe
 pub(crate) async fn input_limit<F: Fixture>(c: Ctx<F>, alg: MacAlgorithm) -> CaseResult {
     let key = c.key(TestKeyKind::Hmac(alg)).await?;
     let m = c.mac(&key.uri, alg).ctx("open")?;
-    let n = c
-        .semantics_or_caps(m.semantics(), key.kind)?
+    let n = require_semantics(m.semantics(), key.kind)?
         .max_mac_input()
         .ok_or("MacInputLimit is declared, but the MAC handle declares no max_mac_input")?;
     let data = vec![0x42; n];
@@ -223,7 +222,7 @@ pub(crate) async fn disabled_version<F: Fixture>(c: Ctx<F>) -> CaseResult {
         .fresh_key(TestKeyKind::Hmac(MacAlgorithm::HmacSha256))
         .await?;
     let m = c.mac(&key.uri, MacAlgorithm::HmacSha256).ctx("open")?;
-    let sem = c.semantics_or_caps(m.semantics(), key.kind)?;
+    let sem = require_semantics(m.semantics(), key.kind)?;
     let tag = m.mac(DATA).await.ctx("mac")?;
     let v = tag
         .key_version()
@@ -397,9 +396,14 @@ pub(crate) async fn version_algorithms<F: Fixture>(c: Ctx<F>) -> CaseResult {
         .describe()
         .await
         .ctx("describe")?;
-    let reported: Vec<_> = info.versions().iter().map(|v| v.mac_algorithm()).collect();
+    let reported: Vec<_> = info
+        .versions()
+        .iter()
+        .map(anykms_core::KeyVersionInfo::mac_algorithm)
+        .collect();
     ensure!(
-        reported.iter().all(|a| a.is_none()) || reported.iter().all(|a| *a == Some(alg)),
+        reported.iter().all(std::option::Option::is_none)
+            || reported.iter().all(|a| *a == Some(alg)),
         "{alg} key versions report the MAC algorithms {reported:?}"
     );
     ensure!(

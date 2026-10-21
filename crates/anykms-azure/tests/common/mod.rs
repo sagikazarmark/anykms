@@ -111,8 +111,7 @@ pub fn fetch_server_cert_pem(host_port: &str) -> std::result::Result<String, Str
         .with_no_client_auth();
     let host = host_port
         .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(host_port)
+        .map_or(host_port, |(h, _)| h)
         .to_owned();
     let name = rustls::pki_types::ServerName::try_from(host).map_err(|e| e.to_string())?;
     // Every address in turn: `localhost` may resolve to `::1` first while the container
@@ -193,7 +192,10 @@ pub enum Spec {
 
 impl Spec {
     pub fn for_kind(kind: TestKeyKind) -> Option<Self> {
-        use SignatureAlgorithm::*;
+        use SignatureAlgorithm::{
+            EcdsaP256Sha256, EcdsaP384Sha384, EcdsaP521Sha512, RsaPkcs1v15Sha256,
+            RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256, RsaPssSha384, RsaPssSha512,
+        };
         Some(match kind {
             TestKeyKind::KeyWrap => Self::RsaWrap(2048),
             TestKeyKind::Aead => Self::Aes256,
@@ -463,7 +465,7 @@ impl AzureFixture {
     }
 
     /// Lowkey Vault at [`lowkey_host`], or why it is unavailable.
-    pub async fn lowkey() -> std::result::Result<Self, String> {
+    pub fn lowkey() -> std::result::Result<Self, String> {
         let host = lowkey_host();
         let ca = fetch_server_cert_pem(&host)
             .map_err(|e| format!("Lowkey Vault not reachable ({e}); run `docker compose --profile azure up -d lowkey-vault`"))?;
@@ -487,7 +489,7 @@ impl AzureFixture {
 
     /// A live vault (`ANYKMS_AZURE_LIVE=1`, `ANYKMS_AZURE_VAULT_URL`) or Managed HSM
     /// (`ANYKMS_AZURE_MHSM_URL`), with the credential the environment selects, or why not.
-    pub async fn live(mhsm: bool) -> std::result::Result<Self, String> {
+    pub fn live(mhsm: bool) -> std::result::Result<Self, String> {
         if std::env::var("ANYKMS_AZURE_LIVE").ok().as_deref() != Some("1") {
             return Err("ANYKMS_AZURE_LIVE=1 not set".into());
         }
@@ -597,7 +599,14 @@ impl Fixture for AzureFixture {
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, DescribeVersionState, Disable, DisableVersion, EmptyMessage,
+            EmptyPlaintext, Extension, KeyWrap, KeyWrapRewrap, Mac, MacInputLimit,
+            MessageInputLimit, MinDecryptionVersion, NativeCiphertext, OversizePlaintext,
+            PreflightState, RequestCount, Rewrap, RewrapWithAad, Rotate, RotateKeyWrap, RotateMac,
+            RotateSigning, ServerErrorMessages, Signing, Throttle, UnauthorizedProvider,
+            WrappedDataKeys,
+        };
         let mut caps = FixtureCaps::new()
             .supports(Feature::BackendInfo)
             .not_applicable(
@@ -635,28 +644,26 @@ impl Fixture for AzureFixture {
                 &[MessageInputLimit, EmptyMessage],
                 "Azure has no message-signing keys",
             );
-        caps = match self.target {
-            Target::Lowkey => caps
-                .with_emulated_errors("Lowkey Vault")
+        caps = if self.target == Target::Lowkey {
+            caps.with_emulated_errors("Lowkey Vault")
                 .not_applicable(UnauthorizedProvider, "Lowkey Vault accepts any token")
                 .not_applicable_all(
                     &[PreflightState, DescribeVersionState],
                     "Lowkey Vault answers a disabled key's read with 404, so describe and \
                      preflight fail with NotFound (Azure reads it: §24.4 probe T3)",
-                ),
+                )
+        } else {
             // Key states are classified on the inner code (§24.4 probe T3, 2026-10-12).
-            _ => {
-                let caps =
-                    caps.supports_all(&[ServerErrorMessages, PreflightState, DescribeVersionState]);
-                if self.unauthorized.is_some() {
-                    caps.supports(UnauthorizedProvider)
-                } else {
-                    caps.not_applicable(
-                        UnauthorizedProvider,
-                        "set ANYKMS_AZURE_UNAUTHORIZED_TOKEN (a token of an identity without a \
+            let caps =
+                caps.supports_all(&[ServerErrorMessages, PreflightState, DescribeVersionState]);
+            if self.unauthorized.is_some() {
+                caps.supports(UnauthorizedProvider)
+            } else {
+                caps.not_applicable(
+                    UnauthorizedProvider,
+                    "set ANYKMS_AZURE_UNAUTHORIZED_TOKEN (a token of an identity without a \
                          role on the vault)",
-                    )
-                }
+                )
             }
         };
         caps = if self.mhsm() {

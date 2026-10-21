@@ -134,7 +134,7 @@ fn any(messages: &[String], needles: &[&str]) -> bool {
 }
 
 /// Classifies a non-success response.
-pub(crate) fn classify(f: Failure<'_>) -> Error {
+pub(crate) fn classify(f: &Failure<'_>) -> Error {
     let m = f.messages;
     let has = |needles: &[&str]| any(m, needles);
     let (kind, msg, lag): (ErrorKind, &'static str, bool) = match f.status {
@@ -278,7 +278,7 @@ mod tests {
 
     fn k(status: u16, msg: &str) -> ErrorKind {
         let m = vec![msg.to_owned()];
-        classify(Failure {
+        classify(&Failure {
             status,
             messages: &m,
             retry_after: None,
@@ -375,7 +375,7 @@ mod tests {
     fn observed_sign_verify_hmac_messages() {
         let kd = |status: u16, msg: &str| {
             let m = vec![msg.to_owned()];
-            let e = classify(Failure {
+            let e = classify(&Failure {
                 status,
                 messages: &m,
                 retry_after: None,

@@ -622,7 +622,7 @@ mod tests {
         assert!(!format!("{r:?}").contains("hello"));
         match send(client.get(&url), 4).await {
             Err(SendError::TooLarge { status }) => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE)
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             }
             other => panic!("{other:?}"),
         }

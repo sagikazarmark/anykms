@@ -105,7 +105,7 @@ struct WarningsOnly {
 }
 
 /// Unexpected warnings, failing closed on any shape other than a list of allow-listed strings.
-fn unexpected_warning(w: &Option<serde_json::Value>) -> Option<String> {
+fn unexpected_warning(w: Option<&serde_json::Value>) -> Option<String> {
     match w {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::Array(items)) => items.iter().find_map(|i| match i.as_str() {
@@ -189,7 +189,7 @@ impl Server {
         }
         let mut url = self.base.clone();
         url.path_segments_mut()
-            .map_err(|_| config_err("invalid request path"))?
+            .map_err(|()| config_err("invalid request path"))?
             .pop_if_empty()
             .push("v1")
             .extend(segments);
@@ -199,7 +199,7 @@ impl Server {
     async fn send(
         &self,
         call: &Call<'_>,
-        token: &Option<Token>,
+        token: Option<&Token>,
     ) -> Result<(StatusCode, HeaderMap, Zeroizing<Vec<u8>>)> {
         let url = self.url(&call.segments)?;
         let mut req = self
@@ -272,7 +272,7 @@ impl Server {
             .await
             .map_err(|e| e.with_operation(call.op))?;
         anykms_http::span::record_attempt(1);
-        let (mut status, mut headers, mut body) = self.send(call, &token).await?;
+        let (mut status, mut headers, mut body) = self.send(call, token.as_ref()).await?;
         if status == StatusCode::FORBIDDEN
             && let Some(rejected) = &token
         {
@@ -288,7 +288,7 @@ impl Server {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(reason = "token refreshed after 403", "retrying once");
                     anykms_http::span::record_attempt(2);
-                    (status, headers, body) = self.send(call, &fresh).await?;
+                    (status, headers, body) = self.send(call, fresh.as_ref()).await?;
                 }
             }
         }
@@ -299,7 +299,7 @@ impl Server {
                 // still accepts it: fail closed. Malformed JSON is left to the handler, which
                 // reports an unusable response.
                 let warning = match serde_json::from_slice::<WarningsOnly>(&body) {
-                    Ok(w) => unexpected_warning(&w.warnings),
+                    Ok(w) => unexpected_warning(w.warnings.as_ref()),
                     Err(_) if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok() => {
                         Some("<unparsable warnings>".to_owned())
                     }
@@ -334,7 +334,7 @@ impl Server {
         let messages = serde_json::from_slice::<ErrorBody>(&body)
             .map(|b| b.errors)
             .unwrap_or_default();
-        let mut e = classify(Failure {
+        let mut e = classify(&Failure {
             status: status.as_u16(),
             messages: &messages,
             retry_after: anykms_http::client::retry_after(&headers),

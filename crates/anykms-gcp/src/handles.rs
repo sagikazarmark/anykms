@@ -248,14 +248,18 @@ impl KeyCtx {
         self.shared
             .checks
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.check_id(what))
             .is_some_and(|exp| now < *exp)
     }
 
     fn mark_checked(&self, what: &str) {
         let now = Instant::now();
-        let mut c = self.shared.checks.lock().unwrap_or_else(|p| p.into_inner());
+        let mut c = self
+            .shared
+            .checks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         c.retain(|_, exp| now < *exp);
         c.insert(
             self.check_id(what),
@@ -268,7 +272,7 @@ impl KeyCtx {
         self.shared
             .checks
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|k, _| !k.starts_with(&prefix));
     }
 
@@ -311,7 +315,7 @@ impl KeyCtx {
             .shared
             .public_keys
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|(name, (expires, _))| now < *expires && name.starts_with(&prefix));
         if known {
@@ -364,7 +368,7 @@ impl KeyCtx {
     pub(crate) async fn info(&self, op: Operation) -> Result<GcpKeyInfo> {
         let key = self.get_key(op).await?;
         let versions = self.list_versions(op).await?;
-        Ok(GcpKeyInfo::new(key, versions, self.key.version()))
+        Ok(GcpKeyInfo::new(key, &versions, self.key.version()))
     }
 
     /// The public key of version `v`, from the cache or, on a miss, `cryptoKeyVersions.get` and
@@ -400,7 +404,7 @@ impl KeyCtx {
                 .shared
                 .public_keys
                 .lock()
-                .unwrap_or_else(|p| p.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((expires, k)) = cache.get(&name)
                 && now < *expires
             {
@@ -412,7 +416,7 @@ impl KeyCtx {
                     .shared
                     .unknown_versions
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some((expires, e)) = unknown.get(&name)
                     && now < *expires
                 {
@@ -428,7 +432,7 @@ impl KeyCtx {
                         .shared
                         .public_keys
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     cache.retain(|_, (expires, _)| now < *expires);
                     cache.insert(
                         name.clone(),
@@ -438,7 +442,7 @@ impl KeyCtx {
                     self.shared
                         .unknown_versions
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&name);
                 }
                 Ok(k)
@@ -454,7 +458,7 @@ impl KeyCtx {
                     self.shared
                         .public_keys
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&name);
                 }
                 if origin == Origin::Input
@@ -480,7 +484,7 @@ impl KeyCtx {
             .shared
             .unknown_versions
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unknown.retain(|_, (expires, _)| now < *expires);
         if unknown.len() >= MAX_UNKNOWN_VERSIONS
             && !unknown.contains_key(&name)
@@ -622,7 +626,7 @@ enum Check {
 }
 
 impl Check {
-    fn id(&self) -> String {
+    fn id(self) -> String {
         match self {
             Check::Aead => "aead".to_owned(),
             Check::Signing(a) => format!("sign:{}", a.as_str()),
@@ -758,8 +762,8 @@ struct DecryptResp<'a> {
     used_primary: bool,
 }
 
-fn opt_len(s: &Option<Zeroizing<String>>) -> usize {
-    s.as_ref().map_or(0, |s| s.len())
+fn opt_len(s: Option<&Zeroizing<String>>) -> usize {
+    s.map_or(0, |s| s.len())
 }
 
 /// Builds an encrypt request body (also used by the fuzz hook).
@@ -772,7 +776,7 @@ fn encrypt_body(plaintext: &[u8], aad: &[u8]) -> Zeroizing<Vec<u8>> {
         additional_authenticated_data: ad.as_deref().map(String::as_str),
         additional_authenticated_data_crc32c: (!aad.is_empty()).then(|| crc(aad)),
     };
-    body(&req, pt.len() + opt_len(&ad))
+    body(&req, pt.len() + opt_len(ad.as_ref()))
 }
 
 /// Checks and decodes an encrypt response for `key_name`.
@@ -850,7 +854,7 @@ impl GcpAeadKey {
                     Method::POST,
                     None,
                     Some("decrypt"),
-                    Some(body(&req, c.len() + opt_len(&ad))),
+                    Some(body(&req, c.len() + opt_len(ad.as_ref()))),
                     op,
                 ),
                 Origin::Ciphertext,
@@ -977,7 +981,7 @@ fn signature_shape_ok(
     key_type: Option<AsymmetricKeyType>,
     sig: &[u8],
 ) -> bool {
-    use SignatureAlgorithm::*;
+    use SignatureAlgorithm::{EcdsaP256Sha256, EcdsaP384Sha384, EcdsaP521Sha512, Ed25519};
     let der =
         |min: usize, max: usize| sig.len() >= min && sig.len() <= max && sig.first() == Some(&0x30);
     match alg {
@@ -1090,7 +1094,7 @@ impl KeyCtx {
         self.shared
             .public_keys
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.key.version_name(v))
             .map(|(_, k)| k.key.key_type())
     }
@@ -1880,7 +1884,7 @@ pub(crate) fn fuzz_decode_success(which: u8, body: &[u8]) -> bool {
         3 => mac_sign_result(body, ver, MacAlgorithm::HmacSha256, Operation::Mac).is_ok(),
         4 => mac_verify_result(body, ver, Operation::VerifyMac).is_ok(),
         5 => serde_json::from_slice::<KeyJson>(body)
-            .map(|k| GcpKeyInfo::new(k, Vec::new(), Some(1)).to_key_info())
+            .map(|k| GcpKeyInfo::new(k, &[], Some(1)).to_key_info())
             .is_ok(),
         _ => asymmetric_decrypt_result(body, Operation::UnwrapKey).is_ok(),
     }

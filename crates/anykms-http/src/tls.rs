@@ -17,7 +17,8 @@ fn config_err(backend: &'static str, m: &'static str) -> Error {
 /// configuration problem. The facade's `with_default_providers()` skips a cloud provider on it.
 pub fn is_missing_system_roots(error: &Error) -> bool {
     error.kind() == ErrorKind::Configuration
-        && std::error::Error::source(error).is_some_and(|s| s.is::<NoSystemRoots>())
+        && std::error::Error::source(error)
+            .is_some_and(<dyn std::error::Error + 'static>::is::<NoSystemRoots>)
 }
 
 /// The source of the error [`is_missing_system_roots`] recognizes.
@@ -109,7 +110,7 @@ pub fn private_key_from_pem(backend: &'static str, pem: &[u8]) -> Result<Private
     let encrypted = || config_err(backend, "encrypted client keys are not supported");
     let mut lines = pem
         .split(|&b| b == b'\n')
-        .map(|l| l.trim_ascii())
+        .map(<[u8]>::trim_ascii)
         .filter(|l| !l.is_empty());
     while let Some(line) = lines.next() {
         let Some(label) = line
@@ -250,21 +251,18 @@ impl<'a> TlsOptions<'a> {
 
         let err = |m| config_err(backend, m);
         let mut roots = rustls::RootCertStore::empty();
-        match self.ca_pem {
-            Some(pem) => {
-                for cert in CertificateDer::pem_slice_iter(pem) {
-                    let cert = cert.map_err(|_| err("cannot parse the CA certificate PEM"))?;
-                    roots.add(cert).map_err(|_| err("invalid CA certificate"))?;
-                }
-                if roots.is_empty() {
-                    return Err(err("the CA certificate PEM contains no certificates"));
-                }
+        if let Some(pem) = self.ca_pem {
+            for cert in CertificateDer::pem_slice_iter(pem) {
+                let cert = cert.map_err(|_| err("cannot parse the CA certificate PEM"))?;
+                roots.add(cert).map_err(|_| err("invalid CA certificate"))?;
             }
-            None => {
-                let loaded = rustls_native_certs::load_native_certs();
-                for cert in loaded.certs {
-                    let _ = roots.add(cert);
-                }
+            if roots.is_empty() {
+                return Err(err("the CA certificate PEM contains no certificates"));
+            }
+        } else {
+            let loaded = rustls_native_certs::load_native_certs();
+            for cert in loaded.certs {
+                let _ = roots.add(cert);
             }
         }
         if roots.is_empty() && self.require_roots {

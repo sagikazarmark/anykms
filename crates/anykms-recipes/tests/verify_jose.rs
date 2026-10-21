@@ -257,7 +257,7 @@ impl PublicKeys for EcKey {
     }
 
     async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey> {
-        let v = version.as_u64().unwrap() as usize;
+        let v = usize::try_from(version.as_u64().unwrap()).unwrap();
         Ok(self.pk(if self.lie { self.keys.len() } else { v }))
     }
 }
@@ -325,7 +325,7 @@ fn rsa_keys_below_2048_bits_are_refused() {
     assert_eq!(e.kind(), ErrorKind::KeyMismatch);
     let pem = small
         .to_public_key()
-        .to_public_key_pem(Default::default())
+        .to_public_key_pem(rsa::pkcs8::LineEnding::default())
         .unwrap();
     let e = anykms_recipes::public_key_from_pem(&pem, None).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::KeyMismatch);

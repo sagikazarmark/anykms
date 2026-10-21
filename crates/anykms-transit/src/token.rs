@@ -380,7 +380,10 @@ impl FileToken {
         }
         let stamp = FileStamp::of(&meta);
         {
-            let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let (Some((cached, tok)), Some(stamp)) = (&*cache, stamp)
                 && *cached == stamp
             {
@@ -390,7 +393,8 @@ impl FileToken {
         let raw = {
             // Sized for the bound, so the buffer never reallocates (which would leave an unwiped
             // copy). Bounded read: the file may grow between the size check and the read.
-            let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(MAX_TOKEN_FILE as usize + 1));
+            let cap = usize::try_from(MAX_TOKEN_FILE).expect("8 KiB fits in usize") + 1;
+            let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(cap));
             file.take(MAX_TOKEN_FILE + 1)
                 .read_to_end(&mut buf)
                 .map_err(|e| self.unreadable(e))?;
@@ -412,7 +416,10 @@ impl FileToken {
             return Err(self.invalid("contains whitespace or control characters"));
         }
         let tok = Token::new(std::str::from_utf8(s).map_err(|_| self.invalid("is not UTF-8"))?);
-        *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = stamp.map(|s| (s, tok.clone()));
+        *self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp.map(|s| (s, tok.clone()));
         Ok((tok, Fresh::Read))
     }
 }
@@ -429,7 +436,10 @@ impl TokenSource for FileToken {
     }
 
     fn invalidate(&self, rejected: &Token) {
-        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if cache
             .as_ref()
             .is_some_and(|(_, t)| t.expose() == rejected.expose())

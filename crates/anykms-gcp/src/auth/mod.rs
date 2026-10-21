@@ -39,7 +39,7 @@ pub(crate) const MAX_TOKEN_RESPONSE: usize = 64 * 1024;
 /// metadata server hands out its cached token until that token has about 5 minutes left, so a
 /// 5-minute lead would refetch the same token on every request in that window. §24.4 probe T1
 /// confirms the value.
-const REFRESH_AHEAD: Duration = Duration::from_secs(4 * 60);
+const REFRESH_AHEAD: Duration = Duration::from_mins(4);
 
 /// An OAuth 2.0 access token: zeroized on drop, redacted in `Debug`.
 #[derive(Clone)]
@@ -264,20 +264,19 @@ impl AuthEndpoints {
         let u = url::Url::parse(s).map_err(|_| {
             config_err(format!("credential file field `{name}` is not a valid URL"))
         })?;
-        match self.allowed_url(&u, field) {
-            Some(u) => Ok(u),
-            None => {
-                #[cfg(feature = "tracing")]
-                tracing::warn!(
-                    backend = BACKEND,
-                    field = name,
-                    "credential file names a token endpoint other than the fixed one; refused"
-                );
-                Err(config_err(format!(
-                    "credential file field `{name}` must be {}",
-                    field.expected(self.custom.is_some())
-                )))
-            }
+        if let Some(u) = self.allowed_url(&u, field) {
+            Ok(u)
+        } else {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                backend = BACKEND,
+                field = name,
+                "credential file names a token endpoint other than the fixed one; refused"
+            );
+            Err(config_err(format!(
+                "credential file field `{name}` must be {}",
+                field.expected(self.custom.is_some())
+            )))
         }
     }
 }
@@ -647,7 +646,10 @@ impl Fetch for CustomFetch {
     fn fetch(&self) -> BoxFuture<'_, Result<Expiring<Fetched>>> {
         Box::pin(async move {
             let t = self.source.token().await?;
-            *self.last.lock().unwrap_or_else(|p| p.into_inner()) = t.clone();
+            self.last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone_from(&t);
             Ok(match t {
                 None => Expiring::new(Fetched::none(), None),
                 Some(t) => {
@@ -668,7 +670,11 @@ impl Fetch for CustomFetch {
     }
 
     fn rejected(&self) {
-        let last = self.last.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if let Some(t) = last {
             self.source.invalidate(&t);
         }
@@ -844,13 +850,19 @@ impl<F: Fetch> CredentialSource for Cached<F> {
                 expires_at: c.value().expires_at,
                 generation: c.generation(),
             });
-            *self.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(c);
+            *self
+                .last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(c);
             Ok(t)
         })
     }
 
     fn invalidate(&self, rejected: &Token) {
-        let last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        let last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(c) = last.as_ref()
             && c.generation() == rejected.generation
             && rejected.generation != 0
@@ -876,7 +888,8 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<u64> {
     if b[13] != b':' || b[16] != b':' {
         return None;
     }
-    let num = |r: std::ops::Range<usize>| -> Option<u64> {
+    // At most four ASCII digits each, so `i64` holds them losslessly.
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let p = s.get(r)?;
         p.bytes()
             .all(|c| c.is_ascii_digit())
@@ -910,7 +923,6 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<u64> {
         return None;
     }
     // Days from the civil date (Howard Hinnant's algorithm).
-    let (y, mo, d) = (y as i64, mo as i64, d as i64);
     let y = if mo <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -918,7 +930,7 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<u64> {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    let t = days * 86_400 + (h as i64) * 3600 + (mi as i64) * 60 + sec as i64 - offset;
+    let t = days * 86_400 + h * 3600 + mi * 60 + sec - offset;
     u64::try_from(t).ok()
 }
 

@@ -6,6 +6,8 @@
 
 mod e2e;
 
+use std::fmt::Write as _;
+
 use anykms_aws::{EncryptionContext, EncryptionContextAead};
 use anykms_conformance::TestKeyKind;
 use anykms_core::prelude::*;
@@ -202,7 +204,10 @@ async fn alias_repoint_gives_the_hint() {
     let (b, _) = key(&f, TestKeyKind::Aead).await;
     let mut n = [0u8; 6];
     getrandom::fill(&mut n).unwrap();
-    let name: String = n.iter().map(|x| format!("{x:02x}")).collect();
+    let name = n.iter().fold(String::new(), |mut s, x| {
+        write!(s, "{x:02x}").unwrap();
+        s
+    });
     let alias = format!("alias/e2e-{name}");
     f.admin("CreateAlias", json!({"AliasName": alias, "TargetKeyId": a}))
         .await

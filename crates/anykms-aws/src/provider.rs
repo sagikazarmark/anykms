@@ -203,9 +203,7 @@ impl AwsProvider {
         Ok(KeyCtx {
             kms: i.kms.clone(),
             endpoint,
-            check: opts
-                .map(|o| o.key_type_check)
-                .unwrap_or(KeyTypeCheck::Describe),
+            check: opts.map_or(KeyTypeCheck::Describe, |o| o.key_type_check),
             cache: i.cache.clone(),
             public_keys: i.public_keys.clone(),
             resource,

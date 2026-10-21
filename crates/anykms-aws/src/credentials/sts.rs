@@ -85,8 +85,9 @@ impl WebIdentityCredentials {
                 "AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_ARN must be set together",
             ));
         };
-        let mut s = Self::new(file, role).with_vars(vars.clone());
-        s.session_name = vars.get("AWS_ROLE_SESSION_NAME").map(str::to_owned);
+        let session_name = vars.get("AWS_ROLE_SESSION_NAME").map(str::to_owned);
+        let mut s = Self::new(file, role).with_vars(vars);
+        s.session_name = session_name;
         Ok(s)
     }
 
@@ -156,8 +157,7 @@ impl WebIdentityCredentials {
                 "anykms-{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
+                    .map_or(0, |d| d.as_millis())
             ),
         };
         if !(2..=64).contains(&name.len())

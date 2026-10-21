@@ -46,8 +46,15 @@ use zeroize::Zeroizing;
 use crate::around::{Call, CallOutput, Erased};
 use crate::error::{Error, ErrorKind, Operation, Result};
 use crate::semantics::{KeySemantics, Semantics};
-use crate::traits::*;
-use crate::types::*;
+use crate::traits::{
+    Aead, AeadKeyWrap, DataKeys, Describe, DigestSigner, DigestVerifier, ExtensionCalls, KeyWrap,
+    Mac, MessageSigner, MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap,
+    WrappedDataKeys,
+};
+use crate::types::{
+    Capabilities, Ciphertext, DataKey, DataKeySpec, Decrypted, Digest, KeyInfo, KeyState,
+    KeyVersion, MacAlgorithm, PublicKey, Signature, SignatureAlgorithm, Tag,
+};
 
 /// A boxed, `Send` future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -107,14 +114,26 @@ macro_rules! dyn_layer {
         #[doc = concat!("Sealed: implemented for every `T` that implements [`", stringify!($X), "`]; implement the static trait instead.")]
         pub trait $DynX: sealed::Sealed<sealed::$X> + Send + Sync {
             $( #[doc(hidden)] fn $ds(&self, $($sa: $sty),*) -> $sr; )*
-            $( #[doc(hidden)] fn $dm<'a>(&'a self, $($a: &'a $ty),*) -> BoxFuture<'a, $r>; )*
+            $(
+                #[doc(hidden)]
+                #[allow(
+                    clippy::elidable_lifetime_names,
+                    reason = "macro-generated: the lifetime is needed whenever the method has reference arguments"
+                )]
+                fn $dm<'a>(&'a self, $($a: &'a $ty),*) -> BoxFuture<'a, $r>;
+            )*
         }
 
         impl<T: $X> sealed::Sealed<sealed::$X> for T {}
 
         impl<T: $X> $DynX for T {
             $( fn $ds(&self, $($sa: $sty),*) -> $sr { <T as $X>::$s(self, $($sa),*) } )*
-            $( fn $dm<'a>(&'a self, $($a: &'a $ty),*) -> BoxFuture<'a, $r> {
+            $(
+            #[allow(
+                clippy::elidable_lifetime_names,
+                reason = "macro-generated: the lifetime is needed whenever the method has reference arguments"
+            )]
+            fn $dm<'a>(&'a self, $($a: &'a $ty),*) -> BoxFuture<'a, $r> {
                 Box::pin(<T as $X>::$m(self, $($a),*))
             } )*
         }
@@ -252,7 +271,7 @@ impl<T: DataKeys> DynDataKeys for T {
     }
 }
 
-impl<'x> DataKeys for dyn DynDataKeys + 'x {
+impl DataKeys for dyn DynDataKeys + '_ {
     async fn generate_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<DataKey> {
         DynDataKeys::dyn_generate_data_key(self, spec, aad).await
     }
@@ -311,7 +330,7 @@ impl<T: WrappedDataKeys> DynWrappedDataKeys for T {
     }
 }
 
-impl<'x> WrappedDataKeys for dyn DynWrappedDataKeys + 'x {
+impl WrappedDataKeys for dyn DynWrappedDataKeys + '_ {
     async fn generate_wrapped_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<Ciphertext> {
         DynWrappedDataKeys::dyn_generate_wrapped_data_key(self, spec, aad).await
     }
@@ -358,7 +377,7 @@ impl<T: ExtensionCalls> DynExtensionCalls for T {
     }
 }
 
-impl<'x> ExtensionCalls for dyn DynExtensionCalls + 'x {
+impl ExtensionCalls for dyn DynExtensionCalls + '_ {
     async fn run_extension(&self, call: Call<'_>) -> Result<CallOutput> {
         DynExtensionCalls::dyn_run_extension(self, call).await
     }
@@ -667,13 +686,17 @@ impl<L: Layer + ?Sized> Layer for Arc<L> {
         (**self).retries()
     }
     fn part(&self, cx: &LayerCx<'_>, part: Part<'_>) {
-        (**self).part(cx, part)
+        (**self).part(cx, part);
     }
 }
 
 /// Applies a layer to one part (what the removed per-part `Layer` methods did).
 mod wrap {
-    use super::*;
+    use super::{
+        Arc, DynAead, DynDataKeys, DynDescribe, DynDigestSigner, DynDigestVerifier,
+        DynExtensionCalls, DynKeyWrap, DynMac, DynMessageSigner, DynMessageVerifier, DynPreflight,
+        DynPublicKeys, DynRewrap, DynWrappedDataKeys, Layer, LayerCx, Part,
+    };
 
     macro_rules! wrap_fns {
         ($($f:ident: $Dyn:ident => $V:ident),* $(,)?) => {$(
@@ -734,11 +757,8 @@ pub trait OpaqueHandle: sealed::Sealed<sealed::Handle> + Clone + fmt::Debug + Se
 }
 
 /// The layer context of a handle.
-fn layer_cx<'a>(backend: &'static str, resource: &'a Option<Arc<str>>) -> LayerCx<'a> {
-    LayerCx {
-        backend,
-        resource: resource.as_deref(),
-    }
+fn layer_cx<'a>(backend: &'static str, resource: Option<&'a str>) -> LayerCx<'a> {
+    LayerCx { backend, resource }
 }
 
 /// The concrete key behind a handle, for [`downcast_ref`](AeadKey::downcast_ref).
@@ -752,7 +772,7 @@ macro_rules! part_methods {
         #[doc = concat!("Pass the backend's own handle that implements this part. Opaque handles implement the part's `Dyn` trait even when they lack the part, so passing another handle without it makes [`", stringify!($supports), "`](Self::", stringify!($supports), ") true while calls still fail with `Unsupported`.")]
         pub fn $with(mut self, $opt: Arc<dyn $DynOpt>) -> Self {
             let resource = self.resource.clone();
-            let cx = layer_cx(self.backend, &resource);
+            let cx = layer_cx(self.backend, resource.as_deref());
             self.parts.$opt = Some(
                 self.layers
                     .iter()
@@ -1017,7 +1037,8 @@ macro_rules! handle {
                     );
                     return self;
                 }
-                self.parts = self.parts.apply(&*layer, &layer_cx(self.backend, &self.resource));
+                let cx = layer_cx(self.backend, self.resource.as_deref());
+                self.parts = self.parts.apply(&*layer, &cx);
                 self.layers.push(layer);
                 self
             }
@@ -1041,7 +1062,7 @@ macro_rules! handle {
 
             /// Every part rebuilt from the backend's parts with the handle's layers.
             fn rebuild(mut self) -> Self {
-                let cx = layer_cx(self.backend, &self.resource);
+                let cx = layer_cx(self.backend, self.resource.as_deref());
                 self.parts = self
                     .layers
                     .iter()
@@ -1562,7 +1583,7 @@ impl KeyWrapKey {
             extension: key.raw.extension,
         };
         // The AEAD key's layers now wrap the key-wrap part instead of the AEAD part.
-        let cx = layer_cx(key.backend, &key.resource);
+        let cx = layer_cx(key.backend, key.resource.as_deref());
         let parts = key
             .layers
             .iter()
@@ -1811,6 +1832,7 @@ preflight!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{AsymmetricKeyType, HashAlgorithm, KeyVersionInfo};
 
     /// `full`'s bounds are frozen at the parts of 0.1, so backends that call it keep compiling
     /// when a part is added. Adding a bound to any `full` breaks this function: set the new part
@@ -1958,7 +1980,7 @@ mod tests {
             .with_policy(crate::RetryPolicy::immediate());
         let flaky = || {
             Arc::new(FlakyDescribe {
-                calls: Default::default(),
+                calls: std::sync::atomic::AtomicU32::default(),
             })
         };
         let first = flaky();
@@ -2022,7 +2044,7 @@ mod tests {
         let observe = crate::ObserveLayer::new(move |e: &crate::OpEvent<'_>| {
             ev.lock()
                 .unwrap()
-                .push((e.part(), e.operation(), e.error_kind()))
+                .push((e.part(), e.operation(), e.error_kind()));
         });
         let retry = crate::RetryLayer::new(crate::instant_sleep())
             .with_policy(crate::RetryPolicy::immediate());
@@ -2098,6 +2120,10 @@ mod tests {
                 calls: 0.into(),
             })
         }
+        #[allow(
+            clippy::unused_async,
+            reason = "test double for a backend's async network call"
+        )]
         async fn tag(&self, input: &[u8], label: &str) -> Result<Vec<u8>> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut fail = self.fail.lock().unwrap();
@@ -2158,7 +2184,7 @@ mod tests {
         let layer = crate::ObserveLayer::new(move |e: &crate::OpEvent<'_>| {
             ev.lock()
                 .unwrap()
-                .push((e.part(), e.operation(), e.extension_name(), e.is_ok()))
+                .push((e.part(), e.operation(), e.extension_name(), e.is_ok()));
         });
         (layer, events)
     }
@@ -2455,7 +2481,8 @@ mod tests {
             ErrorKind::Unsupported
         );
         // Futures are Send and 'static-capable through tokio::spawn.
-        let h = tokio::spawn(async move { k.encrypt(b"y", b"a").await.map(|c| c.into_bytes()) });
+        let h =
+            tokio::spawn(async move { k.encrypt(b"y", b"a").await.map(Ciphertext::into_bytes) });
         assert_eq!(h.await.unwrap().unwrap(), b"y");
     }
 
@@ -2467,7 +2494,7 @@ mod tests {
     where
         K: Aead + 'static,
     {
-        tokio::spawn(async move { k.encrypt(pt, b"a").await.map(|c| c.into_bytes()) })
+        tokio::spawn(async move { k.encrypt(pt, b"a").await.map(Ciphertext::into_bytes) })
     }
 
     #[tokio::test]
@@ -2714,10 +2741,10 @@ mod tests {
         let layer = crate::RetryLayer::new(crate::instant_sleep())
             .with_policy(crate::RetryPolicy::immediate());
         let fails = Arc::new(Fails {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let flaky = Arc::new(FlakyDescribe {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let k = AeadKey::new("t", fails)
             .layer(&layer)
@@ -2737,7 +2764,7 @@ mod tests {
             .with_policy(crate::RetryPolicy::immediate().with_max_attempts(1));
         let tally = Arc::new(Tally::default());
         let fails = Arc::new(Fails {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let k = AeadKey::new("t", fails.clone())
             .layer(&patient)
@@ -2757,7 +2784,7 @@ mod tests {
         assert!(k.is_retrying());
         // A key-wrap key made from a retrying AEAD key retries through its key-wrap part.
         let fails = Arc::new(Fails {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let kw = KeyWrapKey::from_aead(AeadKey::new("t", fails.clone()).layer(&patient));
         assert!(kw.is_retrying());
@@ -2772,7 +2799,7 @@ mod tests {
         let layer = crate::RetryLayer::new(crate::instant_sleep())
             .with_policy(crate::RetryPolicy::immediate());
         let fails = Arc::new(Fails {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let k: AeadKey = AeadKey::new("t", fails.clone())
             .with_concrete(fails)
@@ -2838,7 +2865,7 @@ mod tests {
     #[tokio::test]
     async fn key_wrap_handles_from_aead_keys() {
         let fails = Arc::new(Fails {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let layer = crate::RetryLayer::new(crate::instant_sleep())
             .with_policy(crate::RetryPolicy::immediate());
@@ -2956,7 +2983,7 @@ mod tests {
                 .with_policy(crate::RetryPolicy::immediate().with_max_attempts(6))
         };
         let down = Arc::new(Down {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let first = layer();
         let second = layer();
@@ -2992,7 +3019,7 @@ mod tests {
             }
         }
         let down = Arc::new(Down {
-            calls: Default::default(),
+            calls: std::sync::atomic::AtomicU32::default(),
         });
         let reg = crate::Registry::builder()
             .provider(P(down.clone()))

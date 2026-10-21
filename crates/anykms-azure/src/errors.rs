@@ -147,7 +147,7 @@ fn input_failure(op: Operation) -> (ErrorKind, &'static str) {
 }
 
 /// Classifies a non-success response.
-pub(crate) fn classify(f: Failure<'_>) -> Error {
+pub(crate) fn classify(f: &Failure<'_>) -> Error {
     let b = f.body;
     let (kind, msg): (ErrorKind, std::borrow::Cow<'static, str>) = match f.status {
         401 => match f.tenant_hint {
@@ -315,7 +315,7 @@ mod tests {
 
     fn k(status: u16, body: &str, op: Operation, class: ReqClass, seen: bool) -> Error {
         let b = ErrorBody::parse(body.as_bytes());
-        classify(Failure {
+        classify(&Failure {
             status,
             body: &b,
             retry_after: None,

@@ -39,6 +39,10 @@ fn authority_from_env(get: EnvGet<'_>) -> Result<String> {
 
 /// The parts every client-credentials exchange shares.
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "`client_id` is the OAuth parameter name and appears in the public types' Debug output"
+)]
 struct Client {
     tenant: String,
     client_id: String,
@@ -150,7 +154,9 @@ impl WorkloadIdentity {
 
     /// The authority host of `cloud`.
     pub fn cloud(mut self, cloud: AzureCloud) -> Self {
-        self.client.authority = cloud.authority_host().to_owned();
+        cloud
+            .authority_host()
+            .clone_into(&mut self.client.authority);
         self
     }
 
@@ -173,7 +179,7 @@ impl WorkloadIdentity {
         })?;
         self.warn_permissions();
         let trimmed = raw.trim_ascii();
-        if trimmed.is_empty() || !trimmed.iter().all(|b| b.is_ascii_graphic()) {
+        if trimmed.is_empty() || !trimmed.iter().all(u8::is_ascii_graphic) {
             return Err(cred_err(
                 ErrorKind::Configuration,
                 format!(
@@ -191,9 +197,7 @@ impl WorkloadIdentity {
         #[cfg(all(unix, feature = "tracing"))]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&self.token_file)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0);
+            let mode = std::fs::metadata(&self.token_file).map_or(0, |m| m.permissions().mode());
             if mode & 0o077 != 0 && !self.warned.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     backend = crate::BACKEND,
@@ -297,7 +301,9 @@ impl ClientSecret {
 
     /// The authority host of `cloud`.
     pub fn cloud(mut self, cloud: AzureCloud) -> Self {
-        self.client.authority = cloud.authority_host().to_owned();
+        cloud
+            .authority_host()
+            .clone_into(&mut self.client.authority);
         self
     }
 }

@@ -2,7 +2,7 @@
 //! token request. A failed resolution is not cached: the next request tries again.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anykms_core::{BoxFuture, Result};
@@ -46,23 +46,25 @@ impl AdcSource {
     }
 
     async fn resolve(&self) -> Result<Arc<dyn CredentialSource>> {
-        let log = |_step: &'static str| {
+        let log = |step: &'static str| {
             #[cfg(feature = "tracing")]
             tracing::info!(
                 backend = crate::BACKEND,
-                source = _step,
+                source = step,
                 "GCP application default credentials selected"
             );
+            #[cfg(not(feature = "tracing"))]
+            let _ = step;
         };
         if let Some(p) = self.ctx.env.get("GOOGLE_APPLICATION_CREDENTIALS") {
             log("GOOGLE_APPLICATION_CREDENTIALS");
-            return self.load_path(PathBuf::from(p)).await;
+            return self.load_path(Path::new(&p));
         }
         if let Some(p) = well_known_file(&self.ctx.env)
             && p.is_file()
         {
             log("gcloud ADC file");
-            return self.load_path(p).await;
+            return self.load_path(&p);
         }
         if metadata::probe(&self.ctx).await {
             log("metadata server");
@@ -75,8 +77,8 @@ impl AdcSource {
     }
 
     /// The file at `p`, read and parsed now (so a broken file fails this resolution).
-    async fn load_path(&self, p: PathBuf) -> Result<Arc<dyn CredentialSource>> {
-        let json = file::read(&p)?;
+    fn load_path(&self, p: &Path) -> Result<Arc<dyn CredentialSource>> {
+        let json = file::read(p)?;
         let built = file::parse(&json, None, &self.ctx)
             .map_err(|e| config_err(format!("{}: {}", p.display(), e.message())))?;
         drop(json);

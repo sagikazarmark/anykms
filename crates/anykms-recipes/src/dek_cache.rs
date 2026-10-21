@@ -161,7 +161,9 @@ impl<K> CachingKeyWrap<K> {
     }
 
     fn lock(&self) -> MutexGuard<'_, Cache> {
-        self.cache.lock().unwrap_or_else(|p| p.into_inner())
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The cached data key, or the current epoch to pass to `put` after a miss.

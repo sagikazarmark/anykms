@@ -330,7 +330,10 @@ async fn key_type_check() {
         .unwrap()
         .with_key_type_check(KeyTypeCheck::TrustCaller);
     k.encrypt(b"x", b"").await.unwrap();
-    assert!(bodies(&server, "DescribeKey").await.is_empty());
+    assert_eq!(
+        bodies(&server, "DescribeKey").await,
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[tokio::test]
@@ -1087,7 +1090,10 @@ async fn rsa_key_wrap() {
     assert_eq!(wrapped.len(), 256);
     // Wrapped locally: no Encrypt request; the public key is fetched once.
     kek.wrap_key(&[6u8; 32]).await.unwrap();
-    assert!(bodies(&server, "Encrypt").await.is_empty());
+    assert_eq!(
+        bodies(&server, "Encrypt").await,
+        [] as [serde_json::Value; 0]
+    );
     assert_eq!(bodies(&server, "GetPublicKey").await.len(), 1);
     // The wrap is real RSA-OAEP-SHA-256 under the key.
     let pk8 = std::fs::read(concat!(
@@ -1546,7 +1552,7 @@ async fn recorded_aws_error_responses() {
     for r in &recorded {
         let name = r["name"].as_str().unwrap();
         let (_, kind, pinned) = want.iter().find(|w| w.0 == name).expect(name);
-        let status = r["status"].as_u64().unwrap() as u16;
+        let status = u16::try_from(r["status"].as_u64().unwrap()).unwrap();
         let rid = r["headers"]["x-amzn-requestid"].as_str().unwrap();
         // Real AWS sends no x-amzn-ErrorType header: the type is only in the body.
         assert!(r["headers"].get("x-amzn-errortype").is_none(), "{name}");
@@ -1581,7 +1587,7 @@ async fn recorded_aws_error_responses() {
                     d.server_message,
                     Some(ServerMessage::Known((*p).into())),
                     "{name}"
-                )
+                );
             }
             (Some(m), None) => {
                 assert!(
@@ -2205,7 +2211,10 @@ async fn public_keys_of_unusable_keys_are_refused() {
             .kind(),
         ErrorKind::PermissionDenied
     );
-    assert!(bodies(&server, "GetPublicKey").await.is_empty());
+    assert_eq!(
+        bodies(&server, "GetPublicKey").await,
+        [] as [serde_json::Value; 0]
+    );
 }
 
 /// R-34: concurrent first uses of a key, through handles opened separately from one provider,

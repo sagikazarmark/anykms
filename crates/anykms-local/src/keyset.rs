@@ -249,6 +249,13 @@ impl KeyEntry {
         self.versions.len() as u64
     }
 
+    /// Material of `version`, which the caller has checked is in `1..=self.latest()`.
+    fn material(&self, version: u64) -> &Material {
+        let version =
+            usize::try_from(version).expect("version <= latest() == versions.len() fits in usize");
+        &self.versions[version - 1].0
+    }
+
     pub(crate) fn usable(&self, op: Operation) -> Result<()> {
         match &self.state {
             KeyState::Enabled => Ok(()),
@@ -280,7 +287,7 @@ impl KeyEntry {
                 "key version is below the minimum decryption version",
             ));
         }
-        Ok(&self.versions[version as usize - 1].0)
+        Ok(self.material(version))
     }
 
     /// Material of `version` (taken from input) for public-key reads: a version this key does
@@ -297,13 +304,13 @@ impl KeyEntry {
                 "key version not found (or below the minimum decryption version)",
             ));
         }
-        Ok(&self.versions[version as usize - 1].0)
+        Ok(self.material(version))
     }
 
     pub(crate) fn primary(&self, op: Operation) -> Result<(u64, &Material)> {
         self.usable(op)?;
         let v = self.latest();
-        Ok((v, &self.versions[v as usize - 1].0))
+        Ok((v, self.material(v)))
     }
 }
 
@@ -415,7 +422,10 @@ impl LocalKeyset {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, HashMap<String, KeyEntry>> {
-        self.inner.keys.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner
+            .keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Adds (or replaces) a key with fresh material at version 1.
@@ -521,7 +531,7 @@ impl LocalKeyset {
         self.inner
             .faults
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(fault);
     }
 
@@ -530,13 +540,17 @@ impl LocalKeyset {
         self.inner
             .faults
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
     }
 
     /// Consumes one pending fault that targets `op` on `key`, if any, and returns its error.
     pub(crate) fn take_fault(&self, op: Operation, key: &str) -> Result<()> {
-        let mut faults = self.inner.faults.lock().unwrap_or_else(|p| p.into_inner());
+        let mut faults = self
+            .inner
+            .faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Faults with no remaining count never fire and never hide the next one.
         faults.retain(|f| f.times > 0);
         let Some(idx) = faults.iter().position(|f| f.matches(op, key)) else {

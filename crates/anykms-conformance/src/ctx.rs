@@ -428,25 +428,11 @@ impl<F: Fixture> Ctx<F> {
         self.fx.unauthorized_provider()
     }
 
-    /// The semantics a case relies on for a handle of `kind`: the handle's own `declared`
-    /// [`KeySemantics`]. A handle that declares none fails the case: every handle a backend
-    /// opens for a key family states its semantics.
-    pub(crate) fn semantics_or_caps(
-        &self,
-        declared: Option<&KeySemantics>,
-        kind: TestKeyKind,
-    ) -> Result<KeySemantics, String> {
-        declared.cloned().ok_or_else(|| {
-            format!("the {kind:?} handle declares no KeySemantics (Semantics::semantics is None)")
-        })
-    }
-
-    /// The semantics of `key`'s handle on this path (see
-    /// [`semantics_or_caps`](Self::semantics_or_caps)): the AEAD, key-wrapping, MAC or signing
-    /// handle of the key's kind, opened without I/O.
+    /// The semantics of `key`'s handle on this path (see [`require_semantics`]): the AEAD,
+    /// key-wrapping, MAC or signing handle of the key's kind, opened without I/O.
     pub(crate) fn semantics(&self, key: &TestKey) -> Result<KeySemantics, String> {
         let declared = self.declared_semantics(key).ctx("open for semantics")?;
-        self.semantics_or_caps(declared.as_ref(), key.kind)
+        require_semantics(declared.as_ref(), key.kind)
     }
 
     /// The [`KeySemantics`] the handle of `key`'s kind declares on this path, if any.
@@ -464,6 +450,18 @@ impl<F: Fixture> Ctx<F> {
             TestKeyKind::Signing(alg) => self.digest_signer(&key.uri, alg)?.semantics().cloned(),
         })
     }
+}
+
+/// The semantics a case relies on for a handle of `kind`: the handle's own `declared`
+/// [`KeySemantics`]. A handle that declares none fails the case: every handle a backend opens
+/// for a key family states its semantics.
+pub(crate) fn require_semantics(
+    declared: Option<&KeySemantics>,
+    kind: TestKeyKind,
+) -> Result<KeySemantics, String> {
+    declared.cloned().ok_or_else(|| {
+        format!("the {kind:?} handle declares no KeySemantics (Semantics::semantics is None)")
+    })
 }
 
 /// Converts an anykms result into a case result with context.

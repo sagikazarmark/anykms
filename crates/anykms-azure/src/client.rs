@@ -100,7 +100,7 @@ impl Client {
             tokens,
             api_version,
             max_response_bytes,
-            versionless_refused: Default::default(),
+            versionless_refused: std::sync::Mutex::default(),
             cache_ttl,
             requests: None,
         }
@@ -110,7 +110,7 @@ impl Client {
     pub(crate) fn versionless_refused(&self, host: &str) -> bool {
         self.versionless_refused
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(host)
     }
 
@@ -118,7 +118,7 @@ impl Client {
     pub(crate) fn refuse_versionless(&self, host: &str) {
         self.versionless_refused
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(host.to_owned());
     }
 
@@ -131,7 +131,7 @@ impl Client {
         let mut url = reqwest::Url::parse(&target.base_url())
             .map_err(|_| config_err(Operation::Configure, "invalid vault host"))?;
         url.path_segments_mut()
-            .map_err(|_| config_err(Operation::Configure, "invalid vault host"))?
+            .map_err(|()| config_err(Operation::Configure, "invalid vault host"))?
             .pop_if_empty()
             .extend(segments);
         url.query_pairs_mut()
@@ -282,7 +282,7 @@ impl Client {
         };
         let parsed = ErrorBody::parse(&body);
         drop(body);
-        Err(classify(Failure {
+        Err(classify(&Failure {
             status: status.as_u16(),
             body: &parsed,
             retry_after: anykms_http::client::retry_after(&headers),

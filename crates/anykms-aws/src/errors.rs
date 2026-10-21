@@ -91,7 +91,9 @@ pub(crate) fn parse_error(headers: &HeaderMap, body: &[u8]) -> (Option<String>, 
                 .as_deref()
                 .and_then(normalize_code)
                 .map(str::to_owned),
-            b.message.or(b.message_upper).map(|m| m.into_owned()),
+            b.message
+                .or(b.message_upper)
+                .map(std::borrow::Cow::into_owned),
         ),
         None => (None, None),
     };

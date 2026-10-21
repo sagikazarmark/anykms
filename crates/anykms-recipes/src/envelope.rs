@@ -439,11 +439,13 @@ fn serialize(
             "wrapped data key has an unsupported size",
         ));
     }
+    let kek_id_len = u8::try_from(kek_id.len()).expect("kek_id.len() <= MAX_KEK_ID (255)");
+    let wrapped_len = u16::try_from(wrapped.len()).expect("wrapped.len() <= MAX_WRAPPED (4096)");
     let mut out = header(VERSION_1, flags, commit, nonce);
     out.reserve(1 + kek_id.len() + 2 + wrapped.len() + payload.len());
-    out.push(kek_id.len() as u8);
+    out.push(kek_id_len);
     out.extend_from_slice(kek_id);
-    out.extend_from_slice(&(wrapped.len() as u16).to_be_bytes());
+    out.extend_from_slice(&wrapped_len.to_be_bytes());
     out.extend_from_slice(wrapped);
     out.extend_from_slice(payload);
     Ok(out)

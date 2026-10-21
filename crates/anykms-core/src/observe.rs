@@ -30,8 +30,14 @@ use crate::around::{Around, Call, CallCx, CallOutput};
 use crate::dynamic::{BoxFuture, Layer, LayerCx, Part, PartKind};
 use crate::error::{ErrorKind, Operation, Result};
 use crate::retry::{ClockFn, std_clock};
-use crate::traits::*;
-use crate::types::*;
+use crate::traits::{
+    Aead, DataKeys, Describe, DigestSigner, DigestVerifier, ExtensionCalls, KeyWrap, Mac,
+    MessageSigner, MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, WrappedDataKeys,
+};
+use crate::types::{
+    Ciphertext, DataKey, DataKeySpec, Decrypted, Digest, KeyInfo, KeyVersion, MacAlgorithm,
+    PublicKey, Signature, SignatureAlgorithm, Tag,
+};
 
 /// One finished or [cancelled](Self::is_cancelled) operation, reported by an [`ObserveLayer`].
 /// Holds no input or output data.
@@ -104,7 +110,7 @@ impl<'a> OpEvent<'a> {
 
     /// The error kind, for a failed operation.
     pub fn error_kind(&self) -> Option<ErrorKind> {
-        self.error.map(|e| e.kind())
+        self.error.map(crate::Error::kind)
     }
 
     /// The error, for a failed operation (its backend, resource, retry hints, ...).
@@ -597,7 +603,7 @@ mod tests {
         let layer = ObserveLayer::new(move |e: &OpEvent<'_>| {
             l.lock()
                 .unwrap()
-                .push((e.part(), e.operation(), e.error_kind()))
+                .push((e.part(), e.operation(), e.error_kind()));
         });
         (layer, log)
     }
@@ -671,7 +677,7 @@ mod tests {
         let observe = ObserveLayer::new(move |e: &OpEvent<'_>| {
             s.lock()
                 .unwrap()
-                .push((e.backend(), e.resource().map(str::to_owned)))
+                .push((e.backend(), e.resource().map(str::to_owned)));
         });
         let flaky = || {
             Arc::new(Flaky {
@@ -748,7 +754,7 @@ mod tests {
                 e.is_cancelled(),
                 e.error_kind(),
                 e.outcome(),
-            ))
+            ));
         });
         let timeout = Duration::from_millis(10);
         let k = AeadKey::new("t", Arc::new(Hang)).layer(&observe);

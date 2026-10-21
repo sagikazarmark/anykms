@@ -7,5 +7,5 @@
 mod common;
 
 fn main() -> std::process::ExitCode {
-    anykms_conformance::run_or_skip(async || common::AzureFixture::live(true).await)
+    anykms_conformance::run_or_skip(async || common::AzureFixture::live(true))
 }

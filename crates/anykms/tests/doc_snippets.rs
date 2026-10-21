@@ -15,7 +15,7 @@
 //!
 //! Not part of the published package (`exclude` in Cargo.toml): it reads files outside the crate.
 
-#![allow(unused, clippy::all)]
+#![allow(unused, clippy::all, clippy::pedantic)]
 
 use std::collections::BTreeMap;
 use std::path::Path;

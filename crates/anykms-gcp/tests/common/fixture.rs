@@ -417,7 +417,13 @@ impl Fixture for GcpFixture {
     }
 
     async fn probe(&self) -> FixtureCaps {
-        use Feature::*;
+        use Feature::{
+            Aead, DataKeys, Describe, DescribeVersionState, Disable, DisableVersion, EmptyMessage,
+            EmptyPlaintext, Extension, KeyWrap, KeyWrapRewrap, Mac, MinDecryptionVersion,
+            NativeCiphertext, PreflightState, RequestCount, Rewrap, RewrapWithAad, Rotate,
+            RotateKeyWrap, RotateMac, RotateSigning, ServerErrorMessages, Signing, Throttle,
+            UnauthorizedProvider, WrappedDataKeys,
+        };
         let max = 64 * 1024;
         let mut caps = FixtureCaps::new()
             .supports(Feature::BackendInfo)

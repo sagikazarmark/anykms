@@ -159,7 +159,7 @@ fn service_account(f: CredFile, _ctx: &AuthCtx) -> Result<Built> {
         source: Arc::new(Cached::new(super::service_account::SelfSignedJwt::new(
             require(f.client_email, kind, "client_email")?,
             f.private_key_id,
-            require(f.private_key, kind, "private_key")?,
+            &require(f.private_key, kind, "private_key")?,
             f.quota_project_id,
         )?)),
         kind,
@@ -304,8 +304,9 @@ impl super::Fetch for AuthorizedUser {
                 ("client_secret", self.client_secret.0.as_bytes()),
                 ("refresh_token", self.refresh_token.0.as_bytes()),
             ]);
-            let resp =
-                oauth::send(WHAT, oauth::post_form(&self.http, &self.token_url, body)).await?;
+            let req = oauth::post_form(&self.http, &self.token_url, &body);
+            drop(body);
+            let resp = oauth::send(WHAT, req).await?;
             oauth::parse_oauth_token(WHAT, &resp)
         })
     }

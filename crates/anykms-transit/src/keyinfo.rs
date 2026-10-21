@@ -320,11 +320,11 @@ mod tests {
         let sym = br#"{"data":{"type":"aes256-gcm96","latest_version":2,"min_decryption_version":2,"keys":{"2":1791056022},"derived":false}}"#;
         let i = TransitKeyInfo::parse(sym).unwrap();
         assert!(i.parsed_type.is_aead());
-        assert_eq!(i.versions.get(&2), Some(&Some(1791056022)));
+        assert_eq!(i.versions.get(&2), Some(&Some(1_791_056_022)));
         let asym = br#"{"data":{"type":"ecdsa-p256","latest_version":1,"keys":{"1":{"creation_time":"2026-10-03T19:33:42.291260574Z","name":"P-256","public_key":"PEM"}}}}"#;
         let i = TransitKeyInfo::parse(asym).unwrap();
         assert_eq!(i.public_keys.get(&1).map(String::as_str), Some("PEM"));
-        assert_eq!(i.versions.get(&1), Some(&Some(1791056022)));
+        assert_eq!(i.versions.get(&1), Some(&Some(1_791_056_022)));
         let hmac = br#"{"data":{"type":"hmac","latest_version":1,"keys":null}}"#;
         assert!(TransitKeyInfo::parse(hmac).unwrap().versions.is_empty());
         assert_eq!(TransitKeyType::parse("rsa-3072"), TransitKeyType::Rsa(3072));
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn rfc3339() {
-        let z = Some(1791056022);
+        let z = Some(1_791_056_022);
         assert_eq!(rfc3339_to_unix("2026-10-03T19:33:42.291260574Z"), z);
         assert_eq!(rfc3339_to_unix("2026-10-03T19:33:42Z"), z);
         assert_eq!(rfc3339_to_unix("2026-10-03T21:33:42+02:00"), z);

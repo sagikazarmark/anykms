@@ -5,6 +5,7 @@
 //! `x-amz-date`, `x-amz-target` and, for temporary credentials, `x-amz-security-token`.
 //! The derived signing key lives in a zeroizing buffer.
 
+use std::fmt::Write as _;
 use std::time::SystemTime;
 
 use hmac::Mac as _;
@@ -111,7 +112,7 @@ pub fn uri_encode(s: &str, keep_slash: bool) -> String {
         {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
