@@ -6,8 +6,8 @@
   packages = with pkgs; [
     just
     jq
-    # `just wasm`: wasm-bindgen-test-runner runs the wasm32 tests under Node.
-    nodejs
+
+    lld
 
     cargo-audit
     cargo-deny
@@ -24,7 +24,13 @@
       # `just wasm`: the transport-free crates on a JS host.
       targets = [ "wasm32-unknown-unknown" ];
 
-      lld.enable = true;
+      # lld.enable = true;
+    };
+
+    javascript = {
+      enable = true;
+
+      npm.enable = true;
     };
   };
 
