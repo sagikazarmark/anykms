@@ -243,6 +243,14 @@ impl AwsProviderBuilder {
         self
     }
 
+    /// Whether a transport is set ([`http_transport`](Self::http_transport), or the one
+    /// `AWS_CA_BUNDLE` built in [`from_env`](Self::from_env)). Without one, [`build`](Self::build)
+    /// makes a default `ReqwestTransport`; an application that shares one transport across
+    /// providers sets it only then.
+    pub fn has_http_transport(&self) -> bool {
+        self.http_transport.is_some()
+    }
+
     /// The largest response accepted (default 256 KiB; at least 64 KiB, `Configuration` at
     /// `build()` otherwise).
     pub fn max_response_bytes(mut self, n: usize) -> Self {

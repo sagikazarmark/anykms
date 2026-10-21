@@ -21,8 +21,11 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   one, and a third-party transport is responsible for its own. `ReqwestTransport`: rustls (see
   [Cargo features](features.md#cargo-features)); `ca_pem` replaces the system roots; there is no
   way to skip verification; redirects are never followed; a configured proxy is bypassed for
-  link-local and loopback hosts (the cloud metadata servers). The backends keep the host policy:
-  plain HTTP only for literal loopback IPs, and only when opted in. Whatever the transport, the
+  link-local and loopback hosts (the cloud metadata servers). The backends keep the host policy
+  for key endpoints: plain HTTP only for literal loopback IPs, and only when opted in. The one
+  plain-HTTP exception needs no opt-in: the built-in credential sources talk to the cloud
+  metadata servers over `http://` on their link-local addresses (`169.254.169.254`,
+  `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`), as every cloud SDK does. Whatever the transport, the
   response limit is enforced twice (by the transport and again by the backend), so an oversized
   body never reaches a backend. Transport failures map to a fixed set of classes
   (`anykms_http::SendError`): a rejected or mismatched certificate is `Configuration` and not
@@ -77,9 +80,10 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   Workers advance both clocks only across I/O. Without `js`, the target behaves as before (the
   std clock panics on first use); WASI targets have a working clock and never need it. The HTTP
   backends are **not** supported there yet: the built-in transport needs TLS control the host
-  does not offer. With the `reqwest` feature off their dependency tree holds no reqwest, hyper
-  or rustls (CI checks this), so a host-specific `HttpTransport` (a `fetch`-based one, say) is
-  the way there; it is tracked in the issue tracker.
+  does not offer. With the `reqwest` feature off (and the `rustls-*` provider features with it)
+  their dependency tree holds no reqwest, hyper or rustls (CI checks this), so a host-specific
+  `HttpTransport` (a `fetch`-based one, say) is the way there; it is tracked in the issue
+  tracker.
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
   `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its

@@ -263,9 +263,16 @@ pub(crate) fn cred_config_err(m: impl Into<Cow<'static, str>>) -> Error {
 /// The HTTP transport a built-in credential fetches tokens through: the provider's, handed over
 /// by [`AzureCredential::bind_transport`] when the provider is built (the first binding wins);
 /// before that (a credential used on its own), the default transport, built on first use and
-/// kept. A clone starts with an empty slot, so a cloned credential can serve another provider.
+/// kept until a provider binds its own. A clone starts with an empty slot, so a cloned credential
+/// can serve another provider.
 #[derive(Default)]
-pub(crate) struct TransportSlot(Mutex<Option<Arc<dyn HttpTransport>>>);
+pub(crate) struct TransportSlot(Mutex<Option<Held>>);
+
+/// What a slot holds: a provider's transport, or the default one built for standalone use.
+enum Held {
+    Bound(Arc<dyn HttpTransport>),
+    Default(Arc<dyn HttpTransport>),
+}
 
 impl Clone for TransportSlot {
     fn clone(&self) -> Self {
@@ -275,8 +282,17 @@ impl Clone for TransportSlot {
 
 impl fmt::Debug for TransportSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = match &*self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            None => "empty",
+            Some(Held::Bound(_)) => "bound",
+            Some(Held::Default(_)) => "default",
+        };
         f.debug_struct("TransportSlot")
-            .field("bound", &self.0.lock().is_ok_and(|t| t.is_some()))
+            .field("transport", &state)
             .finish()
     }
 }
@@ -286,12 +302,16 @@ impl TransportSlot {
         Self::default()
     }
 
-    /// Binds `transport` unless one is bound already.
+    /// Binds `transport` unless a provider's transport is bound already; a default built for
+    /// standalone use (a token fetched before the provider was built) is replaced.
     pub(crate) fn bind(&self, transport: Arc<dyn HttpTransport>) {
-        self.0
+        let mut slot = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert(transport);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(&*slot, Some(Held::Bound(_))) {
+            *slot = Some(Held::Bound(transport));
+        }
     }
 
     pub(crate) fn get(&self) -> Result<Arc<dyn HttpTransport>> {
@@ -299,11 +319,11 @@ impl TransportSlot {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(t) = &*slot {
+        if let Some(Held::Bound(t) | Held::Default(t)) = &*slot {
             return Ok(t.clone());
         }
         let t = anykms_http::default_transport(BACKEND, true)?;
-        *slot = Some(t.clone());
+        *slot = Some(Held::Default(t.clone()));
         Ok(t)
     }
 }

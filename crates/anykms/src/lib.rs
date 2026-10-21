@@ -326,20 +326,15 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
             None => anykms_aws::AwsProviderBuilder::from_env(),
             Some(l) => anykms_aws::AwsProviderBuilder::from_env_with(share(l)),
         };
-        // `AWS_CA_BUNDLE` configures a transport of its own (the builder keeps it), so the shared
-        // one, and whether it could be built, does not matter to AWS then.
-        let own_transport = match lookup {
-            Some(l) => l("AWS_CA_BUNDLE"),
-            None => std::env::var("AWS_CA_BUNDLE").ok(),
-        }
-        .is_some_and(|v| !v.is_empty());
-        d = if own_transport {
-            d.provider(built?.build()?)
-        } else {
-            d.cloud("aws", anykms_aws::SCHEMES, &shared, built, |b, t| {
+        // `AWS_CA_BUNDLE` configures a transport of its own (the builder keeps it); the shared one
+        // is for a builder without.
+        d = d.cloud("aws", anykms_aws::SCHEMES, &shared, built, |b, t| {
+            if b.has_http_transport() {
+                b
+            } else {
                 b.http_transport(t)
-            })?
-        };
+            }
+        })?;
     }
     #[cfg(not(feature = "aws"))]
     d.skipped.push(SkippedProvider {
@@ -632,12 +627,14 @@ impl DefaultProviders {
     }
 
     /// Registers a cloud provider configured from the environment (`builder`) over the shared
-    /// transport (`with` attaches it), or skips it when there is no transport: no system TLS
-    /// roots ([`SkipCause::TlsRoots`]) or no `reqwest` feature ([`SkipCause::FeatureDisabled`]).
-    /// A malformed environment is an error.
+    /// transport (`with` attaches it). Without a shared transport: no `reqwest` feature skips it
+    /// ([`SkipCause::FeatureDisabled`]); no system TLS roots lets the builder try its own default
+    /// (a loopback `http://` emulator or a CA bundle of its own needs none) and skips it only when
+    /// that fails for the same reason ([`SkipCause::TlsRoots`]). A malformed environment is an
+    /// error.
     #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
     fn cloud<B, P: Provider + 'static>(
-        mut self,
+        self,
         backend: &'static str,
         schemes: &'static [&'static str],
         shared: &SharedTransport,
@@ -648,19 +645,32 @@ impl DefaultProviders {
         B: BuildProvider<P>,
     {
         let builder = builder?;
+        let skip = |mut d: Self, cause: SkipCause, reason: &'static str| {
+            d.skipped.push(SkippedProvider {
+                backend,
+                cause,
+                reason,
+                schemes,
+            });
+            d
+        };
         match shared {
             SharedTransport::Ready(t) => {
                 Ok(self.provider(with(builder, t.clone()).build_provider()?))
             }
-            SharedTransport::Skip { cause, reason } => {
-                self.skipped.push(SkippedProvider {
-                    backend,
-                    cause: *cause,
-                    reason,
-                    schemes,
-                });
-                Ok(self)
-            }
+            // Only the built-in transport can fail for want of roots.
+            #[cfg(feature = "reqwest")]
+            SharedTransport::Skip {
+                cause: SkipCause::TlsRoots,
+                reason,
+            } => match builder.build_provider() {
+                Ok(p) => Ok(self.provider(p)),
+                Err(e) if anykms_http::tls::is_missing_system_roots(&e) => {
+                    Ok(skip(self, SkipCause::TlsRoots, reason))
+                }
+                Err(e) => Err(e),
+            },
+            SharedTransport::Skip { cause, reason } => Ok(skip(self, *cause, reason)),
         }
     }
 
@@ -1300,6 +1310,37 @@ mod tests {
                 &format!("({backend}: no trusted CA certificates (system roots unavailable))"),
             );
         });
+    }
+
+    /// Without system roots, a cloud provider whose configuration needs none (a loopback
+    /// `http://` emulator endpoint) is still registered: the builder's own default transport
+    /// serves it.
+    #[cfg(all(
+        feature = "aws",
+        feature = "reqwest",
+        any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
+    ))]
+    #[test]
+    fn missing_tls_roots_keep_a_loopback_aws_emulator() {
+        let vars = [
+            NO_AZURE,
+            ("SSL_CERT_FILE", "/dev/null"),
+            ("AWS_ENDPOINT_URL_KMS", "http://127.0.0.1:4566"),
+            ("ANYKMS_AWS_ALLOW_LOOPBACK_HTTP", "1"),
+        ];
+        isolated(
+            "missing_tls_roots_keep_a_loopback_aws_emulator",
+            &vars,
+            || {
+                let d = with_default_providers().unwrap();
+                assert!(
+                    d.skipped().iter().all(|s| s.backend() != "aws"),
+                    "{:?}",
+                    d.skipped()
+                );
+                d.build().unwrap().aead(AWS_URI).unwrap();
+            },
+        );
     }
 
     /// Transit is configured by its address, so without TLS roots it keeps failing.

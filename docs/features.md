@@ -36,7 +36,7 @@ one.
 | `gcp-google-cloud-auth` | | access tokens from Google's `google-cloud-auth` for `gcp` (`Credentials::google_cloud_auth`: AWS- and executable-sourced workload identity federation and the other credential types not built in) |
 | `azure` | | Azure Key Vault and Managed HSM (`azure-kv://<host>/keys/...`; see [docs/operations-azure.md](operations-azure.md)); for Managed HSM HMAC (experimental `mhsm-hmac`), depend on `anykms-azure` directly |
 | `azure-identity` | | credentials from the Azure SDK for `azure` (`anykms_azure::AzureIdentity` over an `azure_identity` credential: the Azure CLI, certificates, ...) |
-| `reqwest` | yes | the built-in HTTP transport of the HTTP backends (`anykms_http::ReqwestTransport`: reqwest over rustls). Without it, each HTTP backend needs a transport through its builder's `.http_transport(..)`, and `with_default_providers` skips the HTTP backends; the dependency tree then holds no reqwest, hyper or rustls |
+| `reqwest` | yes | the built-in HTTP transport of the HTTP backends (`anykms_http::ReqwestTransport`: reqwest over rustls). Without it, each HTTP backend needs a transport through its builder's `.http_transport(..)`, and `with_default_providers` skips the HTTP backends; the dependency tree then holds no reqwest or hyper, and no rustls either as long as the `rustls-*` features stay off too (they are provider features of the built-in transport) |
 | `http2` | | allow HTTP/2 in the built-in transport (`ReqwestTransportBuilder::http2`) |
 | `local` | | in-memory keys, development and tests only |
 | `tracing` | | spans and events (no secrets) |

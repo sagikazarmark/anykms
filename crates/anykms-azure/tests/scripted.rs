@@ -238,3 +238,25 @@ async fn a_credential_binds_to_its_first_provider_and_a_clone_to_the_next() {
     assert_eq!(t4.count(), 1, "{:?}", t4.seen());
     assert_vault(&t4.seen()[0], "mi-3b");
 }
+
+/// A token fetched before the credential joins a provider (a warm-up) goes through the default
+/// transport; binding the provider's transport afterwards still takes effect.
+#[tokio::test]
+async fn a_default_transport_does_not_block_the_providers_binding() {
+    // Standalone: no transport bound, so the default one is built (it is not reachable here, but
+    // it must be the one used: the scripted transport sees nothing).
+    let cred = ManagedIdentity::system()
+        .app_service("http://127.0.0.1:1/msi/token", "h")
+        .unwrap();
+    let e = cred
+        .token("https://vault.azure.net/.default")
+        .await
+        .unwrap_err();
+    assert_ne!(e.kind(), ErrorKind::Configuration, "{e}");
+    // Now the provider binds its transport, which replaces the default.
+    let t = ScriptedTransport::new();
+    t.reply(200, token_json("as-token")).reply(200, wrap_ok());
+    let p = provider(&t, cred);
+    wrap(&p).await.unwrap();
+    assert_eq!(t.count(), 2, "{:?}", t.seen());
+}

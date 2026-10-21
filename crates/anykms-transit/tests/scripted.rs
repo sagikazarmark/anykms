@@ -226,16 +226,23 @@ fn default_transport_needs_the_reqwest_feature() {
                 .allow_loopback_http(),
         )
         .build();
-    #[cfg(feature = "reqwest")]
+    #[cfg(all(
+        feature = "reqwest",
+        any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
+    ))]
     {
-        // The default transport requires system roots; on a host without any that is the only
-        // acceptable failure.
-        if let Err(e) = r {
-            assert!(
-                anykms_transit::anykms_http::tls::is_missing_system_roots(&e),
-                "{e}"
-            );
-        }
+        // A plain-HTTP loopback server needs no system roots: the default transport builds.
+        r.unwrap();
+    }
+    #[cfg(all(
+        feature = "reqwest",
+        not(any(feature = "rustls-ring", feature = "rustls-aws-lc-rs"))
+    ))]
+    {
+        // The built-in transport exists but has no TLS crypto provider to build with.
+        let e = r.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
+        assert!(e.to_string().contains("no rustls crypto provider"), "{e}");
     }
     #[cfg(not(feature = "reqwest"))]
     {
