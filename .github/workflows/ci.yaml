@@ -45,7 +45,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -101,7 +101,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -123,7 +123,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -159,7 +159,7 @@ jobs:
           build-shell: false
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv --profile nightly shell -- {0}
@@ -181,7 +181,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -229,7 +229,7 @@ jobs:
           build-shell: false
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv --profile msrv shell -- {0}
@@ -272,7 +272,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -324,7 +324,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -375,7 +375,7 @@ jobs:
 
       - name: Set up Rust cache
         if: steps.token.outputs.present == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -430,7 +430,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -465,7 +465,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -523,7 +523,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
@@ -731,7 +731,7 @@ jobs:
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
       - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
