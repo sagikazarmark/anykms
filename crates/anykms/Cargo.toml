@@ -110,7 +110,7 @@ tower = { workspace = true, features = ["util", "limit"] }
 # jwk-simple selects the JWK).
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
 jwt-simple = { version = "=0.15.0", default-features = false, features = ["pure-rust"] }
-jwk-simple = "=0.5.0"
+jwk-simple = "=0.6.0"
 
 # The snippets of the READMEs and the docs (tests/doc_snippets.rs): `anyhow` and
 # `serde` as an application has them, and the types the SDK bridge snippets pass to anykms.
