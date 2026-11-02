@@ -12,6 +12,12 @@ ignore = [
   # interop tests and the jwt_signing example) and jwt-simple (the jwt_signing_jwt_simple example,
   # through superboring) bring rsa 0.9, also for verification only.
   { id = "RUSTSEC-2023-0071", reason = "rsa (recipes' opt-in `rsa-rustcrypto` backend feature) used for public-key operations only" },
+  # Timing side channels in crypto-bigint. The 0.7 line is patched (>=0.7.6) and locked there; the
+  # remaining hit is crypto-bigint 0.5.5 (no patched 0.5 release), which only the dev-dependency
+  # jsonwebtoken brings (`rust_crypto` -> p256/p384 0.13). It verifies tokens in tests and examples:
+  # public-key operations on throwaway keys, nothing shipped. Drop this once jsonwebtoken moves to
+  # the 0.14 RustCrypto generation (`cargo tree -i crypto-bigint@0.5.5`).
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only via the dev-dependency jsonwebtoken, verification of test tokens only" },
 ]
 
 [licenses]
