@@ -75,11 +75,9 @@ pub use dynamic::{
     OpaqueHandle, Part, PartKind, PublicKeysKey,
 };
 pub use error::{BackendDetail, Error, ErrorClass, ErrorKind, Operation, Result, ServerMessage};
-pub use observe::{ObserveLayer, Observed, OpEvent};
+pub use observe::{ObserveLayer, OpEvent};
 pub use provider::{KeyTypeCheck, OpenOptions, Provider, Registry, RegistryBuilder};
-pub use retry::{
-    ClockFn, Retry, RetryBudget, RetryLayer, RetryPolicy, SleepFn, instant_sleep, std_clock,
-};
+pub use retry::{ClockFn, RetryBudget, RetryLayer, RetryPolicy, SleepFn, instant_sleep, std_clock};
 pub use semantics::{
     DataKeyAad, DataKeySource, KeySemantics, PinnedVerify, Semantics, StateScope,
     UnversionedVerify, Verification, VersionModel, VersionShape,

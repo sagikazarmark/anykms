@@ -353,7 +353,7 @@ pub enum DataKeyAad {
 /// # Forwarding
 ///
 /// A wrapper forwards `Semantics` only if it changes no behavior that `KeySemantics` describes.
-/// [`Retry`](crate::Retry), [`Observed`](crate::Observed), `Arc`, `Box` and `&T` forward.
+/// `Arc`, `Box` and `&T` forward; layers never see it (the handle keeps answering).
 /// Wrappers that change such a behavior do not implement it: `EnvelopeAead` (no plaintext
 /// limit), `CachedVerifier` (turns backend verification into local), `AeadKeyWrap`,
 /// `KeyWrapDataKeys`, `EmulatedDataKeys` and `CachingKeyWrap`. A [`Layer`](crate::Layer) must

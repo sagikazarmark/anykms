@@ -1,4 +1,4 @@
-//! The [`Retry`] decorator: bounded retries with exponential backoff and equal jitter.
+//! The [`RetryLayer`]: bounded retries with exponential backoff and equal jitter.
 //!
 //! - Backoff: the n-th retry waits between half and all of `min(base * 2^(n-1), cap)` ("equal
 //!   jitter"). Unlike full jitter (anywhere from zero), this guarantees a minimum total wait, so
@@ -33,21 +33,19 @@
 //! # Handles and layers
 //!
 //! A [`RetryLayer`] holds the configuration (policy, sleep, clock, budget) and is the one entry
-//! point, applied in one of two ways:
+//! point:
 //!
-//! - **Registries and opaque handles:** as a [`Layer`], preferably on the registry
+//! - **Registries and handles:** as a [`Layer`], preferably on the registry
 //!   (`Registry::builder().layer(retry)`, [`RegistryBuilder::layer`](crate::RegistryBuilder::layer))
 //!   so every handle it opens retries with one budget, or on one handle (`key.layer(&retry)`). It
 //!   wraps each part of the handle separately, so the result is the same handle type with the
 //!   same optional parts. A handle takes at most one retrying layer: applying another to a handle
 //!   that already retries (e.g. one opened from a retrying registry) returns it unchanged, so
 //!   attempts never multiply; `key.replace_retry(&retry)` swaps the policy of one handle
-//!   instead.
-//! - **Typed handles** (e.g. `TransitAeadKey`): [`RetryLayer::wrap`] returns the [`Retry<T>`]
-//!   decorator, which implements every capability trait `T` has. Do not wrap opaque handles this
-//!   way: `Retry<AeadKey>` would claim `Rewrap` and `DataKeys` whether or not the key has them,
-//!   and would retry on top of any layer the handle already has. Wrapping a `Retry` again nests
-//!   the retries; nothing prevents that at the type level, so wrap each typed handle once.
+//!   instead. A backend's typed key (e.g. `TransitAeadKey`) becomes a handle with
+//!   [`AeadKey::new`] (or the provider's [`Provider::aead`](crate::Provider::aead)).
+//! - **Any other future:** [`RetryLayer::call`] retries a closure's future with the same policy
+//!   and budget, for a backend's extension method or a recipe's own operation.
 //!
 //! # Testing
 //!
@@ -59,7 +57,7 @@
 //!
 //! The overall deadline bounds the *retry schedule*, not an attempt in flight: it is checked
 //! before each sleep, and a retry is skipped when the backoff would end past the deadline. Being
-//! runtime-agnostic, `Retry` has no timer with which to cancel a running attempt, so a slow
+//! runtime-agnostic, the layer has no timer with which to cancel a running attempt, so a slow
 //! attempt can overrun the deadline by up to its own duration. Bound each attempt with the HTTP
 //! client's per-request timeout (transit has one), or wrap the call in your runtime's timeout
 //! (e.g. `tokio::time::timeout`) for a hard limit.
@@ -81,22 +79,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use zeroize::Zeroizing;
-
 use crate::around::{Around, Call, CallCx, CallOutput};
 #[cfg(doc)]
 use crate::dynamic::{AeadKey, Layer};
 use crate::dynamic::{BoxFuture, Part};
 use crate::error::{Error, ErrorKind, Result};
 use crate::time::Instant;
-use crate::traits::{
-    Aead, DataKeys, Describe, DigestSigner, DigestVerifier, ExtensionCalls, KeyWrap, Mac,
-    MessageSigner, MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, WrappedDataKeys,
-};
-use crate::types::{
-    Ciphertext, DataKey, DataKeySpec, Decrypted, Digest, KeyInfo, KeyVersion, MacAlgorithm,
-    PublicKey, Signature, SignatureAlgorithm, Tag,
-};
 
 /// Sleeps for the given duration (e.g. `tokio::time::sleep`).
 pub type SleepFn = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
@@ -106,7 +94,7 @@ pub fn instant_sleep() -> SleepFn {
     Arc::new(|_| Box::pin(async {}))
 }
 
-/// A monotonic clock: the time elapsed since an arbitrary, fixed origin. [`Retry`] only
+/// A monotonic clock: the time elapsed since an arbitrary, fixed origin. [`RetryLayer`] only
 /// subtracts two readings, to enforce [`RetryPolicy::deadline`].
 ///
 /// Inject one that matches the [`SleepFn`] (e.g. tokio's clock with `tokio::time::sleep`, so
@@ -343,7 +331,7 @@ impl fmt::Debug for RetryBudget {
 /// opens with [`RegistryBuilder::layer`](crate::RegistryBuilder::layer), or for one handle with
 /// `key.layer(&retry)`), keeping the handle's type and optional parts; all parts, and all
 /// handles given the same layer, share one budget. A handle that already retries is left
-/// unchanged ([`Layer::retries`]). [`wrap`](Self::wrap) decorates a typed handle instead. See
+/// unchanged ([`Layer::retries`]). [`call`](Self::call) retries any other future. See
 /// the [module docs](self#handles-and-layers).
 #[derive(Clone)]
 pub struct RetryLayer {
@@ -411,83 +399,10 @@ impl RetryLayer {
         &self.budget
     }
 
-    /// Retries the typed handle `inner` with this configuration, sharing this layer's budget.
-    ///
-    /// For opaque handles ([`AeadKey`], ...) apply the layer instead (`key.layer(&retry)`), which
-    /// keeps the handle type and never nests retries.
-    pub fn wrap<T>(&self, inner: T) -> Retry<T> {
-        Retry {
-            inner,
-            cfg: self.clone(),
-        }
-    }
-}
-
-impl crate::Layer for RetryLayer {
-    fn retries(&self) -> bool {
-        true
-    }
-
-    /// Every part's operations, as [`Call`]s, retried by this layer's policy and budget.
-    fn part(&self, cx: &crate::LayerCx<'_>, part: Part<'_>) {
-        part.wrap_around(cx, Arc::new(self.clone()));
-    }
-}
-
-/// Retries each call with the layer's policy and budget: one [`Call::run`] per attempt.
-impl Around for RetryLayer {
-    fn around<'a>(&'a self, _: &'a CallCx, call: Call<'a>) -> BoxFuture<'a, Result<CallOutput>> {
-        Box::pin(async move { self.wrap(()).run(|| call.run()).await })
-    }
-}
-
-/// Wraps a typed handle and retries its operations; created with [`RetryLayer::wrap`].
-/// Implements the same traits as the inner handle. Clones, and every `Retry` from the same
-/// [`RetryLayer`], share the retry budget.
-///
-/// For opaque handles ([`AeadKey`], ...) apply the [`RetryLayer`] as a layer instead:
-/// `Retry<AeadKey>` implements `Rewrap` and `DataKeys` even when the key lacks them (see the
-/// [module docs](self#handles-and-layers)).
-///
-/// The policy's deadline bounds the retry schedule only; an attempt in flight is not cancelled
-/// (see the [module docs](self#deadline-scope)).
-#[non_exhaustive]
-#[derive(Clone)]
-pub struct Retry<T> {
-    inner: T,
-    cfg: RetryLayer,
-}
-
-impl<T: fmt::Debug> fmt::Debug for Retry<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Retry")
-            .field("inner", &self.inner)
-            .field("policy", &self.cfg.policy)
-            .field("budget", &self.cfg.budget)
-            .finish()
-    }
-}
-
-impl<T> Retry<T> {
-    /// The retry budget.
-    pub fn budget(&self) -> &RetryBudget {
-        &self.cfg.budget
-    }
-
-    /// The policy.
-    pub fn policy(&self) -> &RetryPolicy {
-        &self.cfg.policy
-    }
-
-    /// The wrapped handle.
-    pub fn inner(&self) -> &T {
-        &self.inner
-    }
-
-    /// Retries a backend-specific operation of the wrapped handle with this decorator's policy
-    /// and budget: `f` starts one attempt and is called again for each retry. The typed
-    /// counterpart of the opaque handles' `call_extension` (e.g.
-    /// [`AeadKey::call_extension`]), for a backend's extension trait on `Retry<TheirKey>`:
+    /// Retries `f` with this layer's policy and budget: `f` starts one attempt and is called
+    /// again for each retry. For a future that is not an operation of an opaque handle: a
+    /// backend's extension method on its typed key, or a recipe's own operation (what
+    /// `CachedVerifier::with_retry` in `anykms-recipes` uses).
     ///
     /// ```
     /// # use anykms_core::*;
@@ -498,51 +413,21 @@ impl<T> Retry<T> {
     ///     }
     /// }
     /// # async fn demo() -> Result<()> {
-    /// let key = RetryLayer::new(instant_sleep()).wrap(NativeKey);
-    /// let ct = key.call(|| key.inner().encrypt_with_context(b"pt", "ctx")).await?;
+    /// let key = NativeKey;
+    /// let retry = RetryLayer::new(instant_sleep());
+    /// let ct = retry.call(|| key.encrypt_with_context(b"pt", "ctx")).await?;
     /// # Ok(()) }
     /// ```
-    pub async fn call<R, Fut>(&self, f: impl FnMut() -> Fut) -> Result<R>
+    ///
+    /// The policy's deadline bounds the retry schedule only; an attempt in flight is not
+    /// cancelled (see the [module docs](self#deadline-scope)).
+    pub async fn call<R, Fut>(&self, mut f: impl FnMut() -> Fut) -> Result<R>
     where
         Fut: Future<Output = Result<R>>,
     {
-        self.run(f).await
-    }
-
-    fn random_fraction(&self, salt: u32) -> f64 {
-        random_fraction(salt, (self.cfg.clock)())
-    }
-
-    fn jitter(&self, attempt: u32) -> Duration {
-        let exp = self.cfg.policy.base.saturating_mul(
-            1u32.checked_shl(attempt.saturating_sub(1))
-                .unwrap_or(u32::MAX),
-        );
-        let ceiling = exp.min(self.cfg.policy.cap);
-        (ceiling / 2).saturating_add(fraction_of(ceiling / 2, self.random_fraction(attempt)))
-    }
-
-    /// The wait for a server's `Retry-After`: the normal jittered backoff, raised to at least the
-    /// `Retry-After` plus a random extra of up to `base` (to spread out clients throttled at the
-    /// same moment). Never shorter than either.
-    fn after_retry_after(&self, retry_after: Duration, attempt: u32) -> Duration {
-        let spread = fraction_of(
-            self.cfg.policy.base,
-            self.random_fraction(attempt ^ 0x5bd1_e995),
-        );
-        retry_after
-            .min(MAX_RETRY_AFTER)
-            .saturating_add(spread)
-            .max(self.jitter(attempt))
-    }
-
-    async fn run<R, Fut>(&self, mut f: impl FnMut() -> Fut) -> Result<R>
-    where
-        Fut: Future<Output = Result<R>>,
-    {
-        let p = &self.cfg.policy;
-        let start = (self.cfg.clock)();
-        self.cfg.budget.deposit();
+        let p = &self.policy;
+        let start = (self.clock)();
+        self.budget.deposit();
         let mut attempt = 1;
         let mut hint_used = false;
         loop {
@@ -571,7 +456,7 @@ impl<T> Retry<T> {
             } else {
                 self.jitter(attempt)
             };
-            let elapsed = (self.cfg.clock)().saturating_sub(start);
+            let elapsed = (self.clock)().saturating_sub(start);
             match elapsed.checked_add(delay) {
                 Some(end) if end <= p.deadline => {}
                 _ => {
@@ -581,7 +466,7 @@ impl<T> Retry<T> {
                     });
                 }
             }
-            if !self.cfg.budget.withdraw() {
+            if !self.budget.withdraw() {
                 return Err(e);
             }
             #[cfg(feature = "tracing")]
@@ -595,9 +480,54 @@ impl<T> Retry<T> {
                 delay_ms = saturating_millis(delay),
                 "anykms retry"
             );
-            (self.cfg.sleep)(delay).await;
+            (self.sleep)(delay).await;
             attempt += 1;
         }
+    }
+
+    fn random_fraction(&self, salt: u32) -> f64 {
+        random_fraction(salt, (self.clock)())
+    }
+
+    fn jitter(&self, attempt: u32) -> Duration {
+        let exp = self.policy.base.saturating_mul(
+            1u32.checked_shl(attempt.saturating_sub(1))
+                .unwrap_or(u32::MAX),
+        );
+        let ceiling = exp.min(self.policy.cap);
+        (ceiling / 2).saturating_add(fraction_of(ceiling / 2, self.random_fraction(attempt)))
+    }
+
+    /// The wait for a server's `Retry-After`: the normal jittered backoff, raised to at least the
+    /// `Retry-After` plus a random extra of up to `base` (to spread out clients throttled at the
+    /// same moment). Never shorter than either.
+    fn after_retry_after(&self, retry_after: Duration, attempt: u32) -> Duration {
+        let spread = fraction_of(
+            self.policy.base,
+            self.random_fraction(attempt ^ 0x5bd1_e995),
+        );
+        retry_after
+            .min(MAX_RETRY_AFTER)
+            .saturating_add(spread)
+            .max(self.jitter(attempt))
+    }
+}
+
+impl crate::Layer for RetryLayer {
+    fn retries(&self) -> bool {
+        true
+    }
+
+    /// Every part's operations, as [`Call`]s, retried by this layer's policy and budget.
+    fn part(&self, cx: &crate::LayerCx<'_>, part: Part<'_>) {
+        part.wrap_around(cx, Arc::new(self.clone()));
+    }
+}
+
+/// Retries each call with the layer's policy and budget: one [`Call::run`] per attempt.
+impl Around for RetryLayer {
+    fn around<'a>(&'a self, _: &'a CallCx, call: Call<'a>) -> BoxFuture<'a, Result<CallOutput>> {
+        Box::pin(self.call(move || call.run()))
     }
 }
 
@@ -659,151 +589,12 @@ fn throttled_by_retry_after(e: Error, retry_after: Duration) -> Error {
     t.with_source(e)
 }
 
-impl<T: Aead> Aead for Retry<T> {
-    async fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Ciphertext> {
-        self.run(|| self.inner.encrypt(plaintext, aad)).await
-    }
-
-    async fn decrypt(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        self.run(|| self.inner.decrypt(ct, aad)).await
-    }
-
-    fn ciphertext_version(&self, ct: &Ciphertext) -> Result<Option<KeyVersion>> {
-        self.inner.ciphertext_version(ct)
-    }
-
-    async fn decrypt_with_info(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Decrypted> {
-        self.run(|| self.inner.decrypt_with_info(ct, aad)).await
-    }
-}
-
-impl<T: Rewrap> Rewrap for Retry<T> {
-    async fn rewrap(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Ciphertext> {
-        self.run(|| self.inner.rewrap(ct, aad)).await
-    }
-}
-
-impl<T: DataKeys> DataKeys for Retry<T> {
-    async fn generate_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<DataKey> {
-        self.run(|| self.inner.generate_data_key(spec, aad)).await
-    }
-}
-
-/// Each attempt runs the call again ([`Call::run`] through the inner slot).
-impl<T: ExtensionCalls> ExtensionCalls for Retry<T> {
-    async fn run_extension(&self, call: Call<'_>) -> Result<CallOutput> {
-        self.run(|| self.inner.run_extension(call)).await
-    }
-}
-
-impl<T: WrappedDataKeys> WrappedDataKeys for Retry<T> {
-    async fn generate_wrapped_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<Ciphertext> {
-        self.run(|| self.inner.generate_wrapped_data_key(spec, aad))
-            .await
-    }
-}
-
-impl<T: DigestSigner> DigestSigner for Retry<T> {
-    fn signature_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.signature_algorithm()
-    }
-
-    async fn sign_digest(&self, digest: &Digest) -> Result<Signature> {
-        self.run(|| self.inner.sign_digest(digest)).await
-    }
-}
-
-impl<T: MessageSigner> MessageSigner for Retry<T> {
-    fn signature_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.signature_algorithm()
-    }
-
-    async fn sign_message(&self, msg: &[u8]) -> Result<Signature> {
-        self.run(|| self.inner.sign_message(msg)).await
-    }
-}
-
-/// Forwards: retrying changes no behavior that [`KeySemantics`](crate::KeySemantics) describes.
-impl<T: crate::Semantics> crate::Semantics for Retry<T> {
-    fn semantics(&self) -> Option<&crate::KeySemantics> {
-        self.inner.semantics()
-    }
-}
-
-impl<T: PinnedVerifier> PinnedVerifier for Retry<T> {
-    fn pinned_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.pinned_algorithm()
-    }
-}
-
-impl<T: DigestVerifier> DigestVerifier for Retry<T> {
-    async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
-        self.run(|| self.inner.verify_digest(digest, sig)).await
-    }
-}
-
-impl<T: MessageVerifier> MessageVerifier for Retry<T> {
-    async fn verify_message(&self, msg: &[u8], sig: &Signature) -> Result<()> {
-        self.run(|| self.inner.verify_message(msg, sig)).await
-    }
-}
-
-impl<T: Mac> Mac for Retry<T> {
-    fn mac_algorithm(&self) -> MacAlgorithm {
-        self.inner.mac_algorithm()
-    }
-
-    async fn mac(&self, data: &[u8]) -> Result<Tag> {
-        self.run(|| self.inner.mac(data)).await
-    }
-
-    async fn verify_mac(&self, data: &[u8], tag: &Tag) -> Result<()> {
-        self.run(|| self.inner.verify_mac(data, tag)).await
-    }
-}
-
-impl<T: PublicKeys> PublicKeys for Retry<T> {
-    async fn public_key(&self) -> Result<PublicKey> {
-        self.run(|| self.inner.public_key()).await
-    }
-
-    async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey> {
-        self.run(|| self.inner.public_key_version(version)).await
-    }
-}
-
-impl<T: Describe> Describe for Retry<T> {
-    async fn describe(&self) -> Result<KeyInfo> {
-        self.run(|| self.inner.describe()).await
-    }
-}
-
-impl<T: Preflight> Preflight for Retry<T> {
-    async fn preflight(&self) -> Result<KeyInfo> {
-        self.run(|| self.inner.preflight()).await
-    }
-}
-
-impl<T: KeyWrap> KeyWrap for Retry<T> {
-    async fn wrap_key(&self, key: &[u8]) -> Result<Ciphertext> {
-        self.run(|| self.inner.wrap_key(key)).await
-    }
-
-    async fn unwrap_key(&self, wrapped: &Ciphertext) -> Result<Zeroizing<Vec<u8>>> {
-        self.run(|| self.inner.unwrap_key(wrapped)).await
-    }
-
-    fn wrapped_key_version(&self, wrapped: &Ciphertext) -> Result<Option<KeyVersion>> {
-        self.inner.wrapped_key_version(wrapped)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::{BackendDetail, Operation};
+    use crate::{BackendDetail, Ciphertext, Operation};
 
     /// Jitter does not repeat between calls with the same salt and clock reading (a fixed
     /// `RandomState`, as on wasm, would make it repeat), and spans `[0, 1)`.
@@ -839,8 +630,9 @@ mod tests {
         err: fn() -> Error,
     }
 
-    impl Aead for Flaky {
-        async fn encrypt(&self, _: &[u8], _: &[u8]) -> Result<Ciphertext> {
+    impl Flaky {
+        #[allow(clippy::unused_async, reason = "stands in for a backend's async call")]
+        async fn encrypt(&self) -> Result<Ciphertext> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n < self.fail {
                 Err((self.err)())
@@ -848,16 +640,49 @@ mod tests {
                 Ok(Ciphertext::from_bytes(vec![1]))
             }
         }
-        async fn decrypt(&self, _: &Ciphertext, _: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-            Ok(Zeroizing::new(vec![]))
+    }
+
+    /// A `Flaky` retried through `RetryLayer::call`: what the removed typed decorator did.
+    struct Retrying<T> {
+        inner: T,
+        layer: RetryLayer,
+    }
+
+    impl<T> Retrying<T> {
+        fn inner(&self) -> &T {
+            &self.inner
+        }
+        fn jitter(&self, attempt: u32) -> Duration {
+            self.layer.jitter(attempt)
+        }
+        fn after_retry_after(&self, ra: Duration, attempt: u32) -> Duration {
+            self.layer.after_retry_after(ra, attempt)
         }
     }
 
-    fn retry<T>(inner: T, sleep: SleepFn) -> Retry<T> {
+    impl Retrying<Flaky> {
+        async fn encrypt(&self, _: &[u8], _: &[u8]) -> Result<Ciphertext> {
+            self.layer.call(|| self.inner.encrypt()).await
+        }
+    }
+
+    trait Wrap {
+        fn wrap<T>(&self, inner: T) -> Retrying<T>;
+    }
+    impl Wrap for RetryLayer {
+        fn wrap<T>(&self, inner: T) -> Retrying<T> {
+            Retrying {
+                inner,
+                layer: self.clone(),
+            }
+        }
+    }
+
+    fn retry<T>(inner: T, sleep: SleepFn) -> Retrying<T> {
         RetryLayer::new(sleep).wrap(inner)
     }
 
-    fn retry_with<T>(inner: T, sleep: SleepFn, policy: RetryPolicy) -> Retry<T> {
+    fn retry_with<T>(inner: T, sleep: SleepFn, policy: RetryPolicy) -> Retrying<T> {
         RetryLayer::new(sleep).with_policy(policy).wrap(inner)
     }
 

@@ -589,8 +589,6 @@ async fn retry_layers(
     let retry = anykms::retry_layer();
     let kek = registry.aead(&kek_uri)?.layer(&retry);
     let mac = registry.mac(&mac_uri, MacAlgorithm::HmacSha256)?.layer(&retry);
-    // Typed handles take the same layer as a decorator:
-    let typed = retry.wrap(transit.aead_key(&kek_uri)?);
     // end snippet
     Ok(())
 }

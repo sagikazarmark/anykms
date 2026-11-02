@@ -353,7 +353,7 @@ pub trait MessageVerifier: Send + Sync {
 ///   [`MessageSignerKey`](crate::MessageSignerKey), and the backends' typed signer handles (the
 ///   algorithm the handle was opened for), so a handle with a verifier part verifies its own
 ///   signatures;
-/// - `&T`, `Arc<T>`, `Box<T>` and [`Retry<T>`](crate::Retry) when `T` is pinned.
+/// - `&T`, `Arc<T>` and `Box<T>` when `T` is pinned.
 ///
 /// A verifier with no algorithm of its own (a [`DigestVerifierKey`](crate::DigestVerifierKey),
 /// an `Arc<dyn DynDigestVerifier>`) names the algorithm with the `_as` variants of those
@@ -487,7 +487,7 @@ pub trait Describe: Send + Sync {
 /// with **empty AAD**, so `wrap_key(k)` is exactly `encrypt(k, b"")`. The built-in providers open
 /// their AEAD keys as a `KeyWrapKey` through this adapter.
 ///
-/// Being a separate trait, `KeyWrap` is decorated on its own: [`Retry`](crate::Retry), `Arc<T>`,
+/// Being a separate trait, `KeyWrap` is decorated on its own: layers see it as a part, `Arc<T>`,
 /// `Box<T>` and `&T` forward it, and a key can implement both `Aead` and a native `KeyWrap`.
 ///
 /// # Errors

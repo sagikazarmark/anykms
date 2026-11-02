@@ -7,7 +7,7 @@ use std::time::Duration;
 use anykms_core::prelude::*;
 use anykms_core::{
     Ciphertext, DataKeySpec, Digest, ErrorKind, KeyTypeCheck, KeyUri, KeyVersion, MacAlgorithm,
-    Signature, SignatureAlgorithm, Tag,
+    OpenOptions, Provider, Signature, SignatureAlgorithm, Tag,
 };
 use anykms_transit::{FileToken, Flavor, ServerConfig, TransitProvider};
 use serde_json::json;
@@ -1097,9 +1097,11 @@ fn recording_sleep() -> (anykms_core::SleepFn, SleepLog) {
     (sleep, log)
 }
 
-fn retrying(server: &MockServer, sleep: anykms_core::SleepFn) -> anykms_core::Retry<impl Aead> {
-    anykms_core::RetryLayer::new(sleep)
-        .wrap(provider(server, Flavor::Vault).aead_key(uri("k")).unwrap())
+fn retrying(server: &MockServer, sleep: anykms_core::SleepFn) -> anykms_core::AeadKey {
+    let p = provider(server, Flavor::Vault);
+    Provider::aead(&p, &uri("k"), &OpenOptions::default())
+        .unwrap()
+        .layer(&anykms_core::RetryLayer::new(sleep))
 }
 
 /// Answers `failures` times with `status` and `Retry-After`, then succeeds.
@@ -1408,8 +1410,9 @@ async fn errors_name_the_key_and_never_secrets() {
     assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
 
     // The Retry layer passes the resource through.
-    let r =
-        anykms_core::RetryLayer::new(recording_sleep().0).wrap(p.aead_key(uri("missing")).unwrap());
+    let r = Provider::aead(&p, &uri("missing"), &OpenOptions::default())
+        .unwrap()
+        .layer(&anykms_core::RetryLayer::new(recording_sleep().0));
     let e = r.encrypt(b"x", b"").await.unwrap_err();
     check(&e, "hashivault://default/transit/keys/missing");
 }
