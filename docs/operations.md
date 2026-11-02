@@ -136,8 +136,6 @@ let registry = anykms::with_default_providers()?
 let retry = anykms::retry_layer();
 let kek = registry.aead(&kek_uri)?.layer(&retry);
 let mac = registry.mac(&mac_uri, MacAlgorithm::HmacSha256)?.layer(&retry);
-// Typed handles take the same layer as a decorator:
-let typed = retry.wrap(transit.aead_key(&kek_uri)?);
 ```
 
 A handle takes at most one retry layer: `.layer(&retry)` on a handle that already retries (one
@@ -503,15 +501,15 @@ the backends where the lag occurs. Other backends hint the same way where a cond
 transient but looks permanent (for example a key version that is still being
 generated), so the option is not transit-specific.
 
-**Enable it for any retry layer that wraps a `CachedVerifier`, whatever the replica topology.** The
+**Enable it for the retry layer of any `CachedVerifier`, whatever the replica topology.** The
 verifier rejects a signature naming a version above the latest it knows, without a lookup, when it
 read the latest version within its refresh interval (500 ms by default). That also happens on one
 node: right after a rotation, if the first verification after startup, another signature naming a
 version above the latest, or a recheck after a failed verification read the latest version less
 than 500 ms earlier, the new version's first tokens fail with `InvalidArgument`. The hinted retry
-waits out the interval, re-reads the latest version and verifies. Wrap the verifier itself
-(`retry_layer().with_policy(RetryPolicy::default().with_retry_on_hint(true)).wrap(verifier)`): a
-retry layer on the registry the source came from never sees this rejection. If the source already
+waits out the interval, re-reads the latest version and verifies. Give the verifier itself the layer
+(`verifier.with_retry(&retry_layer().with_policy(RetryPolicy::default().with_retry_on_hint(true)))`):
+a retry layer on the registry the source came from never sees this rejection. If the source already
 retries, add `with_max_attempts(2)` so transient errors are not retried at both levels. The
 verifier deliberately does not re-read the latest version inline: that would make every forged
 `kid` a backend request again. Give the verifier its own layer (each `retry_layer()` call has its
@@ -607,5 +605,5 @@ let registry = anykms::with_default_providers()?
 ```
 
 Calls through the typed handle behind an opaque handle (`downcast_ref`) bypass every layer, this
-one and retries included; wrap such calls yourself (`observe.wrap(key)`, `retry.wrap(key)`) where
-they matter.
+one and retries included; run such calls through the handle's `call_extension` (which every
+layer sees) or retry them yourself with `retry.call(|| ..)` where they matter.

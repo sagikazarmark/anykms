@@ -753,11 +753,11 @@ pub fn tokio_clock() -> ClockFn {
 /// - to every handle of a registry: `Registry::builder().layer(retry_layer())`
 ///   ([`RegistryBuilder::layer`], [`DefaultProviders::layer`]), the usual choice: one budget for
 ///   every handle, shared by every backend behind the registry;
-/// - to one opaque handle: `key.layer(&retry_layer())`, which keeps the handle type and parts
+/// - to one handle: `key.layer(&retry_layer())`, which keeps the handle type and parts
 ///   (see [`Layer`]) and is skipped when the handle already retries (e.g. its registry has a
 ///   retry layer), so retries never nest;
-/// - to a typed handle (e.g. `TransitAeadKey`): `retry_layer().wrap(key)`, a
-///   [`Retry`] decorator.
+/// - to any other future: `retry_layer().call(|| fut)` ([`RetryLayer::call`]), e.g. a backend's
+///   extension method on its typed key, or `CachedVerifier::with_retry` in the recipes.
 ///
 /// Each call creates its own [`RetryBudget`]; to bound retries per backend across several
 /// layers, give them one budget with [`RetryLayer::with_budget`].

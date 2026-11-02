@@ -877,9 +877,11 @@ Cases:
 | M5+ | In order: transit AppRole/Kubernetes/JWT login with token renewal (first, ahead of cloud backends); decrypt-side DEK cache; metrics layer and layered extension handles; envelope v2 (multiple wrapped-key slots + streaming, §21); `KeyLifecycle` (separate handle), `Random`, `AsymmetricDecrypt`; ~~AWS via LocalStack; Azure standard-vault `KeyWrap` data keys~~ (moved to M6) | each with its own conformance additions |
 | M6 | Cloud backends (§23): conformance redesign, `anykms-http`, AWS, GCP, Azure | per-backend mock + emulated/fake conformance green on every PR; live probes A0/T1/T3 pinned in `docs/research`; live nightly jobs green |
 
-## 11. `Retry` decorator (M3)
+## 11. `RetryLayer` (M3)
 
-`Retry<T>` implements the same traits as the handle it wraps.
+A `Layer` that retries every part of a handle; `RetryLayer::call` retries any other future. (The
+`Retry<T>` typed decorator that implemented the same traits as the handle it wrapped was removed
+on 2026-11-02; see `docs/cloud/architecture-plan.md`.)
 
 - **Backoff.** Exponential with *equal* jitter: the n-th retry waits between
   half and all of `min(base * 2^(n-1), cap)`. Defaults: base 300 ms, cap 5 s,
@@ -1540,15 +1542,13 @@ accepted changes, at a high level:
   key-type check and backend extensions.
 - **One retry entry point per handle kind; retries never nest.** A
   `RetryLayer` is the only configuration. Registries and opaque handles take it
-  as a `Layer` (`RegistryBuilder::layer`, `key.layer(&retry)`); typed backend
-  handles take it as a decorator (`retry.wrap(key)` returns `Retry<T>`).
+  as a `Layer` (`RegistryBuilder::layer`, `key.layer(&retry)`); anything else
+  goes through `RetryLayer::call` (the typed `Retry<T>` decorator was removed on 2026-11-02).
   `Handle::with_retry`, `anykms::with_retry`, `anykms::tokio_retry`,
   `Retry::new` / `with_policy` / `with_budget` / `with_clock` are removed. A
   handle records that a retrying layer (`Layer::retries`) was applied and
   skips later ones, so the README's former registry layer plus `with_retry`
-  (6 attempts each, up to 36 with two budgets) can no longer happen. Nesting
-  `Retry<Retry<T>>` on typed handles is not prevented at the type level
-  (no specialization) and is documented instead.
+  (6 attempts each, up to 36 with two budgets) can no longer happen.
 - **Every error is in exactly one class.** `Backend` (unclassified server
   error, unusable response, internal failure) is a config error: an operator
   has to look at it, known transient server errors are already `Unavailable`,

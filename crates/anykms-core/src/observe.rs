@@ -24,20 +24,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeroize::Zeroizing;
-
 use crate::around::{Around, Call, CallCx, CallOutput};
 use crate::dynamic::{BoxFuture, Layer, LayerCx, Part, PartKind};
 use crate::error::{ErrorKind, Operation, Result};
 use crate::retry::{ClockFn, std_clock};
-use crate::traits::{
-    Aead, DataKeys, Describe, DigestSigner, DigestVerifier, ExtensionCalls, KeyWrap, Mac,
-    MessageSigner, MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, WrappedDataKeys,
-};
-use crate::types::{
-    Ciphertext, DataKey, DataKeySpec, Decrypted, Digest, KeyInfo, KeyVersion, MacAlgorithm,
-    PublicKey, Signature, SignatureAlgorithm, Tag,
-};
 
 /// One finished or [cancelled](Self::is_cancelled) operation, reported by an [`ObserveLayer`].
 /// Holds no input or output data.
@@ -55,9 +45,7 @@ pub struct OpEvent<'a> {
 }
 
 impl<'a> OpEvent<'a> {
-    /// The backend of the handle, when the layer was applied to an opaque handle (see
-    /// [`LayerCx`]); `None` for a typed handle wrapped with
-    /// [`ObserveLayer::wrap`].
+    /// The backend of the handle (see [`LayerCx`]).
     pub fn backend(&self) -> Option<&'static str> {
         self.backend
     }
@@ -161,17 +149,6 @@ impl ObserveLayer {
         self
     }
 
-    /// Decorates a typed handle, like [`RetryLayer::wrap`](crate::RetryLayer::wrap); for opaque
-    /// handles apply the layer instead.
-    pub fn wrap<T>(&self, inner: T) -> Observed<T> {
-        Observed {
-            inner,
-            backend: None,
-            resource: None,
-            cfg: self.clone(),
-        }
-    }
-
     /// Reports one event.
     fn report(&self, event: &OpEvent<'_>) {
         (self.observer)(event);
@@ -267,315 +244,16 @@ impl Drop for Pending<'_> {
     }
 }
 
-/// A typed handle whose operations are reported to an [`ObserveLayer`]'s callback; created with
-/// [`ObserveLayer::wrap`]. Implements the same traits as the inner handle.
-#[derive(Clone)]
-pub struct Observed<T> {
-    inner: T,
-    backend: Option<&'static str>,
-    resource: Option<Arc<str>>,
-    cfg: ObserveLayer,
-}
-
-impl<T: fmt::Debug> fmt::Debug for Observed<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Observed")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl<T> Observed<T> {
-    /// The wrapped handle.
-    pub fn inner(&self) -> &T {
-        &self.inner
-    }
-
-    /// Reports a backend-specific operation of the wrapped handle, as the opaque handles'
-    /// `call_extension` does (e.g. [`AeadKey::call_extension`](crate::AeadKey::call_extension)):
-    /// one event for `fut`, with operation `op` and [`OpEvent::extension_name`] `name`. For a
-    /// backend's extension trait on `Observed<TheirKey>`:
-    /// `self.call(Operation::Encrypt, "aws.encrypt_with_context", self.inner().encrypt_with_context(pt, ctx))`.
-    pub async fn call<R>(
-        &self,
-        op: Operation,
-        name: &'static str,
-        fut: impl Future<Output = Result<R>>,
-    ) -> Result<R> {
-        self.run_named(PartKind::Extension, op, Some(name), fut)
-            .await
-    }
-
-    async fn run<R>(
-        &self,
-        part: PartKind,
-        op: Operation,
-        fut: impl Future<Output = Result<R>>,
-    ) -> Result<R> {
-        self.run_named(part, op, None, fut).await
-    }
-
-    async fn run_named<R>(
-        &self,
-        part: PartKind,
-        op: Operation,
-        extension: Option<&'static str>,
-        fut: impl Future<Output = Result<R>>,
-    ) -> Result<R> {
-        let pending = Pending::start(
-            &self.cfg,
-            self.backend,
-            self.resource.as_deref(),
-            part,
-            op,
-            extension,
-        );
-        let r = fut.await;
-        pending.finish(&r);
-        r
-    }
-}
-
-impl<T: Aead> Aead for Observed<T> {
-    async fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Ciphertext> {
-        self.run(
-            PartKind::Aead,
-            Operation::Encrypt,
-            self.inner.encrypt(plaintext, aad),
-        )
-        .await
-    }
-
-    async fn decrypt(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        self.run(
-            PartKind::Aead,
-            Operation::Decrypt,
-            self.inner.decrypt(ct, aad),
-        )
-        .await
-    }
-
-    fn ciphertext_version(&self, ct: &Ciphertext) -> Result<Option<KeyVersion>> {
-        self.inner.ciphertext_version(ct)
-    }
-
-    async fn decrypt_with_info(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Decrypted> {
-        self.run(
-            PartKind::Aead,
-            Operation::Decrypt,
-            self.inner.decrypt_with_info(ct, aad),
-        )
-        .await
-    }
-}
-
-impl<T: Rewrap> Rewrap for Observed<T> {
-    async fn rewrap(&self, ct: &Ciphertext, aad: &[u8]) -> Result<Ciphertext> {
-        self.run(
-            PartKind::Rewrap,
-            Operation::Rewrap,
-            self.inner.rewrap(ct, aad),
-        )
-        .await
-    }
-}
-
-impl<T: DataKeys> DataKeys for Observed<T> {
-    async fn generate_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<DataKey> {
-        self.run(
-            PartKind::DataKeys,
-            Operation::GenerateDataKey,
-            self.inner.generate_data_key(spec, aad),
-        )
-        .await
-    }
-}
-
-/// Reported with the call's operation and [`OpEvent::extension_name`], part
-/// [`PartKind::Extension`].
-impl<T: ExtensionCalls> ExtensionCalls for Observed<T> {
-    async fn run_extension(&self, call: Call<'_>) -> Result<CallOutput> {
-        self.run_named(
-            PartKind::Extension,
-            call.operation(),
-            Some(call.name()),
-            self.inner.run_extension(call),
-        )
-        .await
-    }
-}
-
-/// Reported as [`Operation::GenerateDataKey`] with part [`PartKind::WrappedDataKeys`].
-impl<T: WrappedDataKeys> WrappedDataKeys for Observed<T> {
-    async fn generate_wrapped_data_key(&self, spec: DataKeySpec, aad: &[u8]) -> Result<Ciphertext> {
-        self.run(
-            PartKind::WrappedDataKeys,
-            Operation::GenerateDataKey,
-            self.inner.generate_wrapped_data_key(spec, aad),
-        )
-        .await
-    }
-}
-
-impl<T: DigestSigner> DigestSigner for Observed<T> {
-    fn signature_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.signature_algorithm()
-    }
-
-    async fn sign_digest(&self, digest: &Digest) -> Result<Signature> {
-        self.run(
-            PartKind::DigestSigner,
-            Operation::Sign,
-            self.inner.sign_digest(digest),
-        )
-        .await
-    }
-}
-
-impl<T: MessageSigner> MessageSigner for Observed<T> {
-    fn signature_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.signature_algorithm()
-    }
-
-    async fn sign_message(&self, msg: &[u8]) -> Result<Signature> {
-        self.run(
-            PartKind::MessageSigner,
-            Operation::Sign,
-            self.inner.sign_message(msg),
-        )
-        .await
-    }
-}
-
-/// Forwards: observing changes no behavior that [`KeySemantics`](crate::KeySemantics) describes.
-impl<T: crate::Semantics> crate::Semantics for Observed<T> {
-    fn semantics(&self) -> Option<&crate::KeySemantics> {
-        self.inner.semantics()
-    }
-}
-
-impl<T: PinnedVerifier> PinnedVerifier for Observed<T> {
-    fn pinned_algorithm(&self) -> SignatureAlgorithm {
-        self.inner.pinned_algorithm()
-    }
-}
-
-impl<T: DigestVerifier> DigestVerifier for Observed<T> {
-    async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
-        self.run(
-            PartKind::DigestVerifier,
-            Operation::Verify,
-            self.inner.verify_digest(digest, sig),
-        )
-        .await
-    }
-}
-
-impl<T: MessageVerifier> MessageVerifier for Observed<T> {
-    async fn verify_message(&self, msg: &[u8], sig: &Signature) -> Result<()> {
-        self.run(
-            PartKind::MessageVerifier,
-            Operation::Verify,
-            self.inner.verify_message(msg, sig),
-        )
-        .await
-    }
-}
-
-impl<T: Mac> Mac for Observed<T> {
-    fn mac_algorithm(&self) -> MacAlgorithm {
-        self.inner.mac_algorithm()
-    }
-
-    async fn mac(&self, data: &[u8]) -> Result<Tag> {
-        self.run(PartKind::Mac, Operation::Mac, self.inner.mac(data))
-            .await
-    }
-
-    async fn verify_mac(&self, data: &[u8], tag: &Tag) -> Result<()> {
-        self.run(
-            PartKind::Mac,
-            Operation::VerifyMac,
-            self.inner.verify_mac(data, tag),
-        )
-        .await
-    }
-}
-
-impl<T: PublicKeys> PublicKeys for Observed<T> {
-    async fn public_key(&self) -> Result<PublicKey> {
-        self.run(
-            PartKind::PublicKeys,
-            Operation::PublicKey,
-            self.inner.public_key(),
-        )
-        .await
-    }
-
-    async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey> {
-        self.run(
-            PartKind::PublicKeys,
-            Operation::PublicKey,
-            self.inner.public_key_version(version),
-        )
-        .await
-    }
-}
-
-impl<T: Describe> Describe for Observed<T> {
-    async fn describe(&self) -> Result<KeyInfo> {
-        self.run(
-            PartKind::Describe,
-            Operation::Describe,
-            self.inner.describe(),
-        )
-        .await
-    }
-}
-
-/// Wrapping is reported as [`Operation::WrapKey`] and unwrapping as [`Operation::UnwrapKey`],
-/// with part [`PartKind::KeyWrap`].
-impl<T: Preflight> Preflight for Observed<T> {
-    async fn preflight(&self) -> Result<KeyInfo> {
-        self.run(
-            PartKind::Preflight,
-            Operation::Describe,
-            self.inner.preflight(),
-        )
-        .await
-    }
-}
-
-impl<T: KeyWrap> KeyWrap for Observed<T> {
-    async fn wrap_key(&self, key: &[u8]) -> Result<Ciphertext> {
-        self.run(
-            PartKind::KeyWrap,
-            Operation::WrapKey,
-            self.inner.wrap_key(key),
-        )
-        .await
-    }
-
-    async fn unwrap_key(&self, wrapped: &Ciphertext) -> Result<Zeroizing<Vec<u8>>> {
-        self.run(
-            PartKind::KeyWrap,
-            Operation::UnwrapKey,
-            self.inner.unwrap_key(wrapped),
-        )
-        .await
-    }
-
-    fn wrapped_key_version(&self, wrapped: &Ciphertext) -> Result<Option<KeyVersion>> {
-        self.inner.wrapped_key_version(wrapped)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
+    use zeroize::Zeroizing;
+
     use super::*;
-    use crate::{AeadKey, Error, RetryLayer, RetryPolicy, instant_sleep};
+    use crate::{
+        Aead, AeadKey, Ciphertext, Error, KeyWrap, RetryLayer, RetryPolicy, instant_sleep,
+    };
 
     /// Fails `fail` times with `Unavailable`, then echoes.
     struct Flaky {
@@ -765,10 +443,9 @@ mod tests {
                     .is_err()
             );
         }
-        let typed = observe.wrap(Hang);
         let ct = Ciphertext::from_bytes(b"x".to_vec());
         assert!(
-            tokio::time::timeout(timeout, typed.decrypt(&ct, b""))
+            tokio::time::timeout(timeout, k.decrypt(&ct, b""))
                 .await
                 .is_err()
         );
