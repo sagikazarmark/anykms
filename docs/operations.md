@@ -115,7 +115,7 @@ around them; only retries ride them out. No failover response carries `Retry-Aft
 ### Retry budgets
 
 Backends never retry on their own (the single exception is one retry with a refreshed token after
-a 403), so the attempts configured on `Retry` are the only ones; they do not multiply.
+a 403), so the attempts configured on `RetryLayer` are the only ones; they do not multiply.
 
 The budget is a token bucket per `RetryBudget`: every call adds 0.1 token (up to a capacity of
 10, which it starts with) and every retry spends one. Each `RetryLayer` (each
@@ -341,8 +341,8 @@ settings on `RetryPolicy`.
 | `tcp_keepalive` | 30 s | |
 | `http2` | off | HTTP/2 multiplexes onto one node behind a load balancer; it is negotiated over TLS only (needs the `http2` feature), so plain-HTTP loopback servers always use HTTP/1.1 |
 | `proxy` | none | environment proxy variables are ignored; link-local and loopback hosts are never proxied |
-| `Retry` attempts / backoff | 6 / 300 ms base, 5 s cap, equal jitter | the 5 retries wait 4.65–9.3 s in total, which spans a leader step-down (see "Failover" below) |
-| `Retry` deadline | 15 s | across attempts (see `RetryPolicy`) |
+| `RetryPolicy` attempts / backoff | 6 / 300 ms base, 5 s cap, equal jitter | the 5 retries wait 4.65–9.3 s in total, which spans a leader step-down (see "Failover" below) |
+| `RetryPolicy` deadline | 15 s | across attempts (see `RetryPolicy`) |
 
 ### Startup checks
 

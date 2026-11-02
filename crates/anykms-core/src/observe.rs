@@ -419,7 +419,7 @@ mod tests {
     }
 
     /// A call dropped before it finishes is reported once, as cancelled and not ok, through a
-    /// layer and through `wrap`.
+    /// layer.
     #[tokio::test]
     async fn reports_a_cancelled_call() {
         type Seen = Vec<(Operation, bool, bool, Option<ErrorKind>, &'static str)>;
