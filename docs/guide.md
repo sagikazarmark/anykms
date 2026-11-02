@@ -50,9 +50,9 @@ let registry = defaults.layer(anykms::retry_layer()).build()?;
 ## Retries
 
 `.layer(anykms::retry_layer())` retries every handle the registry opens, with one shared retry
-budget. That is the one way to retry the opaque handles a registry opens; a typed handle (e.g.
-`TransitAeadKey`) is wrapped with `anykms::retry_layer().wrap(key)` instead. A handle takes at most
-one retry layer, so `key.layer(&retry)` on a handle from a retrying registry changes nothing
+budget. That is the one way to retry handles (a backend's typed key becomes one with
+`AeadKey::new` or the provider's `Provider::aead`); any other future is retried with
+`retry_layer().call(|| fut)`. A handle takes at most one retry layer, so `key.layer(&retry)` on a handle from a retrying registry changes nothing
 (attempts never nest); `key.replace_retry(&retry)` swaps the registry's policy for that one handle.
 
 `retry_layer()` uses the default `RetryPolicy` (6 attempts, 15 s deadline), made for background
@@ -364,9 +364,9 @@ confusion). See the [`jose` docs](https://docs.rs/anykms-recipes/latest/anykms_r
 **After a rotation, `CachedVerifier` can reject the new version's first tokens for up to 500 ms**
 (its refresh interval), also on a single node: a `kid` above the latest version it knows is
 rejected without a lookup if it read the latest version within that interval, so forged kids
-cost no backend request. The rejection is `InvalidArgument` with a `retry_hint`; wrap the verifier
-in a retry layer with `RetryPolicy::with_retry_on_hint(true)`
-(`retry_layer().with_policy(..).wrap(verifier)`) so the token verifies on the hinted retry. See
+cost no backend request. The rejection is `InvalidArgument` with a `retry_hint`; give the verifier
+a retry layer with `RetryPolicy::with_retry_on_hint(true)`
+(`verifier.with_retry(&retry_layer().with_policy(..))`) so the token verifies on the hinted retry. See
 [operations](operations.md#replica-lag-and-retry_on_hint).
 
 ## Generic code and shared state

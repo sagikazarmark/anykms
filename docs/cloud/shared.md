@@ -300,7 +300,7 @@ checklist (PLAN §22 "each new part also needs a `Layer` method"):
 3. `Part::X`, `PartKind::X` (+ `as_str`), `Layer::x` provided method calling `part`, the
    forward in `impl Layer for Arc<L>`;
 4. `RetryLayer::part` and `ObserveLayer::part` arms (exhaustive inside core: does not compile
-   until done), `impl X for Retry<T>`, `impl X for Observed<T>`;
+   until done);
 5. `optional_part!` arm (Unsupported before I/O when missing);
 6. `KeyWrapKey::from_aead` carries it where relevant; local implements it; conformance case.
 
@@ -407,8 +407,8 @@ pub struct ExtensionOutput(Box<dyn Any + Send>);   // opaque; only the handle he
 
   It erases `R` into `ExtensionOutput`, calls the layered slot, and unerases (a type mismatch is
   impossible by construction; map it to `Backend` defensively).
-- Typed path: `Retry<T>::call(op, f)` and `Observed<T>::call(op, name, f)` (public), so
-  `retry.wrap(aws_key)` users get the same.
+- Typed path: `RetryLayer::call(|| fut)` (public) retries a call on a backend's typed key the
+  same way (the `Retry<T>`/`Observed<T>` decorators were removed on 2026-11-02).
 - Backend pattern (AWS plan owns the trait):
 
   ```rust
@@ -423,7 +423,6 @@ pub struct ExtensionOutput(Box<dyn Any + Send>);   // opaque; only the handle he
       }
   }
   impl AwsAeadExt for AwsAeadKey { /* direct */ }
-  impl AwsAeadExt for Retry<AwsAeadKey> { /* self.call(..) */ }
   ```
 
 - Rejected: `Part::Other(TypeId, &mut Arc<dyn Any>)` (layers cannot decorate unknown types);

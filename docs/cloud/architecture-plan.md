@@ -862,19 +862,30 @@ generic impls, with no boxing, and share only the policy code with `Around`
 (`RetryState::attempt` and `ObserveState::record`). `Retry::call(FnMut)` and
 `Observed::call(op, name, fut)` keep their signatures and their path outside `Around`.
 
+> **Superseded (2026-11-02).** `Retry<T>` and `Observed<T>` were removed. The zero-allocation
+> property that justified them was never measured (see the spike record below) and is noise
+> against an HTTPS round trip; no backend implemented an extension trait on `Retry<TheirKey>`;
+> `Observed<T>` could not carry `backend`/`resource` labels; and the typed path bypassed
+> `Layer::retries`, so it needed its own "do not nest" documentation. The retry engine is public
+> as `RetryLayer::call(|| fut)`, which covers a backend's extension method on its typed key, and
+> `CachedVerifier::with_retry(&RetryLayer)` covers the one in-tree dependent (the hinted
+> post-rotation retry, keeping `PinnedVerifier` and `invalidate()` on one type). A new part now
+> costs the four places below, without item 5.
+
 A new part therefore costs:
 
 1. the trait;
 2. the `dyn_layer!` entry;
 3. `Part`/`PartKind`;
 4. the `handle!` entry;
-5. the typed `Retry`/`Observed` impl.
+5. ~~the typed `Retry`/`Observed` impl~~ (removed, see above).
 
 That is 5 places instead of 9, and nothing silently falls back. A test enumerates `PartKind`
 against `wrap_around`.
 
 **Cost:** per call and per wrapping layer, one boxed attempt future, one boxed `around` future
-and one boxed output. This applies to opaque handles only. Typed handles keep zero allocations.
+and one boxed output. This applies to opaque handles only. ~~Typed handles keep zero
+allocations.~~
 
 **`full` is not re-frozen.** The `later {}` rule stays: every part added after the bounds froze
 goes in `later {}`.
@@ -1570,7 +1581,7 @@ implementation (10).
   - 13: `extension_name` rule; `CallCx::backend` is an `Option`; `wrap` drops `part`; the part is
     only in `Call`.
   - 14: downcast error.
-  - 15: typed decorators stay generic.
+  - 15: typed decorators stay generic (superseded 2026-11-02: removed, see the note in §X14).
   - 16: no re-freeze; `later {}` rule.
   - 17: `Preflight` details.
   - 18: A6 labeled breaking for typed KEKs.

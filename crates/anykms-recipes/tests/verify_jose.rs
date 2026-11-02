@@ -278,9 +278,9 @@ async fn hashed_verification_takes_the_verifiers_algorithm() {
     verify_message_hashed(&local, b"m", &sig).await.unwrap();
     let cached = CachedVerifier::new(EcKey::new(1), ALG);
     assert_eq!(cached.pinned_algorithm(), ALG);
-    // Wrappers forward the pinned algorithm, so a retried or shared verifier keeps the short
-    // form.
-    let retried = anykms_core::RetryLayer::new(anykms_core::instant_sleep()).wrap(cached);
+    // A retrying verifier stays pinned, and `Arc`/`&` forward the pinned algorithm, so a
+    // retried or shared verifier keeps the short form.
+    let retried = cached.with_retry(&anykms_core::RetryLayer::new(anykms_core::instant_sleep()));
     assert_eq!(retried.pinned_algorithm(), ALG);
     verify_message_hashed(&retried, b"m", &sig).await.unwrap();
     let shared = std::sync::Arc::new(LocalVerifier::for_key(key.pk(1)).unwrap());

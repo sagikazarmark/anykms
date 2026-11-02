@@ -40,7 +40,7 @@ use crate::BACKEND;
 /// Only the credentials come from the SDK: KMS calls stay on this crate's client, and the
 /// provider caches what the SDK returns until shortly before it expires, as for the built-in
 /// sources. The SDK fetches with its own HTTP client, TLS provider and retries (they run under
-/// any [`Retry`](anykms_core::Retry) layer; `aws-config`'s
+/// any [`RetryLayer`](anykms_core::RetryLayer); `aws-config`'s
 /// `ConfigLoader::retry_config(RetryConfig::disabled())` turns the SDK's off). Errors carry the
 /// SDK error as their source.
 #[derive(Clone)]

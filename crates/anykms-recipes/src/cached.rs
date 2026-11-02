@@ -8,7 +8,7 @@ use std::time::Duration;
 use anykms_core::time::Instant;
 use anykms_core::{
     Digest, DigestVerifier, Error, ErrorKind, KeyVersion, MessageVerifier, Operation, PublicKey,
-    PublicKeys, Result, Signature, SignatureAlgorithm,
+    PublicKeys, Result, RetryLayer, Signature, SignatureAlgorithm,
 };
 
 use crate::LocalVerifier;
@@ -149,27 +149,29 @@ struct State {
 /// refresh interval. This happens on a single node too, not only with lagging replicas: any read
 /// in that interval is enough (the first verification after startup, another signature naming a
 /// version above the latest, a recheck after a signature failed under a cached key). The error
-/// carries the refresh interval as its [`retry_hint`](Error::retry_hint), so wrap the verifier
-/// in a retry layer with `RetryPolicy::with_retry_on_hint(true)`, whatever the replica topology:
+/// carries the refresh interval as its [`retry_hint`](Error::retry_hint), so give the verifier a
+/// retry layer with `RetryPolicy::with_retry_on_hint(true)`
+/// ([`with_retry`](CachedVerifier::with_retry)), whatever the replica topology:
 ///
 /// ```
-/// use anykms_core::{PublicKeys, Retry, RetryLayer, RetryPolicy, SignatureAlgorithm, SleepFn};
+/// use anykms_core::{PublicKeys, RetryLayer, RetryPolicy, SignatureAlgorithm, SleepFn};
 /// use anykms_recipes::CachedVerifier;
 ///
 /// // With the `anykms` facade, `anykms::retry_layer()` instead of `RetryLayer::new(sleep)`.
-/// fn verifier<P: PublicKeys>(src: P, sleep: SleepFn) -> Retry<CachedVerifier<P>> {
-///     RetryLayer::new(sleep)
-///         .with_policy(RetryPolicy::default().with_retry_on_hint(true))
-///         .wrap(CachedVerifier::new(src, SignatureAlgorithm::EcdsaP256Sha256))
+/// fn verifier<P: PublicKeys>(src: P, sleep: SleepFn) -> CachedVerifier<P> {
+///     let retry = RetryLayer::new(sleep)
+///         .with_policy(RetryPolicy::default().with_retry_on_hint(true));
+///     CachedVerifier::new(src, SignatureAlgorithm::EcdsaP256Sha256).with_retry(&retry)
 /// }
 /// ```
 ///
 /// The hinted retry waits at least the interval, re-reads the latest version and verifies. A
 /// retry layer on the source (e.g. on the registry it was opened from) never sees this
-/// rejection, which the verifier makes itself; when the source already retries, give the outer
-/// layer `with_max_attempts(2)` so attempts on transient errors do not multiply. The verifier
-/// does not re-read the latest version inline instead: that would let every forged version cost
-/// a backend request again.
+/// rejection, which the verifier makes itself; when the source already retries, give the
+/// verifier's layer `with_max_attempts(2)` so attempts on transient errors do not multiply. The
+/// verifier does not re-read the latest version inline instead: that would let every forged
+/// version cost a backend request again; with a retry layer, its budget bounds the sleeps a
+/// flood of forged versions can cause.
 ///
 /// # Revocation
 ///
@@ -275,6 +277,7 @@ pub struct CachedVerifier<P> {
     latest_refresh: Duration,
     version_ceiling: bool,
     require_low_s: bool,
+    retry: Option<RetryLayer>,
     state: Arc<Mutex<State>>,
 }
 
@@ -289,6 +292,7 @@ impl<P> Clone for CachedVerifier<P> {
             latest_refresh: self.latest_refresh,
             version_ceiling: self.version_ceiling,
             require_low_s: self.require_low_s,
+            retry: self.retry.clone(),
             state: self.state.clone(),
         }
     }
@@ -304,6 +308,7 @@ impl<P> std::fmt::Debug for CachedVerifier<P> {
             .field("max_entries", &self.max_entries)
             .field("version_ceiling", &self.version_ceiling)
             .field("require_low_s", &self.require_low_s)
+            .field("retry", &self.retry.as_ref().map(RetryLayer::policy))
             .field("cached_versions", &n)
             .finish()
     }
@@ -570,6 +575,7 @@ impl<P: PublicKeys> CachedVerifier<P> {
             latest_refresh: DEFAULT_LATEST_REFRESH,
             version_ceiling: true,
             require_low_s: false,
+            retry: None,
             state: Arc::new(Mutex::new(State::default())),
         }
     }
@@ -617,6 +623,19 @@ impl<P: PublicKeys> CachedVerifier<P> {
     pub fn require_low_s(mut self) -> Self {
         self.require_low_s = true;
         self.detach()
+    }
+
+    /// Retries each verification with `retry` (its policy, budget and deadline), as a retry
+    /// layer on a handle does. With `RetryPolicy::with_retry_on_hint(true)` this is what makes
+    /// the verifier tolerate a rotation (see [Rotation](CachedVerifier#rotation)): the ceiling
+    /// rejection the verifier itself makes carries a hint that only a layer around the verifier
+    /// can act on. Transient errors of the source (throttling, failover) are retried too; when the
+    /// source already retries, give this layer `with_max_attempts(2)`.
+    ///
+    /// Does not detach the cache: clones with and without a retry layer share their entries.
+    pub fn with_retry(mut self, retry: &RetryLayer) -> Self {
+        self.retry = Some(retry.clone());
+        self
     }
 
     /// The only signature algorithm this verifier accepts.
@@ -857,7 +876,7 @@ impl<P: PublicKeys> CachedVerifier<P> {
 
 /// A3: a signature naming a version the key does not have (the source's `UnknownKeyVersion`)
 /// is a signature that does not verify. The original error is kept as the source, and its retry
-/// hint (a version that may not have replicated yet) stays readable for `Retry`.
+/// hint (a version that may not have replicated yet) stays readable for `RetryLayer`.
 fn unknown_version_fails(e: Error) -> Error {
     if e.kind() != ErrorKind::UnknownKeyVersion {
         return e;
@@ -889,8 +908,8 @@ impl<P> crate::PinnedVerifier for CachedVerifier<P> {
     }
 }
 
-impl<P: PublicKeys> DigestVerifier for CachedVerifier<P> {
-    async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
+impl<P: PublicKeys> CachedVerifier<P> {
+    async fn verify_digest_once(&self, digest: &Digest, sig: &Signature) -> Result<()> {
         let (v, cached) = self.verifier(sig).await.map_err(unknown_version_fails)?;
         let r = v.verify_digest(digest, sig).await;
         if cached && mismatch(&r) && self.recheck(&sig.key_version().cloned(), &v).await {
@@ -904,10 +923,8 @@ impl<P: PublicKeys> DigestVerifier for CachedVerifier<P> {
         }
         r
     }
-}
 
-impl<P: PublicKeys> MessageVerifier for CachedVerifier<P> {
-    async fn verify_message(&self, msg: &[u8], sig: &Signature) -> Result<()> {
+    async fn verify_message_once(&self, msg: &[u8], sig: &Signature) -> Result<()> {
         let (v, cached) = self.verifier(sig).await.map_err(unknown_version_fails)?;
         let r = v.verify_message(msg, sig).await;
         if cached && mismatch(&r) && self.recheck(&sig.key_version().cloned(), &v).await {
@@ -920,6 +937,24 @@ impl<P: PublicKeys> MessageVerifier for CachedVerifier<P> {
                 .await;
         }
         r
+    }
+}
+
+impl<P: PublicKeys> DigestVerifier for CachedVerifier<P> {
+    async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
+        match &self.retry {
+            Some(retry) => retry.call(|| self.verify_digest_once(digest, sig)).await,
+            None => self.verify_digest_once(digest, sig).await,
+        }
+    }
+}
+
+impl<P: PublicKeys> MessageVerifier for CachedVerifier<P> {
+    async fn verify_message(&self, msg: &[u8], sig: &Signature) -> Result<()> {
+        match &self.retry {
+            Some(retry) => retry.call(|| self.verify_message_once(msg, sig)).await,
+            None => self.verify_message_once(msg, sig).await,
+        }
     }
 }
 
@@ -1225,11 +1260,9 @@ mod tests {
             Box::pin(tokio::time::sleep(dur))
         });
         let policy = anykms_core::RetryPolicy::default().with_retry_on_hint(true);
-        let retrying = anykms_core::RetryLayer::new(sleep)
-            .with_policy(policy)
-            .wrap(cv);
+        let retrying = cv.with_retry(&anykms_core::RetryLayer::new(sleep).with_policy(policy));
         retrying.verify_digest(&d, &signed(2, &d)).await.unwrap();
-        assert_eq!(retrying.inner().source.latests(), 2);
+        assert_eq!(retrying.source.latests(), 2);
     }
 
     #[tokio::test]
@@ -1267,7 +1300,7 @@ mod tests {
         for _ in 0..20 {
             let e = cv.verify_digest(&d, &forged).await.unwrap_err();
             // A3: the source's UnknownKeyVersion is a failed verification, the original kept
-            // as the source, the hint kept for Retry; the class stays Caller.
+            // as the source, the hint kept for the retry layer; the class stays Caller.
             assert_eq!(e.kind(), ErrorKind::VerificationFailed);
             assert!(hinted(&e));
             assert_eq!(e.class(), anykms_core::ErrorClass::Caller);

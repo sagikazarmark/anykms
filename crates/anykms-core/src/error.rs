@@ -441,7 +441,7 @@ impl Error {
     /// Marks an error whose kind is not retryable as worth one retry after at least `delay`: the
     /// backend knows the condition is often transient (a key or version not yet replicated to the
     /// node that answered, a key version still being generated) but cannot tell it from the
-    /// permanent one. [`Retry`](crate::Retry) acts on it only with
+    /// permanent one. [`RetryLayer`](crate::RetryLayer) acts on it only with
     /// [`RetryPolicy::retry_on_hint`](crate::RetryPolicy::retry_on_hint), see
     /// [`retry_hint`](Self::retry_hint).
     pub fn with_retry_hint(mut self, delay: Duration) -> Self {
@@ -538,7 +538,7 @@ impl Error {
     /// The backend's hint that this error, although its kind is not retryable, may go away when
     /// the request is repeated once after at least this delay (see
     /// [`with_retry_hint`](Self::with_retry_hint)). Errors of a retryable kind follow the normal
-    /// backoff and [`retry_after`](Self::retry_after) instead; [`Retry`](crate::Retry) ignores
+    /// backoff and [`retry_after`](Self::retry_after) instead; [`RetryLayer`](crate::RetryLayer) ignores
     /// their hint.
     pub fn retry_hint(&self) -> Option<Duration> {
         self.retry_hint
@@ -551,7 +551,7 @@ impl Error {
     /// A caller-class error is always [`Caller`](ErrorClass::Caller), even with a hint: the
     /// input may name a version that has not replicated yet, but it may as well be forged (a
     /// `kid` such as `vault:v999999:`), so it must not turn into a 503. It keeps its hint in
-    /// [`retry_hint`](Self::retry_hint), and [`Retry`](crate::Retry) still honors it. Other
+    /// [`retry_hint`](Self::retry_hint), and [`RetryLayer`](crate::RetryLayer) still honors it. Other
     /// hinted errors have kinds that are not retryable, so matching on
     /// [`is_retryable`](Self::is_retryable) and friends alone misses them; `class` encodes the
     /// order. A service answering HTTP requests can map the classes like this (the
@@ -837,7 +837,7 @@ mod tests {
     }
 
     /// A hint never lifts a caller-class error out of `Caller` (a forged `kid` must not become a
-    /// 503), but the hint stays readable for `Retry`.
+    /// 503), but the hint stays readable for `RetryLayer`.
     #[test]
     fn caller_class_errors_ignore_the_hint_in_class() {
         let d = Duration::from_secs(1);

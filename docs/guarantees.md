@@ -74,12 +74,12 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   [From synchronous code](guide.md#from-synchronous-code)). The runtime requirement is the
   transport's (`HttpTransport::ready`); another transport may have none, though the backends'
   credential caches still use tokio's synchronization primitives. Core, recipes and local are
-  runtime-agnostic (any async executor; you supply `Retry`'s sleep function and, optionally, its
+  runtime-agnostic (any async executor; you supply `RetryLayer`'s sleep function and, optionally, its
   clock).
 - **`wasm32-unknown-unknown` on a JS host** (browsers, Node.js, Cloudflare Workers): core,
   recipes, local and conformance build and run there with their `js` feature. `std::time` has no
   clock on that target, so the feature routes every clock read through `anykms_core::time`:
-  `performance.now()` for the monotonic clock (`Retry`'s default clock, `CachedVerifier`, the DEK
+  `performance.now()` for the monotonic clock (`RetryLayer`'s default clock, `CachedVerifier`, the DEK
   cache) and `Date.now()` for the wall clock (JWT `iat`/`exp`, local keyset timestamps), with no
   extra dependencies beyond the `js-sys`/`wasm-bindgen` that `getrandom`'s JS backend already
   brings. The same feature enables that backend. The RSA backend must be `rsa-rustcrypto` (aws-lc-rs does
@@ -119,7 +119,8 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   `AwsProviderBuilder::credentials` with `StaticCredentials`, `Credentials::from_json` or
   `static_token` for GCP, a `ClientSecret` for Azure.
 - **Retries.** Backends never retry internally (apart from one re-authentication); retries live in
-  `Retry` and `RetryLayer`. The budget caps retries at about 10% of requests per `RetryBudget`,
+  `RetryLayer` (as a layer on handles, or `RetryLayer::call` around any other future, which is
+  how `CachedVerifier::with_retry` retries). The budget caps retries at about 10% of requests per `RetryBudget`,
   and each `RetryLayer` has one. A layer on the registry (`RegistryBuilder::layer`) shares its
   budget across **every backend** behind it, so a struggling backend can spend the retries of a
   healthy one. For a bound per backend, give each backend's handles their own layer (or

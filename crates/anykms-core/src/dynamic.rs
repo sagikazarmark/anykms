@@ -591,11 +591,12 @@ impl<'a> LayerCx<'a> {
 /// Wraps every part of an opaque handle with a decorator, keeping the handle's exact set of
 /// optional parts.
 ///
-/// Wrapping a whole handle in a generic decorator loses capability tracking: `Retry<AeadKey>`
-/// implements `Rewrap` whether or not the `AeadKey` has a rewrap part, and is no longer an
-/// `AeadKey`. A `Layer` instead wraps each part separately (`AeadKey::layer`, and
-/// [`RegistryBuilder::layer`](crate::RegistryBuilder::layer) for every handle a registry
-/// opens), so `supports_*` keeps answering truthfully and the result is the same handle type.
+/// Wrapping a whole handle in a generic decorator would lose capability tracking: a
+/// `Decorator<AeadKey>` implementing `Rewrap` would claim it whether or not the `AeadKey` has a
+/// rewrap part, and would no longer be an `AeadKey`. A `Layer` instead wraps each part separately
+/// (`AeadKey::layer`, and [`RegistryBuilder::layer`](crate::RegistryBuilder::layer) for every
+/// handle a registry opens), so `supports_*` keeps answering truthfully and the result is the
+/// same handle type.
 ///
 /// Every part goes through the required [`part`](Self::part). Parts added in later releases (a
 /// new handle kind, a new optional part) reach every existing layer there, as a [`Part`] variant
@@ -2079,19 +2080,7 @@ mod tests {
         );
         assert_eq!(PartKind::WrappedDataKeys.as_str(), "wrapped_data_keys");
 
-        // Typed path and bridges.
-        let typed = crate::RetryLayer::new(crate::instant_sleep())
-            .with_policy(crate::RetryPolicy::immediate())
-            .wrap(Wrapped {
-                fail: std::sync::Mutex::new(1),
-                calls: 0.into(),
-            });
-        assert!(
-            typed
-                .generate_wrapped_data_key(DataKeySpec::Aes256, b"")
-                .await
-                .is_ok()
-        );
+        // Bridges.
         let dynamic: Arc<dyn DynWrappedDataKeys> = Arc::new(Wrapped {
             fail: std::sync::Mutex::new(0),
             calls: 0.into(),
@@ -2146,8 +2135,7 @@ mod tests {
         }
     }
 
-    /// A backend's extension trait, implemented for the opaque handle through the layered slot
-    /// and for its typed decorators.
+    /// A backend's extension trait, implemented for the opaque handle through the layered slot.
     trait Tagging {
         async fn tag(&self, input: &[u8], label: &str) -> Result<Vec<u8>>;
     }
@@ -2162,17 +2150,6 @@ mod tests {
                 Box::pin(async move { key.tag(input, label).await })
             })
             .await
-        }
-    }
-    impl Tagging for crate::Retry<Arc<Native>> {
-        async fn tag(&self, input: &[u8], label: &str) -> Result<Vec<u8>> {
-            self.call(|| self.inner().tag(input, label)).await
-        }
-    }
-    impl<T: Tagging + Sync> Tagging for crate::Observed<T> {
-        async fn tag(&self, input: &[u8], label: &str) -> Result<Vec<u8>> {
-            self.call(Operation::Mac, "native.tag", self.inner().tag(input, label))
-                .await
         }
     }
 
@@ -2254,27 +2231,15 @@ mod tests {
         assert_eq!(native.calls(), 2);
     }
 
-    /// The typed path: `Retry::call` and `Observed::call` give a backend's extension trait on
-    /// its typed handle the same retries and events.
+    /// Without a handle, `RetryLayer::call` gives a backend's extension method on its typed key
+    /// the same retries.
     #[tokio::test]
-    async fn typed_extension_calls_are_retried_and_observed() {
-        let (observe, events) = observing();
+    async fn typed_extension_calls_are_retried() {
         let native = Native::new(2);
-        let retried = crate::RetryLayer::new(crate::instant_sleep())
-            .with_policy(crate::RetryPolicy::immediate())
-            .wrap(native.clone());
-        let k = observe.wrap(retried);
-        assert_eq!(k.tag(b"t", "y").await.unwrap(), b"ty");
+        let retry = crate::RetryLayer::new(crate::instant_sleep())
+            .with_policy(crate::RetryPolicy::immediate());
+        assert_eq!(retry.call(|| native.tag(b"t", "y")).await.unwrap(), b"ty");
         assert_eq!(native.calls(), 3);
-        assert_eq!(
-            *events.lock().unwrap(),
-            [(
-                PartKind::Extension,
-                Operation::Mac,
-                Some("native.tag"),
-                true
-            )]
-        );
     }
 
     /// The slot is a part like any other: a layer's catch-all sees it and may replace it, and
@@ -2501,12 +2466,6 @@ mod tests {
     async fn static_futures_are_spawnable() {
         let h = spawn_encrypt(Arc::new(Echo), b"s");
         assert_eq!(h.await.unwrap().unwrap(), b"s");
-        // Generic decorators keep it: `Retry<K>` over a generic `K`.
-        let h = spawn_encrypt(
-            Arc::new(crate::RetryLayer::new(crate::instant_sleep()).wrap(Echo)),
-            b"r",
-        );
-        assert_eq!(h.await.unwrap().unwrap(), b"r");
     }
 
     struct Signer;
@@ -2556,13 +2515,11 @@ mod tests {
         let bare = bare.with_describe(Arc::new(Signer));
         assert!(bare.describe().await.is_ok());
 
-        // Debug, including through `Retry` and as a bare `Arc<dyn DynX>`.
+        // Debug, including as a bare `Arc<dyn DynX>`.
         assert_eq!(
             format!("{full:?}"),
             "DigestSignerKey { backend: \"test\", resource: None, public_keys: true, describe: true, verifier: true, preflight: false }"
         );
-        let r = crate::RetryLayer::new(crate::instant_sleep()).wrap(full.clone());
-        assert!(format!("{r:?}").contains("DigestSignerKey"));
         let dynamic: Arc<dyn DynDigestSigner> = Arc::new(full);
         assert_eq!(format!("{dynamic:?}"), "DynDigestSigner { .. }");
     }
@@ -2594,9 +2551,6 @@ mod tests {
         assert_eq!(boxed.wrap_key(b"b").await.unwrap().as_bytes(), b"b");
         let borrowed: &dyn DynKeyWrap = &*kw;
         assert_eq!(borrowed.unwrap_key(&w).await.unwrap().as_slice(), b"dek");
-        // A decorator wraps `KeyWrap` on its own.
-        let retried = crate::RetryLayer::new(crate::instant_sleep()).wrap(kw);
-        assert_eq!(&*retried.unwrap_key(&w).await.unwrap(), b"dek");
     }
 
     struct Fails {
@@ -3098,14 +3052,6 @@ mod tests {
         assert_eq!(info(Box::new(key.clone()), &ct).await, want);
         let layered = key.layer(&crate::RetryLayer::new(crate::instant_sleep()));
         assert_eq!(info(layered, &ct).await, want);
-        assert_eq!(
-            info(
-                crate::RetryLayer::new(crate::instant_sleep()).wrap(Primary),
-                &ct
-            )
-            .await,
-            want
-        );
     }
 
     #[tokio::test]
@@ -3184,9 +3130,6 @@ mod tests {
         assert_eq!(via_trait(key.clone()), want);
         assert_eq!(via_trait(Box::new(key.clone())), want);
         assert_eq!(via_trait(Arc::new(key.clone())), want);
-        assert_eq!(via_trait(retry.wrap(key.clone())), want);
-        assert_eq!(via_trait(observe.wrap(key.clone())), want);
-        assert_eq!(via_trait(retry.wrap(bare.clone())), None);
 
         let kek = KeyWrapKey::from_aead(key.clone());
         assert_eq!(kek.semantics(), want.as_ref());
