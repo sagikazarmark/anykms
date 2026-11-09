@@ -245,7 +245,7 @@ to a keyed fingerprint.
 | `KeyStateInvalid` | config | the version the handle chose (its pinned version, or the primary version for encrypt) is `DISABLED`, `DESTROYED` or `DESTROY_SCHEDULED`, for every operation including `public_key()`; `PENDING_GENERATION`/`PENDING_IMPORT` (with a 2 s retry hint) | re-enable or restore the version, or move the URI (or the primary) to an enabled one |
 | `KeyVersionUnusable` | caller | a version taken from the input (the ciphertext's, a signature's or tag's, `public_key_version`) is `DISABLED`, `DESTROYED`, `DESTROY_SCHEDULED` or pending (with a 2 s retry hint) | rewrap or re-sign old data before disabling |
 | `UnknownKeyVersion` | caller | `public_key_version` names a version this key does not have (a forged or stale `kid`); on an RSA KEK, any version other than the pinned one (refused before any request: the handle unwraps with its pinned version only) | expected for forged input; to wrap offline to another version, open a KEK on that version |
-| `DecryptFailed` | caller | wrong key or AAD; tampered or truncated ciphertext | check the AAD scheme and the key URI |
+| `DecryptFailed` | caller | wrong key or AAD; tampered or truncated ciphertext | check the AAD scheme ([Choosing AAD](guide.md#choosing-aad)) and the key URI |
 | `VerificationFailed` | caller | the signature or tag does not match, names a version of another algorithm, or names a version this key does not have | expected for forged input |
 | `InvalidArgument` | caller | input over 64 KiB or over an HSM limit; a digest of the wrong algorithm; an unversioned or non-numeric signature or tag version | use `EnvelopeAead`; fix the calling code |
 | `Throttled` | retryable | a quota | back off; raise the quota; spread HSM load across regions |

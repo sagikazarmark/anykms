@@ -45,7 +45,8 @@ so it can be replaced (rewrap, migration to another KEK) without touching the pa
 2. `okm = HKDF-SHA256(salt = none, ikm = DEK, info = "anykms/envelope/v1", L = 64)`.
    `enc_key = okm[0..32]`, `commit = okm[32..64]`.
 3. `header = magic ‖ version ‖ flags ‖ commit ‖ nonce` (49 bytes).
-4. `gcm_aad = header ‖ u64(len(user_aad)) ‖ user_aad`.
+4. `gcm_aad = header ‖ u64(len(user_aad)) ‖ user_aad`. The envelope treats `user_aad` as opaque
+   bytes; [`docs/aad-format.md`](aad-format.md) specifies a canonical layout for it (draft).
 5. `payload = AES-256-GCM(enc_key, nonce, plaintext, gcm_aad)`. The plaintext, padding
    included, must be at most 2^36 − 32 bytes.
 6. `wrapped_dek = KEK.wrap_key(DEK)`, which for an AEAD KEK (adapted with `AeadKeyWrap`) is

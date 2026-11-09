@@ -264,6 +264,67 @@ async fn ciphertexts_as_text(
 }
 
 #[rustfmt::skip]
+async fn choosing_aad(
+    envelope: anykms::recipes::EnvelopeAead<anykms::KeyWrapKey>,
+) -> anyhow::Result<()> {
+    use anykms::prelude::*;
+
+    // snippet: docs/guide.md
+    /// Canonical AAD for `purpose` over non-secret `fields` (docs/aad-format.md): a purpose tag, then
+    /// the fields length-prefixed and key-sorted, so no two field sets share bytes and every writer
+    /// produces the same bytes. Apply the document's caps and charsets before calling it.
+    fn aad(purpose: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+        let mut fields = fields.to_vec();
+        fields.push(("purpose", purpose));
+        fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut out = b"anykms/aad/v1\0".to_vec();
+        out.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        for (k, v) in fields {
+            out.extend_from_slice(&(k.len() as u16).to_be_bytes());
+            out.extend_from_slice(k.as_bytes());
+            out.extend_from_slice(&(v.len() as u16).to_be_bytes());
+            out.extend_from_slice(v.as_bytes());
+        }
+        out
+    }
+
+    let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])).await?;
+    let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])).await?;
+    // end snippet
+    assert_eq!(&*ssn, "123-45-6789");
+    // The guide's encoder agrees with the committed vectors (tests/vectors/aad_v1.json,
+    // `two_fields`: fields given as record, owner; encoded owner, purpose, record).
+    let mut expected = b"anykms/aad/v1\0".to_vec();
+    for part in [
+        &[0u8, 3][..],
+        &[0, 5], b"owner", &[0, 1], b"7",
+        &[0, 7], b"purpose", &[0, 6], b"escrow",
+        &[0, 6], b"record", &[0, 4], b"r-42",
+    ] {
+        expected.extend_from_slice(part);
+    }
+    assert_eq!(aad("escrow", &[("record", "r-42"), ("owner", "7")]), expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn choosing_aad_runs() {
+    use anykms::Registry;
+    use anykms::local::{LocalKeyset, LocalProvider};
+    use anykms::recipes::EnvelopeAead;
+
+    let keyset = LocalKeyset::builder().aead("app-kek").build();
+    let registry = Registry::builder()
+        .provider(LocalProvider::new(keyset).allow_ephemeral_local_keys())
+        .build()
+        .unwrap();
+    let kek = registry.key_wrap("local://default/app-kek").unwrap();
+    choosing_aad(EnvelopeAead::new("app-kek", kek).unwrap())
+        .await
+        .unwrap();
+}
+
+#[rustfmt::skip]
 async fn jwts(registry: anykms::Registry) -> anyhow::Result<()> {
     // snippet: docs/guide.md
     use std::time::Duration;

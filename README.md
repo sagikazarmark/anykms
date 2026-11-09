@@ -169,7 +169,8 @@ cargo run -p anykms --features transit,tower --example tower_transport
 - Operator guides: [Vault and OpenBao](https://github.com/sagikazarmark/anykms/blob/main/docs/operations.md), [AWS](https://github.com/sagikazarmark/anykms/blob/main/docs/operations-aws.md),
   [GCP](https://github.com/sagikazarmark/anykms/blob/main/docs/operations-gcp.md), [Azure](https://github.com/sagikazarmark/anykms/blob/main/docs/operations-azure.md). Policies, credentials, TLS,
   quotas, and a runbook mapping each error to a cause and an action.
-- Formats: [envelope](https://github.com/sagikazarmark/anykms/blob/main/docs/envelope-format.md), [Azure ciphertext frame](https://github.com/sagikazarmark/anykms/blob/main/docs/azure-ciphertext.md).
+- Formats: [envelope](https://github.com/sagikazarmark/anykms/blob/main/docs/envelope-format.md), [Azure ciphertext frame](https://github.com/sagikazarmark/anykms/blob/main/docs/azure-ciphertext.md),
+  [canonical AAD](https://github.com/sagikazarmark/anykms/blob/main/docs/aad-format.md) (draft).
 - [Glossary](https://github.com/sagikazarmark/anykms/blob/main/docs/glossary.md), [API reference](https://docs.rs/anykms).
 - Design: [plan, decisions and review history](https://github.com/sagikazarmark/anykms/blob/main/docs/PLAN.md),
   [verified transit server behavior](https://github.com/sagikazarmark/anykms/blob/main/docs/research/vault-openbao-transit.md).

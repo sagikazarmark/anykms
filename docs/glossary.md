@@ -10,7 +10,8 @@ names link to their rustdoc on docs.rs.
 Context bound to a ciphertext without being encrypted, such as `users/42/ssn`: decrypting with
 other AAD fails with `DecryptFailed`. An empty AAD is the same as no AAD on every backend. AAD
 must not be secret: some backends log it (AWS records it in CloudTrail as the encryption
-context).
+context). [`docs/aad-format.md`](aad-format.md) specifies a canonical layout for structured AAD
+(a purpose and key/value fields), as a draft with test vectors; anykms ships no type for it yet.
 
 ### Backend
 
