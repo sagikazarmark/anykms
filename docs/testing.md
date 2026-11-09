@@ -71,7 +71,8 @@ assert_eq!(&*kek.decrypt(&ct, b"users/42/ssn").await?, b"123-45-6789");
 
 ## Running the conformance suite
 
-Backends prove themselves with the conformance suite:
+Backends prove themselves with the conformance suite ([Writing a backend](backend-guide.md)
+explains how a backend wires it up):
 
 ```sh
 scripts/dev-up.sh --sealed --tls                     # Vault + OpenBao dev servers (docker compose)

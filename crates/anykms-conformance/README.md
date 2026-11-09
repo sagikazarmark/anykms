@@ -44,7 +44,9 @@ a toy in-memory KMS with AES-256-GCM keys, its typed handle (`Aead`, `Describe`)
 and a fixture that declares every feature, in about 250 lines, passing the suite on both paths
 (`cargo run -p anykms-conformance --example minimal_backend`). It is a test target too, so CI
 runs it. The `Provider` rustdoc lists the error kinds the suite expects (its "Errors" section),
-and each capability trait the kinds of its own operations.
+and each capability trait the kinds of its own operations. The guide
+[Writing a backend](https://github.com/sagikazarmark/anykms/blob/main/docs/backend-guide.md)
+walks through the three pieces, the error contract and publishing a backend of your own.
 
 **Stability.** The fixture API may change in minor releases while backends are added. New
 `Feature`s and new cases land only in a `0.(x+1)` release, never in a patch: a fixture must

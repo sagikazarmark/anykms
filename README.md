@@ -28,7 +28,8 @@
   keeps secrets out of errors and zeroizes the buffers it owns.
 - 🚦 **Typed errors and retries.** One error taxonomy for every backend, with retryable, config
   and caller classes, and a retry layer with a shared budget.
-- ✅ **Conformance-tested.** Every backend, third-party ones included, runs the same suite.
+- ✅ **Conformance-tested.** Every backend, third-party ones included, runs the same suite;
+  [writing a backend](https://github.com/sagikazarmark/anykms/blob/main/docs/backend-guide.md) is documented.
 - 🧪 **Testable.** In-memory keys with rotation and fault injection.
 
 | Backend | Feature | Key URI |
@@ -164,6 +165,8 @@ cargo run -p anykms --features transit,tower --example tower_transport
 - [What differs between backends](https://github.com/sagikazarmark/anykms/blob/main/docs/backends.md): per-backend behavior and how anykms shows it.
 - [Crates and Cargo features](https://github.com/sagikazarmark/anykms/blob/main/docs/features.md): the crates, features, build requirements and
   public dependencies.
+- [Writing a backend](https://github.com/sagikazarmark/anykms/blob/main/docs/backend-guide.md): typed handles, the provider, the error contract,
+  running the conformance suite, publishing a community backend.
 - [Guarantees and limits](https://github.com/sagikazarmark/anykms/blob/main/docs/guarantees.md): zeroization, transport, FIPS scope, size limits,
   MSRV, runtimes.
 - Operator guides: [Vault and OpenBao](https://github.com/sagikazarmark/anykms/blob/main/docs/operations.md), [AWS](https://github.com/sagikazarmark/anykms/blob/main/docs/operations-aws.md),

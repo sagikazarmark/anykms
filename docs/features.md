@@ -18,6 +18,16 @@ member crates can also be used directly.
 | [`anykms-local`](../crates/anykms-local) | in-memory software keys, **tests and development only** |
 | [`anykms-conformance`](../crates/anykms-conformance) | the shared conformance suite for backends, including third-party ones (published; its fixture API may change in minor releases, and new `Feature`s and cases come only in minor releases) |
 
+### Community backends
+
+A backend for another service, or for a kind of key custody this repository does not provide (a
+software KEK provisioned from a secret, say), is a crate of its own that depends on `anykms-core`
+and runs `anykms-conformance` in its own CI. An application depends on it directly and registers
+it with `Registry::builder().provider(..)` or next to the defaults with
+`anykms::with_default_providers()?.provider(..)`; the facade forwards workspace crates only. What
+this project vouches for in such a crate is that it passes the suite; it does not review or
+maintain it. [Writing a backend](backend-guide.md) is the guide.
+
 ## Cargo features
 
 Features choose backends and crypto implementations, with sensible defaults. Cargo unifies
