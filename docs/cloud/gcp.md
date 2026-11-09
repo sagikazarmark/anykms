@@ -571,8 +571,17 @@ Nothing emulates silently. The only built-in emulation is local verification, wh
 
 **There is no official emulator.** Community emulators were evaluated and none is used in CI:
 
-- `blackwell-systems/gcp-kms-emulator` has REST, but no MAC and no CRC32C, and signs with
-  secp256k1 only [S21].
+- `blackwell-systems/gcp-kms-emulator` serves gRPC and REST. As of v0.10.2 (2026-11-04) its
+  README lists `MacSign`/`MacVerify` (`HMAC_SHA1` to `HMAC_SHA512`), CRC32C on every request and
+  response field with the `verified*Crc32c` flags, `AsymmetricSign` with RSA PKCS#1 v1.5
+  (2048/3072/4096), ECDSA P-256, P-384 and secp256k1, and Ed25519, and RSA-OAEP
+  `AsymmetricDecrypt`; no RSA-PSS and no `HSM` protection level. An earlier version of this note
+  ("no MAC, no CRC32C, secp256k1 only") came from an out-of-date README, corrected by its
+  maintainer (issue #31). v0.10.2 also moved REST errors to the Cloud KMS
+  `{"error": {code, message, status}}` shape, mirrors `verifiedSuccessIntegrity` from `success`,
+  and uses Cloud KMS wording for disabled-version and wrong-purpose messages; its maintainer
+  reports that it passes the response checks and error mapping of §7. This project has not
+  verified that and does not run it in CI [S21].
 - `fake-cloud-kms` is gRPC only.
 - `floci-gcp`, `cloudburrow` and `localgcp` have unverified fidelity of error codes and messages.
 
@@ -835,5 +844,5 @@ allowlists optional (§23 Q8). Q2, Q3, Q6, Q8, Q9 and Q10 are still open.
 - [S18] "Permission … denied on resource … (or it may not exist)": https://github.com/hashicorp/terraform-provider-google/issues/5103
 - [S19] Quotas (`RESOURCE_EXHAUSTED`, HTTP 429, per-second enforcement): https://docs.cloud.google.com/kms/quotas
 - [S20] Enable and disable key versions (propagation "usually within a minute"): https://docs.cloud.google.com/kms/docs/enable-disable
-- [S21] Community emulators: https://github.com/blackwell-systems/gcp-kms-emulator , https://github.com/winor30/fake-cloud-kms , https://github.com/floci-io/floci-gcp
+- [S21] Community emulators: https://github.com/blackwell-systems/gcp-kms-emulator (capabilities per its README and the v0.10.2 release notes, https://github.com/blackwell-systems/gcp-kms-emulator/releases/tag/v0.10.2 ), https://github.com/winor30/fake-cloud-kms , https://github.com/floci-io/floci-gcp
 - [S22] Permissions and roles: https://docs.cloud.google.com/kms/docs/reference/permissions-and-roles
