@@ -10,7 +10,7 @@ use anykms_core::{
 };
 use base64::Engine as _;
 
-use super::util::{marker, two};
+use super::util::{marker, marker_key, two};
 use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind, expect_kind_named};
 use crate::fixture::{Feature, Fixture, TestKeyKind};
 
@@ -663,32 +663,29 @@ pub(crate) async fn hygiene_data_keys<F: Fixture>(c: Ctx<F>) -> CaseResult {
     l.check()
 }
 
-/// Key material passed to a key-wrapping key never appears in errors.
+/// Key material passed to a key-wrapping key never appears in errors. The material is 32 bytes,
+/// the one length every key-wrapping key accepts (`marker_key`).
 pub(crate) async fn hygiene_key_wrap<F: Fixture>(c: Ctx<F>) -> CaseResult {
-    let secret = marker("KEY");
+    let secret = marker_key("KEY");
     let [key, other] = two(c.keys(TestKeyKind::KeyWrap, 2).await?);
     let k = c.key_wrap(&key.uri).ctx("open")?;
     let ko = c.key_wrap(&other.uri).ctx("open other")?;
-    let wrapped = k.wrap_key(secret.as_bytes()).await.ctx("wrap_key")?;
+    let wrapped = k.wrap_key(&secret).await.ctx("wrap_key")?;
     let missing = c
         .key_wrap(&c.fx.missing_key_uri(TestKeyKind::KeyWrap))
         .ctx("open missing")?;
-    let mut l = Leaks::new(&c, &[("wrapped key material", secret.as_bytes())]);
+    let mut l = Leaks::new(&c, &[("wrapped key material", &secret[..])]);
     l.push("another key", ko.unwrap_key(&wrapped).await);
     l.push(
         "key material as wrapped key",
-        k.unwrap_key(&Ciphertext::from_bytes(secret.as_bytes().to_vec()))
-            .await,
+        k.unwrap_key(&Ciphertext::from_bytes(secret.to_vec())).await,
     );
-    l.push(
-        "wrap with a missing key",
-        missing.wrap_key(secret.as_bytes()).await,
-    );
+    l.push("wrap with a missing key", missing.wrap_key(&secret).await);
     if let Some(p) = c.unauthorized() {
         let uk = p
             .key_wrap(&key.uri, &OpenOptions::new())
             .ctx("open unauthorized")?;
-        l.push("denied credentials", uk.wrap_key(secret.as_bytes()).await);
+        l.push("denied credentials", uk.wrap_key(&secret).await);
     }
     l.check()
 }

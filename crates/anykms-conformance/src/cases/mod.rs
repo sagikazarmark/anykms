@@ -220,6 +220,11 @@ pub(crate) fn all<F: Fixture>() -> Vec<Case<F>> {
             preflight::generic_preflight_disabled_primary::<F>,
         ),
         case(
+            "keywrap::authentication_failures",
+            &[KeyWrap],
+            aead::key_wrap_authentication_failures::<F>,
+        ),
+        case(
             "keywrap::disabled_key",
             &[KeyWrap, Disable, Describe, PreflightState],
             aead::key_wrap_disabled_key::<F>,

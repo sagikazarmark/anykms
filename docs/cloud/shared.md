@@ -149,6 +149,7 @@ Effort: S ≈ half a day, M ≈ 1–3 days, L ≈ 4+ days.
 | `describe::preflight_disabled`, `describe::preflight_disabled_version` (release review) | `PreflightState` plus the key family |
 | `describe::generic_preflight_disabled_primary` (release plan 2.8, R-49) | `DisableVersion, Describe, DescribeVersionState`; floating key kinds with a reported primary version |
 | `keywrap::disabled_key` (release review) | `KeyWrap, PreflightState` |
+| `keywrap::authentication_failures` (#38) | `KeyWrap`: every unwrap failure is `DecryptFailed`, a garbled prefix included |
 | `mac::*` | `Mac`; `mac::<alg>::rotation` → `Mac, RotateMac` |
 | `mac::<alg>::input_limit` (new) | `Mac, MaxMessageLen` |
 | `mac::wrong_key_type` | split: `mac::aead_key_as_mac` (`Mac, Aead`), `mac::hmac_key_as_aead` (`Mac, Aead`); a signing-key variant `mac::signing_key_as_mac` (`Mac, Signing(EcdsaP256Sha256)`) covers GCP-like fixtures without AEAD |

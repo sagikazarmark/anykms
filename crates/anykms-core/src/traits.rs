@@ -496,7 +496,9 @@ pub trait Describe: Send + Sync {
 /// authentication failure of [`unwrap_key`](Self::unwrap_key) is the same `DecryptFailed`, and
 /// wrapping to a disabled key is `KeyStateInvalid`, also where wrapping runs locally with the
 /// public key once the handle has read the key's state (`keywrap::disabled_key`), so no data key
-/// is wrapped that only a disabled key could unwrap.
+/// is wrapped that only a disabled key could unwrap. A key length the key cannot wrap (RSA-OAEP's
+/// modulus bound, AES-KW's multiple of 8 bytes of at least 16) is `InvalidArgument` before any
+/// request; every key wraps 32 bytes.
 ///
 /// Not object-safe; use `Arc<dyn DynKeyWrap>` (see [`DynKeyWrap`](crate::DynKeyWrap)) or
 /// [`KeyWrapKey`](crate::KeyWrapKey) for trait objects.
@@ -507,11 +509,15 @@ pub trait Describe: Send + Sync {
     note = "open the KEK with `registry.key_wrap(uri)`, or adapt an AEAD key explicitly with `.into_key_wrap()` (wraps with empty AAD)"
 )]
 pub trait KeyWrap: Send + Sync {
-    /// Wraps `key`.
+    /// Wraps `key`. A length this key cannot wrap is `InvalidArgument`; 32 bytes always works.
     async fn wrap_key(&self, key: &[u8]) -> Result<Ciphertext>;
 
     /// Unwraps a key wrapped by [`wrap_key`](KeyWrap::wrap_key). Any authentication failure is
-    /// [`ErrorKind::DecryptFailed`](crate::ErrorKind::DecryptFailed).
+    /// [`ErrorKind::DecryptFailed`](crate::ErrorKind::DecryptFailed): another key's wrapped key,
+    /// a tampered or truncated one, bytes that are no wrapped key at all, and a wrapped key whose
+    /// prefix (a version, a key identifier) names material this key does not have. The prefix
+    /// only selects what to try; a mismatch there is not a configuration error
+    /// (`keywrap::authentication_failures`).
     async fn unwrap_key(&self, wrapped: &Ciphertext) -> Result<Zeroizing<Vec<u8>>>;
 
     /// The key version a wrapped key was produced with, parsed locally without I/O, or `Ok(None)`
