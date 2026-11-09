@@ -101,6 +101,6 @@ pub use zeroize::Zeroizing;
 pub mod prelude {
     pub use crate::{
         Aead, DataKeys, Describe, DigestSigner, DigestVerifier, KeyWrap, Mac, MessageSigner,
-        MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, WrappedDataKeys,
+        MessageVerifier, PinnedVerifier, Preflight, PublicKeys, Rewrap, Semantics, WrappedDataKeys,
     };
 }

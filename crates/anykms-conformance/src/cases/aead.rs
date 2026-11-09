@@ -2,11 +2,11 @@
 
 use anykms_core::prelude::*;
 use anykms_core::{
-    Capabilities, DataKeyAad, DataKeySpec, ErrorKind, KeyInfo, KeySemantics, KeyState, KeyVersion,
-    Operation, StateScope, VersionModel,
+    Capabilities, Ciphertext, DataKeyAad, DataKeySpec, ErrorKind, KeyInfo, KeySemantics, KeyState,
+    KeyVersion, Operation, StateScope, VersionModel,
 };
 
-use super::util::{tamper, truncate, two};
+use super::util::{tamper, tamper_prefix, truncate, two};
 use crate::ctx::{CaseResult, Check, Ctx, ensure, expect_kind, require_semantics};
 use crate::fixture::{Feature, Fixture, TestKey, TestKeyKind};
 
@@ -292,6 +292,50 @@ pub(crate) async fn disabled_key<F: Fixture>(c: Ctx<F>) -> CaseResult {
         Ok(())
     })
     .await
+}
+
+/// Every failure to unwrap is the same `DecryptFailed`, as [`KeyWrap::unwrap_key`] promises:
+/// another key's wrapped key, a tampered prefix (the version, key identifier or magic a framed
+/// format keeps there), a tampered body, a truncated wrapped key, and bytes that are no wrapped
+/// key at all. The prefix only selects what to try: a wrapped key naming material this key does
+/// not have is a caller error about this input, never a config-class kind, so nobody who can
+/// write a stored ciphertext can page an operator by editing eight bytes.
+pub(crate) async fn key_wrap_authentication_failures<F: Fixture>(c: Ctx<F>) -> CaseResult {
+    let [ka, kb] = two(c.keys(TestKeyKind::KeyWrap, 2).await?);
+    let a = c.key_wrap(&ka.uri).ctx("open a")?;
+    let b = c.key_wrap(&kb.uri).ctx("open b")?;
+    let dek = [7u8; 32];
+    let wrapped = a.wrap_key(&dek).await.ctx("wrap_key")?;
+    ensure!(
+        *a.unwrap_key(&wrapped).await.ctx("unwrap_key")? == dek,
+        "unwrap_key returned different key material"
+    );
+    expect_kind(
+        b.unwrap_key(&wrapped).await,
+        ErrorKind::DecryptFailed,
+        "another key's wrapped key",
+    )?;
+    expect_kind(
+        a.unwrap_key(&tamper_prefix(&wrapped)).await,
+        ErrorKind::DecryptFailed,
+        "tampered prefix",
+    )?;
+    expect_kind(
+        a.unwrap_key(&tamper(&wrapped)).await,
+        ErrorKind::DecryptFailed,
+        "tampered wrapped key",
+    )?;
+    expect_kind(
+        a.unwrap_key(&truncate(&wrapped)).await,
+        ErrorKind::DecryptFailed,
+        "truncated wrapped key",
+    )?;
+    expect_kind(
+        a.unwrap_key(&Ciphertext::from_bytes(dek.to_vec())).await,
+        ErrorKind::DecryptFailed,
+        "key material as wrapped key",
+    )?;
+    Ok(())
 }
 
 /// A disabled native key-wrapping key refuses to wrap with `KeyStateInvalid`, once `describe`

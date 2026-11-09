@@ -47,8 +47,11 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// [`KeyStateInvalid`](Self::KeyStateInvalid) (config) for every operation; a version taken from
 /// the input is [`KeyVersionUnusable`](Self::KeyVersionUnusable) or
 /// [`UnknownKeyVersion`](Self::UnknownKeyVersion) (caller), or
-/// [`VerificationFailed`](Self::VerificationFailed) when verifying. [`Error::class`] adds the
-/// [retry hint](Error::retry_hint) to the picture.
+/// [`VerificationFailed`](Self::VerificationFailed) when verifying, or
+/// [`DecryptFailed`](Self::DecryptFailed) when decrypting or unwrapping a key whose ciphertext
+/// names a version the key does not have (a version it has but may not use stays
+/// `KeyVersionUnusable`). [`Error::class`] adds the [retry hint](Error::retry_hint) to the
+/// picture.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -119,8 +122,11 @@ pub enum ErrorKind {
     /// The input names a key version this key does not have, or another key's version (an
     /// untrusted `kid`, a stale reference), e.g. in
     /// [`public_key_version`](crate::PublicKeys::public_key_version). A malformed version is
-    /// [`InvalidArgument`](Self::InvalidArgument), and verifying with an unknown version is
-    /// [`VerificationFailed`](Self::VerificationFailed).
+    /// [`InvalidArgument`](Self::InvalidArgument), verifying with an unknown version is
+    /// [`VerificationFailed`](Self::VerificationFailed), and decrypting or unwrapping a
+    /// ciphertext that names one is [`DecryptFailed`](Self::DecryptFailed): the version is part
+    /// of the ciphertext, and a ciphertext a key cannot open is a `DecryptFailed` whatever the
+    /// reason.
     ///
     /// A caller error. It may carry a [retry hint](Error::retry_hint) when the version may not
     /// have replicated yet; [`Error::class`] is still [`Caller`](ErrorClass::Caller). Backends
