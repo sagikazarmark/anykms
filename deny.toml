@@ -18,6 +18,11 @@ ignore = [
   # public-key operations on throwaway keys, nothing shipped. Drop this once jsonwebtoken moves to
   # the 0.14 RustCrypto generation (`cargo tree -i crypto-bigint@0.5.5`).
   { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 only via the dev-dependency jsonwebtoken, verification of test tokens only" },
+  # pin-utils (a `pin_mut!` macro, archived upstream 2026-10-01; informational, no vulnerability).
+  # Only aws-smithy-types brings it, through aws-credential-types: the AWS SDK credential bridge
+  # behind anykms-aws' opt-in `sdk-credentials` feature. Nothing here can replace it; drop this once
+  # the AWS SDK stops depending on it (`cargo tree -i pin-utils --all-features`).
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils only via aws-smithy-types (anykms-aws `sdk-credentials`), an unmaintained-crate notice with no vulnerability" },
 ]
 
 [licenses]
