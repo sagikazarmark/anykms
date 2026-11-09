@@ -54,6 +54,10 @@ Non-goals (v0.1), each with where it goes:
   (the core `KeyWrap` trait and `KeyWrapKey` handle exist since the 2026-10
   reviews, §19 and §20; an `AsymmetricDecrypt` trait is future work), BYOK, PQC. The envelope format reserves
   a version and flags for streaming.
+- Software key custody (decided 2026-11-09, §30): a production KEK whose root
+  material lives in the process, provisioned from a secret binding or a file.
+  `anykms-local` stays tests-only; a provisioned software KEK is a third-party
+  backend, proven by the conformance suite rather than maintained here.
 
 ## 2. Crate layout
 
@@ -2450,3 +2454,56 @@ API, cryptography and format, maintenance) and twice more on the reduced scope. 
   #35 (a provisioned software KEK backend) and #36 (its CLI). They were reviewed alongside #33;
   the reviews are on the issues, and their decisions, including whether anykms should hold root
   key material at all, are recorded here when taken.
+
+## 30. Software key custody is out of scope; a provisioned KEK is a third-party backend (2026-11-09)
+
+Issues #34, #35 and #36 proposed, for a Cloudflare Workers deployment without a KMS account, a
+provisioned software KEK (`anykms-keyring`: one descriptor string carrying up to 64 generations of
+32-byte roots, per-generation HKDF-derived keys, AES-GCM wrap of envelope DEKs, rotation by add →
+promote → rewrap → remove), two `KeySemantics` fields plus a fixture hook so it could pass
+conformance, and an `akr` CLI for descriptor provisioning and transition checks. Reviewed from
+four angles (core and conformance, cryptography and format, API and architecture, scope and
+operations); the reviews are on the issues. Decisions:
+
+- **Custody is a non-goal** (added to §1). anykms is the data-plane interface to key-management
+  services ([`spec.md`](spec.md) §10), the software backend is for tests and development (§7),
+  and key lifecycle belongs to IaC (§1). Holding root key material in-process would change the
+  README headline, the guarantee that KMS operations run in the KMS
+  ([`guarantees.md`](guarantees.md)), and the audit scope. The capability itself is convergent
+  design (the AWS Encryption SDK's raw AES keyring, Tink keysets, Rails and Laravel previous
+  keys, `MultiFernet`), and the gap is real: the "move to a real KMS is a KEK swap" story has no
+  production-grade KMS-less starting point. The honest case for it is no KMS account, no
+  per-request round trip and no per-call cost, not platform reach: Workers already reach AWS,
+  GCP and Azure KMS through anykms. The answer is the third-party backend path: `anykms-conformance`
+  is published, `examples/minimal_backend.rs` is the template, and the suite is what the project
+  vouches for. Reversing this is a deliberate decision recorded here, not a consequence of such a
+  crate existing.
+- **#34 closed; #38 replaces it.** A key check value is eight attacker-writable bytes of the
+  wrapped blob. Classifying its mismatch as `Configuration` would let anyone with row-write access
+  produce a config-class error, against the class rule (class follows kind; caller errors depend
+  on the input of one request), the `KeyWrap` contract (every authentication failure is
+  `DecryptFailed`) and the AWS precedent (`IncorrectKeyException`, a reliable "another key"
+  signal, maps to `DecryptFailed` with a message hint). `wrapped_key_length` worked around a
+  ~25-byte test marker; `invalid_provider_uri_error` weakened the `ParseUri` → `Configuration`
+  invariant for a dozen lines of grammar. #38 pins the contract instead:
+  `keywrap::authentication_failures` (another key's wrapped key, tampered prefix, tampered body,
+  truncated, raw material → `DecryptFailed`), a 32-byte hygiene marker, the `wrap_key`,
+  `unwrap_key` and `ErrorKind` doc sentences, and `Semantics` in the prelude.
+- **#35 amended into a tracking issue** for a backend incubated outside the workspace on anykms
+  0.2. The design conclusions it carries: every unwrap failure is `DecryptFailed`, distinguished
+  by stable `BackendDetail::code`s and without a retry hint (the descriptor is immutable for the
+  process, so an in-process retry never helps); AES-256-KW over the derived generation KEK
+  instead of random-nonce AES-GCM, whose 2^32-invocations-per-key bound nothing in a fleet can
+  count and which snapshot-cloned runtimes can break; a high-water mark in the descriptor so a
+  removed version is never reused; labels that name the format, not the crate; the `Provider`
+  shipped unconditionally (a Cargo-feature gate is the mechanism `LocalProvider` rejected in favour
+  of a runtime opt-in); no native `Rewrap`, because `EnvelopeAead::rewrap` skips the key-commitment
+  check that `rewrap_local` performs. Its formats freeze at that product's launch, not at any
+  upstream review; graduation, if ever, adopts the shipped format as legacy or owns a v2, and
+  requires reversing the non-goal above. Upstream deliverables: #38 and the documentation in #40
+  (backend-author guide, community-backends note, `with_default_providers` scope, the
+  `EnvelopeAead` first-poll sentence).
+- **#36 closed.** Lifecycle tooling stays with the operator; the transition check becomes a library
+  seam in the backend crate (`validate_transition(old, new)`), with the two rules the CLI's `diff`
+  lacked: promotion only to a version present in the old descriptor, and new versions strictly
+  above the high-water mark.
