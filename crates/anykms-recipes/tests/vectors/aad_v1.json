@@ -1,0 +1,501 @@
+{
+  "format": "anykms canonical AAD v1",
+  "invalid": [
+    {
+      "fields": [
+        [
+          "a",
+          "1"
+        ],
+        [
+          "a",
+          "2"
+        ]
+      ],
+      "name": "duplicate_key",
+      "purpose": "p",
+      "rule": "duplicate_key"
+    },
+    {
+      "fields": [
+        [
+          "purpose",
+          "x"
+        ]
+      ],
+      "name": "reserved_key",
+      "purpose": "p",
+      "rule": "reserved_key"
+    },
+    {
+      "fields": [
+        [
+          "a",
+          ""
+        ]
+      ],
+      "name": "empty_value",
+      "purpose": "p",
+      "rule": "empty_value"
+    },
+    {
+      "fields": [
+        [
+          "a",
+          "1"
+        ]
+      ],
+      "name": "empty_purpose",
+      "purpose": "",
+      "rule": "empty_purpose"
+    },
+    {
+      "fields": [
+        [
+          "a",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ]
+      ],
+      "name": "value_too_long",
+      "purpose": "p",
+      "rule": "value_too_long"
+    },
+    {
+      "fields": [
+        [
+          "kxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "1"
+        ]
+      ],
+      "name": "key_too_long",
+      "purpose": "p",
+      "rule": "key_too_long"
+    },
+    {
+      "fields": [
+        [
+          "f0",
+          "v"
+        ],
+        [
+          "f1",
+          "v"
+        ],
+        [
+          "f2",
+          "v"
+        ],
+        [
+          "f3",
+          "v"
+        ],
+        [
+          "f4",
+          "v"
+        ],
+        [
+          "f5",
+          "v"
+        ],
+        [
+          "f6",
+          "v"
+        ],
+        [
+          "f7",
+          "v"
+        ],
+        [
+          "f8",
+          "v"
+        ],
+        [
+          "f9",
+          "v"
+        ],
+        [
+          "f10",
+          "v"
+        ],
+        [
+          "f11",
+          "v"
+        ],
+        [
+          "f12",
+          "v"
+        ],
+        [
+          "f13",
+          "v"
+        ],
+        [
+          "f14",
+          "v"
+        ],
+        [
+          "f15",
+          "v"
+        ]
+      ],
+      "name": "too_many_fields",
+      "purpose": "p",
+      "rule": "too_many_fields"
+    },
+    {
+      "fields": [],
+      "name": "purpose_too_long",
+      "purpose": "pxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "rule": "purpose_too_long"
+    },
+    {
+      "fields": [
+        [
+          "Key",
+          "1"
+        ]
+      ],
+      "name": "key_uppercase",
+      "purpose": "p",
+      "rule": "key_charset"
+    },
+    {
+      "fields": [
+        [
+          "1key",
+          "1"
+        ]
+      ],
+      "name": "key_digit_first",
+      "purpose": "p",
+      "rule": "key_charset"
+    },
+    {
+      "fields": [
+        [
+          "a-b",
+          "1"
+        ]
+      ],
+      "name": "key_hyphen",
+      "purpose": "p",
+      "rule": "key_charset"
+    },
+    {
+      "fields": [],
+      "name": "purpose_underscore",
+      "purpose": "a_b",
+      "rule": "purpose_charset"
+    },
+    {
+      "fields": [
+        [
+          "café",
+          "1"
+        ]
+      ],
+      "name": "key_non_ascii",
+      "purpose": "p",
+      "rule": "key_charset"
+    },
+    {
+      "fields": [
+        [
+          "a",
+          "1\n"
+        ]
+      ],
+      "name": "value_newline",
+      "purpose": "p",
+      "rule": "value_control_char"
+    },
+    {
+      "fields": [
+        [
+          "a",
+          "1\u0000"
+        ]
+      ],
+      "name": "value_nul",
+      "purpose": "p",
+      "rule": "value_control_char"
+    },
+    {
+      "fields": [
+        [
+          "k00_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k01_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k02_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k03_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k04_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k05_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k06_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k07_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k08_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k09_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k10_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ]
+      ],
+      "name": "total_too_long",
+      "purpose": "total-cap",
+      "rule": "total_too_long"
+    }
+  ],
+  "label": "616e796b6d732f6161642f763100",
+  "valid": [
+    {
+      "aad": "616e796b6d732f6161642f76310000010007707572706f7365000773657373696f6e",
+      "description": "One field: purpose alone is a valid AAD.",
+      "fields": [],
+      "name": "purpose_only",
+      "purpose": "session"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000300056f776e65720001370007707572706f73650006657363726f7700067265636f72640004722d3432",
+      "description": "Fields given as record, owner; the output sorts owner, purpose, record.",
+      "fields": [
+        [
+          "record",
+          "r-42"
+        ],
+        [
+          "owner",
+          "7"
+        ]
+      ],
+      "name": "two_fields",
+      "purpose": "escrow"
+    },
+    {
+      "aad": "616e796b6d732f6161642f76310000040001610001310003615f62000132000261620001330007707572706f736500056f72646572",
+      "description": "Unsigned-byte key order: a, a_b (0x5f sorts before b), ab.",
+      "fields": [
+        [
+          "ab",
+          "3"
+        ],
+        [
+          "a_b",
+          "2"
+        ],
+        [
+          "a",
+          "1"
+        ]
+      ],
+      "name": "underscore_order",
+      "purpose": "order"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000400026b3100013100036b31300002313000026b320001320007707572706f736500056f72646572",
+      "description": "Keys sort as bytes, not numbers: k1, k10, k2.",
+      "fields": [
+        [
+          "k2",
+          "2"
+        ],
+        [
+          "k10",
+          "10"
+        ],
+        [
+          "k1",
+          "1"
+        ]
+      ],
+      "name": "digit_order",
+      "purpose": "order"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100001000206b30305f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30315f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30325f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30335f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30345f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30355f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30365f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30375f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30385f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30395f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31305f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31315f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31325f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31335f78787878787878787878787878787878787878787878787878787878009676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31345f7878787878787878787878787878787878787878787878787878787800967676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676760007707572706f73650030702d78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878",
+      "description": "A 48-byte purpose, 15 fields with 32-byte keys, one 255-byte value: every per-field cap at its maximum, within the total cap.",
+      "fields": [
+        [
+          "k00_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k01_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k02_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k03_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k04_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k05_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k06_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k07_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k08_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k09_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k10_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k11_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k12_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k13_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k14_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ]
+      ],
+      "name": "max_fields",
+      "purpose": "p-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000c00206b30305f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30315f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30325f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30335f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30345f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30355f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30365f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30375f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30385f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b30395f7878787878787878787878787878787878787878787878787878787800ff76767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767600206b31305f78787878787878787878787878787878787878787878787878787878005a7676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676767676760007707572706f73650009746f74616c2d636170",
+      "description": "Exactly 3072 bytes, the total cap.",
+      "fields": [
+        [
+          "k00_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k01_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k02_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k03_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k04_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k05_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k06_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k07_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k08_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k09_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ],
+        [
+          "k10_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+        ]
+      ],
+      "name": "total_cap",
+      "purpose": "total-cap"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000200046e616d650005636166c3a90007707572706f7365000474657874",
+      "description": "U+00E9: bytes c3 a9.",
+      "fields": [
+        [
+          "name",
+          "café"
+        ]
+      ],
+      "name": "utf8_nfc",
+      "purpose": "text"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000200046e616d65000663616665cc810007707572706f7365000474657874",
+      "description": "e then U+0301: bytes 65 cc 81. Values are byte-exact: no normalization.",
+      "fields": [
+        [
+          "name",
+          "café"
+        ]
+      ],
+      "name": "utf8_nfd",
+      "purpose": "text"
+    },
+    {
+      "aad": "616e796b6d732f6161642f763100000300036d61780014313834343637343430373337303935353136313500036d696e0001300007707572706f73650004696e7473",
+      "description": "Integers as the decimal text an application writes; there is no number kind on the wire.",
+      "fields": [
+        [
+          "min",
+          "0"
+        ],
+        [
+          "max",
+          "18446744073709551615"
+        ]
+      ],
+      "name": "u64_text",
+      "purpose": "ints"
+    }
+  ]
+}

@@ -88,6 +88,11 @@ jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rus
 name = "envelope_vectors"
 required-features = ["envelope"]
 
+# The canonical AAD vectors (docs/aad-format.md) need no feature: the crate has no implementation
+# of the encoding, the test holds the reference builder. Its envelope round trip is gated inside.
+[[test]]
+name = "aad_vectors"
+
 [[test]]
 name = "envelope_padding"
 required-features = ["envelope"]

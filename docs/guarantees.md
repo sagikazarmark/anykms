@@ -57,6 +57,11 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   [`docs/envelope-format.md`](envelope-format.md) and the committed test vectors. Its
   review outside the project is **pending**, so it is not yet recommended for long-lived data;
   the release that completes the review announces the promotion in its release notes.
+- **Canonical AAD v1 is a draft specification with no implementation in anykms.** Its bytes are
+  pinned by the committed test vectors ([`docs/aad-format.md`](aad-format.md)) and it shares the
+  envelope's pending external review, with the same long-lived-data caveat. Because an AAD is
+  rebuilt from the row rather than stored, a row bound to v1 stays on v1: a change from the review
+  would be a new label, never a reinterpretation.
 - **With an RSA KEK, every holder of the public key can write envelopes.** Wrapping needs only
   the public key, so such envelopes give confidentiality only, and the AAD does not authenticate
   the writer. An `EnvelopeKeyring` accepts envelopes under each of its KEKs, so a symmetric

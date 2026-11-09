@@ -15,6 +15,7 @@ covers permissions, credentials and environment variables: [Vault and OpenBao](o
 - [Key URIs](#key-uris)
 - [From synchronous code](#from-synchronous-code)
 - [Ciphertexts as text](#ciphertexts-as-text)
+- [Choosing AAD](#choosing-aad)
 - [JWTs and signatures](#jwts-and-signatures)
 - [Generic code and shared state](#generic-code-and-shared-state)
 
@@ -301,6 +302,51 @@ let ssn = envelope.decrypt_utf8(&ct, b"users/42/ssn").await?;
 let d = envelope.decrypt_with_info(&ct, b"users/42/ssn").await?;
 let version = d.key_version();
 ```
+
+## Choosing AAD
+
+AAD binds a ciphertext to its row: decrypting with other AAD fails. Every `encrypt` takes it as
+raw bytes, and the layout is the application's. Three things go wrong with ad-hoc layouts:
+concatenation without lengths is ambiguous (`("a", "bc")` and `("ab", "c")` collide), the field
+order drifts between writers, and nothing says which kind of record a ciphertext belongs to, so a
+value can be replayed from one table into another. [`docs/aad-format.md`](aad-format.md)
+specifies one layout that avoids all three: a purpose tag, then the fields length-prefixed and
+key-sorted, with test vectors any implementation (in any language) can check against. anykms
+ships no type for it yet; an application implements it in a few lines:
+
+```rust
+/// Canonical AAD for `purpose` over non-secret `fields` (docs/aad-format.md): a purpose tag, then
+/// the fields length-prefixed and key-sorted, so no two field sets share bytes and every writer
+/// produces the same bytes. Apply the document's caps and charsets before calling it.
+fn aad(purpose: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+    let mut fields = fields.to_vec();
+    fields.push(("purpose", purpose));
+    fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut out = b"anykms/aad/v1\0".to_vec();
+    out.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+    for (k, v) in fields {
+        out.extend_from_slice(&(k.len() as u16).to_be_bytes());
+        out.extend_from_slice(k.as_bytes());
+        out.extend_from_slice(&(v.len() as u16).to_be_bytes());
+        out.extend_from_slice(v.as_bytes());
+    }
+    out
+}
+
+let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])).await?;
+let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])).await?;
+```
+
+What this buys, and what it does not: it is misuse resistance for the binding convention, not a
+cryptographic strengthening. Against someone who holds a copy of the database but cannot wrap
+under the KEK, a row's ciphertext cannot be moved to another row, purpose or field value. It does
+not say who wrote a row (anyone who can wrap under the KEK can write one for any AAD), it gives no
+freshness (a row's own older ciphertext passes), and the envelope's key commitment does not cover
+the AAD (`docs/envelope-format.md`, Security notes). AAD is not secret: put identifiers in it, not
+data, and take them from data you trust for the row, never from the ciphertext's surroundings.
+The spec is a draft pending the same external review as the envelope format, and its bytes are
+pinned from the first release because an AAD is rebuilt, not stored: a row written with v1 stays
+on v1.
 
 ## JWTs and signatures
 

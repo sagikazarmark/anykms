@@ -2400,3 +2400,53 @@ clients). Implemented: MSRV 1.91 for every crate and feature; AWS profiles keep 
 removed; optional SDK credential bridges `anykms-aws/sdk-credentials`, `anykms-gcp/google-cloud-auth`,
 `anykms-azure/azure-identity`. Plan, decisions and deviations:
 [`docs/cloud/credentials-plan.md`](cloud/credentials-plan.md).
+
+## 29. Canonical AAD: a draft byte specification, no type (2026-11-09)
+
+Issue #33 proposed a typed, canonical `EncryptionContext` for envelope AAD behind a `context`
+feature: a `Purpose` trait with `const FIELDS`, a `purpose!` macro, a `ContextEnvelope` wrapper
+over `EnvelopeAead`/`EnvelopeKeyring` that only accepts typed contexts, per-purpose padding, and
+rotation helpers (`with_rotation_target`, `needs_rewrap`). Reviewed from four angles (scope,
+API, cryptography and format, maintenance) and twice more on the reduced scope. Decisions:
+
+- **Declined as a library type, for now.** The typed layer was one product's design: the name
+  collided with `anykms_aws::EncryptionContext` with opposite enforcement semantics (local bytes
+  the KMS never sees vs. a KMS-enforced, CloudTrail-logged map); the padding check rested on a
+  false premise (readers unpad by the authenticated flag, so drift is writer-only); the builder's
+  runtime-validated `&'static str` keys undid the typing it promised; the stored rotation target
+  went stale on the next rotation and duplicated `EnvelopeKeyring::with_primary`; and without
+  the wrapper, `encrypt(pt, aad.as_bytes())` and `encrypt(pt, b"")` are indistinguishable to the
+  compiler, so what remained was injectivity hygiene. By the §27 standard (generic,
+  security-relevant logic one application needs), an external contributor would be told to keep
+  it in their crate.
+- **Accepted as a draft byte specification**, [`docs/aad-format.md`](aad-format.md), with
+  vectors (`crates/anykms-recipes/tests/vectors/aad_v1.json`, built by the test-only reference
+  builder in `tests/aad_vectors.rs`, byte-exact reproducibility checked) and a short
+  illustrative guide section ([Choosing AAD](guide.md#choosing-aad)). The deciding argument
+  was not the type but who rebuilds the bytes: AAD is never parsed, but it is rebuilt by
+  non-writers in other languages (migration tooling, sibling services on the same rows), and a
+  spec with vectors serves them where a Rust type cannot. Settling the bytes now also makes a
+  later type byte-identical and purely additive. The permanent cost is a document.
+- **Bytes.** Label `anykms/aad/v1\0`; `u16` field count, `u16` key length, `u16` value length
+  (the AWS Encryption SDK's encryption-context widths, so caps can rise without a new label);
+  `purpose` an ordinary counted field; unsigned-byte lexicographic key order; byte-exact UTF-8
+  values. Policy caps 48/32/255/15 and total ≤ 3072 (every valid encoding fits
+  `anykms_aws::MAX_AAD_BYTES`); keys `[a-z][a-z0-9_]*`, purpose `[a-z][a-z0-9-]*`; empty
+  values, duplicate keys, the key `purpose` and control characters rejected. Wire-fixed vs
+  policy is marked in the document.
+- **Status.** "Experimental" cannot mean "bytes may change": an AAD is rebuilt, not stored, so
+  nothing in a ciphertext records which encoding produced it, and a row bound to v1 stays on v1.
+  The spec is therefore pinned from its first release and reviewed in the scope of the envelope
+  v1 external review (§21); a change from the review is a new label. The `users/42/ssn` examples
+  stay as they are until the review completes.
+- **Triggers for a `CanonicalAad` type implementing the spec** (additive, under a dependency-free
+  recipes feature not forwarded by the facade until stable, as `mhsm-hmac`): the envelope
+  external review completing; a second independent user asking after the guide section exists;
+  or the AWS native-context mapping (the same fields as a native `EncryptionContext` on AWS,
+  canonical bytes elsewhere) becoming a concrete design. The layout already satisfies that
+  mapping's constraints (string values, no key equal to `associatedData`, size).
+- **Not decided here:** a `needs_rewrap` on the base envelope types (the module docs carry it as
+  user code), and the sibling issues #34 (`KeySemantics` fields for a key-check-value KEK),
+  #35 (a provisioned software KEK backend) and #36 (its CLI). They were reviewed alongside #33;
+  the reviews are on the issues, and their decisions, including whether anykms should hold root
+  key material at all, are recorded here when taken.
