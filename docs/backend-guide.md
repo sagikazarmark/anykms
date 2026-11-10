@@ -258,4 +258,4 @@ if used) at one `0.x`, run the suite in your own CI with `ANYKMS_FAIL_ON_SKIP=1`
 operator documentation above. Name the crate for the service or the key custody it provides; the
 `anykms-` prefix names the workspace crates, which release in lockstep and are maintained here.
 What this project vouches for in a community backend is that it passes the suite; it does not
-review or maintain it. If you publish one, open an issue so the documentation can point to it.
+review or maintain it.
