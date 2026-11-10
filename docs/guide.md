@@ -30,7 +30,9 @@ on are always registered (credentials are resolved on first use; `ANYKMS_AZURE_C
 opts out of Azure; with no system TLS roots they are skipped), and a malformed environment variable
 is an error. Without `VAULT_ADDR`/`BAO_ADDR` transit is skipped, not an error: `skipped()` says
 which provider and why (`cause()` tells a skip the application chose from one the environment
-caused), and opening a `hashivault://` key then fails with that reason.
+caused), and opening a `hashivault://` key then fails with that reason. Only the backends of this
+repository are registered this way; a third-party backend ([Writing a backend](backend-guide.md))
+is added with `.provider(..)` before `build()`.
 
 Code that wants to report the providers it could not register reads `skipped()` before
 building:

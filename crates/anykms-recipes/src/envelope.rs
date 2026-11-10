@@ -648,6 +648,11 @@ async fn unwrap_committed_dek<K: KeyWrap + ?Sized>(
 /// a clone of the envelope). The rewrap methods never read the payload, except
 /// [`rewrap_verified`](Self::rewrap_verified), which decrypts it like `decrypt`.
 ///
+/// The envelope's futures await nothing but the KEK's (`wrap_key`, `unwrap_key`, `rewrap`): the
+/// random draw and the AES-GCM pass run inside the poll. So one returns `Pending` exactly when
+/// the KEK's future does (a server round trip, a layer, a lock an in-process KEK waits on), and
+/// completes on the first poll whenever the KEK's does.
+///
 /// ```no_run
 /// # async fn f(envelope: anykms_recipes::EnvelopeAead<anykms_core::KeyWrapKey>, blob: Vec<u8>)
 /// # -> anykms_core::Result<()> {

@@ -99,14 +99,14 @@ impl Target {
                 BACKEND,
                 ErrorKind::Configuration,
                 Operation::ParseUri,
-                &uri.to_string(),
+                &uri.without_query(),
                 "malformed key URI",
             ));
         };
         Ok(Self {
             ks: ks.clone(),
             name: (*name).to_owned(),
-            resource: uri.to_string(),
+            resource: uri.without_query(),
         })
     }
 

@@ -187,7 +187,8 @@ struct ToyProvider {
 
 impl ToyProvider {
     /// The typed constructor. A URI the grammar refuses is `Configuration` with
-    /// `Operation::ParseUri`; nothing is read from the service.
+    /// `Operation::ParseUri`; nothing is read from the service. Errors name the URI without its
+    /// query string (`without_query`): query options must not reach logs.
     fn aead_key(&self, uri: impl IntoKeyUri) -> Result<ToyAeadKey> {
         let uri = uri.into_key_uri()?;
         let name = (uri.scheme() == BACKEND)
@@ -201,12 +202,12 @@ impl ToyProvider {
                     Operation::ParseUri,
                     "expected toykms://<name>, the name made of ASCII letters, digits and '-'",
                 )
-                .with_resource(uri.to_string())
+                .with_resource(uri.without_query())
             })?;
         Ok(ToyAeadKey {
             kms: self.kms.clone(),
             name: name.to_owned(),
-            uri: uri.to_string(),
+            uri: uri.without_query(),
             semantics: KeySemantics::new(VersionModel::Floating, VersionShape::Numeric)
                 .with_ciphertext_reveals_version(true),
         })
