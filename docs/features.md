@@ -24,9 +24,10 @@ A backend for another service, or for a kind of key custody this repository does
 software KEK provisioned from a secret, say), is a crate of its own that depends on `anykms-core`
 and runs `anykms-conformance` in its own CI. An application depends on it directly and registers
 it with `Registry::builder().provider(..)` or next to the defaults with
-`anykms::with_default_providers()?.provider(..)`; the facade forwards workspace crates only. What
-this project vouches for in such a crate is that it passes the suite; it does not review or
-maintain it. [Writing a backend](backend-guide.md) is the guide.
+`anykms::with_default_providers()?.provider(..)`; the facade forwards workspace crates only. The
+suite is the only assurance this project offers for such a crate, and it is the crate's to run and
+to show in its CI; this project does not review or maintain it. [Writing a backend](backend-guide.md)
+is the guide.
 
 ## Cargo features
 

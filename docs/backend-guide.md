@@ -21,8 +21,9 @@ A backend has three pieces:
 - a **fixture**: creates and rotates keys for the conformance suite, outside the anykms API, and
   declares in `probe()` what the backend supports and what it lacks by design.
 
-What the project vouches for in a backend is the conformance run: the same cases every
-built-in backend passes, on both the typed and the registry path.
+The conformance run is the one assurance this project offers for any backend: the same cases
+every built-in backend passes, on both the typed and the registry path. For a crate outside this
+repository, running it and showing the result is the crate's job.
 
 ## Typed handles
 
@@ -138,10 +139,12 @@ backends, so any scheme is free there. `anykms::with_default_providers()` regist
 backends and leaves the ones it skips as placeholders that explain why they are missing; a
 provider you add takes precedence over a placeholder, so a third-party provider can serve a
 built-in scheme next to the defaults only while that backend is skipped, and collides with it
-otherwise. A backend is skipped when its feature (or `reqwest`) is off, when transit has no
-`VAULT_ADDR`/`BAO_ADDR`, when Azure is opted out with `ANYKMS_AZURE_CREDENTIAL=none`, or when the
-system has no usable TLS roots; AWS and GCP are registered whenever their feature is on, with or
-without credentials. That is a migration aid, not a design to rely on.
+otherwise. When a backend is skipped is `with_default_providers`' contract (its rustdoc, and
+`SkipCause` at run time): in short, its feature off, transit without a server address, Azure
+opted out, or no transport it can build. Missing credentials never skip a cloud provider: AWS and
+GCP register with their feature on and a usable transport and resolve credentials on the first
+operation, so an unset environment does not free their schemes. That is a migration aid, not a
+design to rely on.
 
 **Registering.** An application registers a backend with `Registry::builder().provider(..)`, or
 next to the defaults with `anykms::with_default_providers()?.provider(..)`. The `anykms` facade
@@ -262,5 +265,6 @@ A backend outside this repository is a crate of its own: depend on `anykms-core`
 if used) at one `0.x`, run the suite in your own CI with `ANYKMS_FAIL_ON_SKIP=1`, and ship the
 operator documentation above. Name the crate for the service or the key custody it provides; the
 `anykms-` prefix names the workspace crates, which release in lockstep and are maintained here.
-What this project vouches for in a community backend is that it passes the suite; it does not
-review or maintain it.
+The suite is the only assurance this project offers for a community backend, and it is the
+crate's to run and to show in its CI; this project does not review or maintain the crate, and a
+user of one checks that CI, not this repository.
