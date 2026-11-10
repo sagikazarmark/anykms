@@ -73,6 +73,8 @@ does not exist fails with `NotFound` on its first operation, as on every backend
 from configuration, so a URI the grammar refuses is `Configuration` with `Operation::ParseUri`,
 naming the URI, never `InvalidArgument`. Applications that take URIs from users recognize parse
 errors by that operation, which is why the suite pins it (`errors::parse_uri_is_configuration::*`).
+Name the key in every error with `uri.without_query()`, never `uri.to_string()`: a query string
+may carry options that must not reach logs, and core labels its own errors the same way.
 
 ```rust,ignore
 // minimal_backend.rs: the typed constructor. `KeyUri` splits `scheme:rest`; `rest` is the
@@ -90,7 +92,7 @@ fn aead_key(&self, uri: impl IntoKeyUri) -> Result<ToyAeadKey> {
                 Operation::ParseUri,
                 "expected toykms://<name>, the name made of ASCII letters, digits and '-'",
             )
-            .with_resource(uri.to_string())
+            .with_resource(uri.without_query())
         })?;
     // ...
 }
@@ -131,12 +133,15 @@ fn key_wrap(&self, uri: &KeyUri, _: &OpenOptions) -> Result<KeyWrapKey> {
 
 **Schemes.** Choose a scheme of your own. The built-in ones are `hashivault`, `openbao`,
 `aws-kms`, `gcp-kms`, `azure-kv` and `local`. A registry refuses two providers claiming one
-scheme (`Configuration` at `build`). `anykms::with_default_providers()` registers the built-in
-backends whose feature is on and whose environment configures them, and leaves the others as
-placeholders that explain why they are missing; a provider you add takes precedence over a
-placeholder, so a third-party provider can serve a built-in scheme only while that backend is
-skipped (its feature off, or its environment unset), and collides with it otherwise. That is a
-migration aid, not a design to rely on.
+scheme (`Configuration` at `build`). A `Registry::builder()` you fill yourself has no built-in
+backends, so any scheme is free there. `anykms::with_default_providers()` registers the built-in
+backends and leaves the ones it skips as placeholders that explain why they are missing; a
+provider you add takes precedence over a placeholder, so a third-party provider can serve a
+built-in scheme next to the defaults only while that backend is skipped, and collides with it
+otherwise. A backend is skipped when its feature (or `reqwest`) is off, when transit has no
+`VAULT_ADDR`/`BAO_ADDR`, when Azure is opted out with `ANYKMS_AZURE_CREDENTIAL=none`, or when the
+system has no usable TLS roots; AWS and GCP are registered whenever their feature is on, with or
+without credentials. That is a migration aid, not a design to rely on.
 
 **Registering.** An application registers a backend with `Registry::builder().provider(..)`, or
 next to the defaults with `anykms::with_default_providers()?.provider(..)`. The `anykms` facade

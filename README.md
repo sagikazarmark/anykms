@@ -42,6 +42,12 @@
 
 The full key URI syntax is in the [guide](https://github.com/sagikazarmark/anykms/blob/main/docs/guide.md#key-uris).
 
+A backend for another service is a crate of its own that depends on `anykms-core` and runs the
+same conformance suite in its CI; an application depends on it directly and registers it with
+`.provider(..)`. What this project vouches for in such a crate is that it passes the suite; it
+does not review or maintain it. [Writing a backend](https://github.com/sagikazarmark/anykms/blob/main/docs/backend-guide.md)
+is the guide.
+
 ## Quick start
 
 Start without a server, on in-memory keys:

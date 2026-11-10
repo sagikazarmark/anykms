@@ -211,9 +211,9 @@ pub use anykms_transit as transit;
 ///
 /// The local backend is never registered here: in-memory keys require an explicit
 /// `LocalProvider::allow_ephemeral_local_keys()`. Nor is any backend outside this workspace: a
-/// third-party provider is added to the builder with [`DefaultProviders::provider`] (or to a
-/// [`Registry::builder`] directly), and takes a built-in scheme only while that backend is
-/// skipped here.
+/// third-party provider is added to this builder with [`DefaultProviders::provider`], where it
+/// takes a built-in scheme only while that backend is skipped (a registered one collides at
+/// `build`), or to a [`Registry::builder`] of your own, where every scheme is free.
 ///
 /// [`with_default_providers_from`] does the same with variables from a lookup function.
 pub fn with_default_providers() -> Result<DefaultProviders> {

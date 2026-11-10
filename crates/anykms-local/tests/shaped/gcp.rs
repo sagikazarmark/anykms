@@ -133,7 +133,7 @@ impl Target {
                     BACKEND,
                     ErrorKind::Configuration,
                     Operation::ParseUri,
-                    &uri.to_string(),
+                    &uri.without_query(),
                     "malformed key version in the URI",
                 )
             })?),
@@ -142,7 +142,7 @@ impl Target {
                     BACKEND,
                     ErrorKind::Configuration,
                     Operation::ParseUri,
-                    &uri.to_string(),
+                    &uri.without_query(),
                     "malformed key URI",
                 ));
             }
@@ -150,7 +150,7 @@ impl Target {
         Ok(Self {
             name: s[0].to_owned(),
             version,
-            resource: uri.to_string(),
+            resource: uri.without_query(),
         })
     }
 
