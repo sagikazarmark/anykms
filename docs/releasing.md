@@ -8,8 +8,8 @@ core is a breaking change for every backend, so separate versions would only add
 Per-crate backend versions are reconsidered when a backend first needs a release that core does
 not.
 
-`anykms-testkit` (`publish = false`) is never published. The backends use it as a path-only
-dev-dependency, which `cargo publish` strips.
+`anykms-testkit` and `anykms-wasm-tests` (`publish = false`) are never published. The backends use
+`anykms-testkit` as a path-only dev-dependency, which `cargo publish` strips.
 
 ## Build requirements
 
@@ -20,125 +20,104 @@ Windows it uses prebuilt NASM objects). CMake is needed only for the FIPS build.
 path (`--no-default-features --features rustls-ring`, plus `rsa-rustcrypto` where RSA is needed)
 avoids aws-lc, but ring also compiles a small C and assembly part.
 
-The release machine and the CI runners need a C compiler for the packaging dry run below.
+The CI runners, and any machine that runs `cargo package`, need a C compiler for the packaging dry
+run.
 
-## Steps
+## How a release works
 
-1. **Record the release gate decision.** Before the first publish, the maintainer's decision on
-   the live-probe gate is recorded in `docs/PLAN.md` §24.4. For 0.1.0 the decision is to hold the
-   publish until the GCP probe T1 (`scripts/probe-gcp.sh`) and the Azure probe T3
-   (`scripts/probe-azure.sh`) have run (both ran on 2026-10-12) and their results are folded into the error mappings and
-   `docs/guarantees.md`. Check that every gate listed in §24.4 is closed.
-2. **Confirm the public repository.** The `repository` field in `Cargo.toml`, the README links
-   (the facade's crates.io page) and the CI live-job guards all name
-   `github.com/sagikazarmark/anykms`. That repository must exist and be public before tagging:
-   the metadata of a published version cannot change.
+Releases run in GitHub Actions, from `main`, with the
+[Release workflow](../.github/workflows/release.yaml). Nothing is published from a workstation,
+and no crates.io token is stored anywhere: crates.io trusts the workflow through
+[Trusted Publishing](https://crates.io/docs/trusted-publishing).
 
-   When it goes public, enable private vulnerability reporting (Settings → Code security →
-   Private vulnerability reporting, or `gh api -X PUT
-   repos/sagikazarmark/anykms/private-vulnerability-reporting`). The account-level `SECURITY.md`
-   (in `sagikazarmark/.github`) covers every repository without its own and sends reporters to
-   the repository's "Report a vulnerability" button, which exists only while this is on. Check it
-   with `gh api repos/sagikazarmark/anykms/private-vulnerability-reporting` (`"enabled": true`).
-3. Bump `version` in `[workspace.package]` and every `version` in the workspace's
-   `[workspace.dependencies]` entries for `anykms-*` crates (they must match exactly).
-4. Run the CI checks locally, in the devenv shell: `just ci` runs every job that needs no servers
-   or credentials, `cargo deny check` and a full packaging dry run included (it builds each crate
-   from its packaged sources against the other packaged crates), and the `msrv` profile runs the
-   MSRV job on Rust 1.91:
+| Job | What it does | Changes |
+|---|---|---|
+| Version | Picks the version from the latest `vX.Y.Z` tag and the `bump` input, or takes the `version` input. Fails if the tag exists. | nothing |
+| Package | Bumps the version in the working tree (`cargo release version`) and builds every crate from its packaged sources (`cargo package --workspace`). | nothing |
+| Commit | Makes the same bump, commits it as `chore: release vX.Y.Z` and pushes it to `main`. The push fails if `main` moved since the run started. | `main` |
+| Publish to crates.io | In the `release` environment: publishes the crates not yet on crates.io at the version (`cargo info` tells), in dependency order. | crates.io |
+| GitHub Release | Creates the `vX.Y.Z` tag on the release commit and the GitHub Release, with generated notes. | tag, release |
 
-   ```sh
-   just ci
-   devenv --profile msrv shell -- just test
-   ```
+Package is the release's only build. It runs every dependency's build script, so it holds no
+write permission and cannot request the OIDC token crates.io accepts. Commit and Publish build
+nothing: the bump edits manifests only, and Publish runs `cargo publish --no-verify` on the
+sources Package built.
 
-   Build every crate's documentation as docs.rs will (CI's `docs-rs` job runs the same recipe).
-   A docs.rs page is frozen with its version, so a feature missing from a crate's
-   `[package.metadata.docs.rs]` hides its items until the next release:
+The workflow does not check CI: check that the commit's CI run passed before starting it. The
+commit the workflow pushes starts no CI run (pushes with the workflow token start no workflows);
+Package covers the bump.
 
-   ```sh
-   devenv --profile nightly shell -- just docs-rs   # one crate at a time, with --cfg docsrs
-   ```
+Releases carry no signature from the maintainer: neither the release commit nor the tag is
+signed. The GitHub Release is immutable (its tag cannot move, and GitHub signs an attestation of
+the tag and the commit, checked with `gh release verify vX.Y.Z`), and crates.io records the
+repository, workflow run and commit of every version published through Trusted Publishing.
 
-   Every user-facing feature must be in the metadata: `all-features = true`, except
-   `anykms-aws`, which lists its features by hand because `__test-fixtures` is a
-   `compile_error!` in release builds. The script fails when such a list leaves out a feature
-   other than `default` and the hidden `__*` ones.
+## One-time setup
 
-5. **Get one green GitHub CI run.** Push the release commit to the public repository and open a
-   pull request. Its `pull_request` run must be green on the release commit, including the MSRV
-   job, the semver job (its non-blocking path before the first publish), the docs.rs job, the
-   service jobs (Floci and Lowkey, both of which fail on a skipped conformance case), and the
-   Vault/OpenBao integration matrix. Local gates are not enough: they have missed a red CI job
-   before. The LocalStack job is not a gate: without `LOCALSTACK_AUTH_TOKEN` it skips every step
-   and still reports success (with a warning), and Floci covers the same suite.
-6. **Merge to `main` before publishing.** The README links point at `blob/main/docs/...`, so the
-   documents they name must be on `main` when the crates.io page goes live. Tag `vX.Y.Z` on the
-   merge commit and push the tag.
-7. **Publish in dependency order, in batches.** crates.io limits how fast one account creates
-   *new* crates: a burst of 5, then one every 10 minutes (a request over the limit fails with
-   HTTP 429 and the time to retry). All ten crates are new on the first publish, so a single
-   `cargo publish --workspace` stops at the sixth. Later releases publish new versions of
-   existing crates, which crates.io limits separately; the batches below work for them too.
-   (Alternatively, ask help@crates.io for a temporary limit increase before release day.)
+1. **The `release` environment** (Settings → Environments): deployment branches limited to
+   `main`. Add a required reviewer to approve each publish; leave "Prevent self-review" off while
+   the maintainer who starts the run is the only reviewer.
+2. **Trusted Publishing on crates.io**, for each published crate (`anykms`, `anykms-core`,
+   `anykms-recipes`, `anykms-conformance`, `anykms-local`, `anykms-http`, `anykms-transit`,
+   `anykms-aws`, `anykms-gcp`, `anykms-azure`), under the crate's Settings → Trusted Publishing:
+   owner `sagikazarmark`, repository `anykms`, workflow `release.yaml`, environment `release`.
+3. **Immutable releases** (Settings → General → Releases → Enable release immutability).
+4. **After the first release from the workflow:** turn on "Trusted Publishing only" for every
+   crate, so an API token can no longer publish it, and revoke the personal crates.io token used
+   for 0.1.0 and 0.2.0.
 
-   The order follows each crate's published dependencies, dev-dependencies with a version
-   included (crates.io requires them to exist; path-only dev-dependencies, such as
-   `anykms-testkit` and `anykms-recipes`'s `anykms-local`, are stripped on publish):
+## Releasing
 
-   | Crate | Needs on crates.io |
-   |---|---|
-   | `anykms-core` | — |
-   | `anykms-recipes` | core |
-   | `anykms-conformance` | core, recipes |
-   | `anykms-http` | core |
-   | `anykms-local` | core; dev: conformance, recipes |
-   | `anykms-transit` | core, http; dev: conformance, recipes |
-   | `anykms-aws`, `anykms-gcp`, `anykms-azure` | core, http, recipes; dev: conformance |
-   | `anykms` (the facade, last) | every other published crate |
+1. **Merge everything into `main` and wait for its CI run to pass.** The README links point at
+   `blob/main/docs/...`, so the documents they name must be on `main` when the crates.io page goes
+   live. The Release workflow does not check CI. The `push` run of `CI` on `main` covers the MSRV
+   job, the docs.rs job, the service jobs (Floci and Lowkey, both of which fail on a skipped
+   conformance case) and the Vault/OpenBao integration matrix. The LocalStack job is not a gate:
+   without `LOCALSTACK_AUTH_TOKEN` it skips every step and still reports success (with a warning),
+   and Floci covers the same suite.
+2. **Start the Release workflow** from `main` (Actions → Release → Run workflow), with a `bump`
+   (`patch`, `minor`, `major`) or an exact `version` (`vX.Y.Z`):
 
    ```sh
-   # Batch 1: five new crates, the burst. Cargo 1.90+ publishes them in dependency order and
-   # waits for each to reach the index before the next.
-   cargo publish --locked -p anykms-core -p anykms-recipes -p anykms-conformance \
-     -p anykms-http -p anykms-local
-
-   # Then one crate every 10 minutes, the facade last.
-   for crate in anykms-transit anykms-aws anykms-gcp anykms-azure anykms; do
-     sleep 600
-     cargo publish --locked -p "$crate"
-   done
+   gh workflow run release.yaml --ref main -f bump=minor
    ```
 
-   **After an interruption** (a 429, a network error, a closed terminal), do not rerun a
-   finished batch: `cargo publish` refuses a version that already exists, so a crate that made
-   it fails the whole command. Find what is still pending, then publish only those, in the
-   order above (with `-p` for each, or `--workspace --exclude anykms-testkit --exclude <crate>`
-   for each published one), waiting out the time a 429 names:
+   `bump` defaults to `none`, which fails: each release names its bump. A workspace already at the
+   version (bumped in a pull request, say) is released as it is, with no new commit.
+3. **Approve the publish** in the `release` environment, when it has a required reviewer.
+4. **Write the release notes.** The GitHub Release starts with the generated notes; edit them
+   (an immutable release keeps its notes editable).
+5. **Check that docs.rs built every crate.**
 
-   ```sh
-   VERSION=X.Y.Z
-   for crate in anykms-core anykms-recipes anykms-conformance anykms-http anykms-local \
-       anykms-transit anykms-aws anykms-gcp anykms-azure anykms; do
-     if cargo info --registry crates-io "$crate@$VERSION" >/dev/null 2>&1; then
-       echo "published  $crate"
-     else
-       echo "pending    $crate"
-     fi
-   done
-   ```
+## When a run fails
 
-   A crate whose upload succeeded but whose index entry is not visible yet counts as published:
-   wait a minute and check again before retrying it.
+Every job before the GitHub Release skips what an earlier run did, so a release resumes where it
+stopped. The GitHub Release comes last: once it exists, the release is done.
 
-8. Create a GitHub release from the tag and write its release notes.
-9. **After publishing:** add the crates.io co-owners to every published crate (`cargo owner
-    --add`), and check that docs.rs built all ten crates (`anykms`, `anykms-core`,
-    `anykms-recipes`, `anykms-conformance`, `anykms-local`, `anykms-http`, `anykms-transit`,
-    `anykms-aws`, `anykms-gcp`, `anykms-azure`).
-10. **After the first publish only:** check that the CI `semver` job now compares against
-    crates.io. Its "Find baseline" step asks crates.io for each crate (`cargo info --registry
-    crates-io`); a published crate is checked against its registry version, and that check
-    blocks. Before the first publish every crate falls back to the PR's base branch,
-    non-blocking. Open a trivial PR and confirm each matrix entry logs "comparing with crates.io
-    (blocking)".
+- **Re-run failed jobs** on the same run (within 30 days). It keeps the version and the release
+  commit of the jobs that passed. A re-run of Publish asks for approval again.
+- **Or start a new run** with the same `bump` or `version`. The tag is created last, so until it
+  exists a new run picks the same version. When the version commit is on `main` already, the new
+  run releases it as it is, and Commit pushes nothing. Start it before anything else lands on
+  `main`: a new run releases the head of `main`, and crates published by the stopped run came from
+  the version commit.
+
+Publish skips every crate that is on crates.io at the version already: `cargo publish` refuses a
+version that exists, so a crate that made it would fail the whole command. `cargo info --registry
+crates-io <crate>@X.Y.Z` tells whether a crate is published.
+
+crates.io rate limits are per account. New versions of existing crates are allowed in a burst of
+30, then one a minute, which a release of ten crates stays within. A request over a limit fails
+with HTTP 429 and the time to retry: re-run Publish after it.
+
+## A new crate
+
+Trusted Publishing cannot create a crate: the first version of a new crate is published by hand,
+with an API token, before its Trusted Publishing configuration can be added. New crates have their
+own rate limit: a burst of 5, then one every 10 minutes.
+
+When a release adds a crate, start the Release workflow as usual. Publish fails at the new crate:
+publish it from the release commit with a token
+(`cargo publish --locked -p <crate>`, after `git checkout <release commit>`), add its Trusted
+Publishing configuration and turn on "Trusted Publishing only", then re-run the failed jobs.
+Publish picks up the crates that are still pending. Add the crate to the list in "One-time setup".
