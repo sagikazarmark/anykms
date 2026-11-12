@@ -4,26 +4,26 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sagikazarmark/anykms"
 
 [workspace.dependencies]
-anykms-core = { path = "crates/anykms-core", version = "0.2.0" }
+anykms-core = { path = "crates/anykms-core", version = "0.3.0" }
 # Without default features: each user picks the RSA backend (`rsa-aws-lc-rs` or `rsa-rustcrypto`;
 # the facade and the cloud backends default to `rsa-aws-lc-rs`) and the `jose`/`envelope` recipes
 # it uses. With no RSA backend, RSA verification fails at run time.
-anykms-recipes = { path = "crates/anykms-recipes", version = "0.2.0", default-features = false }
-anykms-local = { path = "crates/anykms-local", version = "0.2.0" }
-anykms-transit = { path = "crates/anykms-transit", version = "0.2.0", default-features = false }
-anykms-aws = { path = "crates/anykms-aws", version = "0.2.0", default-features = false }
-anykms-azure = { path = "crates/anykms-azure", version = "0.2.0", default-features = false }
+anykms-recipes = { path = "crates/anykms-recipes", version = "0.3.0", default-features = false }
+anykms-local = { path = "crates/anykms-local", version = "0.3.0" }
+anykms-transit = { path = "crates/anykms-transit", version = "0.3.0", default-features = false }
+anykms-aws = { path = "crates/anykms-aws", version = "0.3.0", default-features = false }
+anykms-azure = { path = "crates/anykms-azure", version = "0.3.0", default-features = false }
 # Without default features: each backend forwards its own `rustls-*` provider features.
-anykms-http = { path = "crates/anykms-http", version = "0.2.0", default-features = false }
-anykms-gcp = { path = "crates/anykms-gcp", version = "0.2.0", default-features = false }
-anykms-conformance = { path = "crates/anykms-conformance", version = "0.2.0" }
+anykms-http = { path = "crates/anykms-http", version = "0.3.0", default-features = false }
+anykms-gcp = { path = "crates/anykms-gcp", version = "0.3.0", default-features = false }
+anykms-conformance = { path = "crates/anykms-conformance", version = "0.3.0" }
 
 trait-variant = "0.1.3"
 # 1.9.1 or later: 1.9.0's `Zeroizing` `Debug` prints its contents, such as a decrypted plaintext.
