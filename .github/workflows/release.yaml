@@ -65,10 +65,11 @@ jobs:
       - name: Set up devenv
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
+      # `cargo publish --dry-run`, not `cargo package`: it skips `publish = false` crates.
       - name: Bump the version and package every crate
         run: |
           cargo release version "${{ needs.version.outputs.version }}" --execute --no-confirm
-          cargo package --workspace --locked --allow-dirty
+          cargo publish --dry-run --workspace --locked --allow-dirty
 
   commit:
     name: Commit

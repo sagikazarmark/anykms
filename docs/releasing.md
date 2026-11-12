@@ -20,7 +20,7 @@ Windows it uses prebuilt NASM objects). CMake is needed only for the FIPS build.
 path (`--no-default-features --features rustls-ring`, plus `rsa-rustcrypto` where RSA is needed)
 avoids aws-lc, but ring also compiles a small C and assembly part.
 
-The CI runners, and any machine that runs `cargo package`, need a C compiler for the packaging dry
+The CI runners, and any machine that runs `just package`, need a C compiler for the packaging dry
 run.
 
 ## How a release works
@@ -33,7 +33,7 @@ and no crates.io token is stored anywhere: crates.io trusts the workflow through
 | Job | What it does | Changes |
 |---|---|---|
 | Version | Picks the version from the latest `vX.Y.Z` tag and the `bump` input, or takes the `version` input. Fails if the tag exists. | nothing |
-| Package | Bumps the version in the working tree (`cargo release version`) and builds every crate from its packaged sources (`cargo package --workspace`). | nothing |
+| Package | Bumps the version in the working tree (`cargo release version`) and builds every crate from its packaged sources (`cargo publish --dry-run --workspace`). | nothing |
 | Commit | Makes the same bump, commits it as `chore: release vX.Y.Z` and pushes it to `main`. The push fails if `main` moved since the run started. | `main` |
 | Publish to crates.io | In the `release` environment: publishes the crates not yet on crates.io at the version (`cargo info` tells), in dependency order. | crates.io |
 | GitHub Release | Creates the `vX.Y.Z` tag on the release commit and the GitHub Release, with generated notes. | tag, release |
