@@ -49,14 +49,19 @@ async fn rsa_alias_to(server: &MockServer, target: &str) {
     }
 }
 
-/// An EC signing alias naming `target`; `Verify` accepts anything, `DescribeKey` of the alias
-/// answers after `delay`.
-async fn ec_alias_to(server: &MockServer, target: &str, delay: Duration) {
-    let meta = json!({
+/// The metadata of an EC signing key `target`, as `DescribeKey` of an alias naming it answers.
+fn ec_meta(target: &str) -> serde_json::Value {
+    json!({
         "Arn": target, "KeyId": target.rsplit('/').next().unwrap(), "AWSAccountId": ACCOUNT,
         "KeySpec": "ECC_NIST_P256", "KeyUsage": "SIGN_VERIFY", "KeyState": "Enabled",
         "CreationDate": 1_700_000_000.123, "SigningAlgorithms": ["ECDSA_SHA_256"],
-    });
+    })
+}
+
+/// An EC signing alias naming `target`; `Verify` accepts anything, `DescribeKey` of the alias
+/// answers after `delay`.
+async fn ec_alias_to(server: &MockServer, target: &str, delay: Duration) {
+    let meta = ec_meta(target);
     Mock::given(method("POST"))
         .and(header("x-amz-target", "TrentService.DescribeKey"))
         .and(body_partial_json(json!({"KeyId": ALIAS})))
@@ -274,4 +279,93 @@ async fn a_newer_response_target_is_not_overridden_by_stale_metadata() {
     assert_eq!(s.key_version().unwrap().as_str(), OTHER);
     h.verify_digest(&digest(), &sig(OTHER)).await.unwrap();
     assert_eq!(bodies(&server, "DescribeKey").await.len(), 1);
+}
+
+/// A transport may hold a request for any time after it is handed over, so of two overlapping
+/// `DescribeKey`s of an alias the one sent first may reach KMS last, after the repoint. Here the
+/// one started first sees the new target and the one started later answers with the old target
+/// after it. Neither is trusted over the other: the old target is not cached, and the next
+/// request describes the alias again.
+#[tokio::test]
+async fn overlapping_describes_that_disagree_are_described_again() {
+    let server = MockServer::start().await;
+    for (target, delay) in [(OTHER, 200), (EC, 300)] {
+        Mock::given(method("POST"))
+            .and(header("x-amz-target", "TrentService.DescribeKey"))
+            .and(body_partial_json(json!({"KeyId": ALIAS})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(delay))
+                    .set_body_json(json!({"KeyMetadata": ec_meta(target)})),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+    }
+    ec_alias_to(&server, OTHER, Duration::ZERO).await;
+    let p = provider(&server);
+    let (h1, h2) = (
+        p.digest_signing_key(uri(ALIAS), ALG).unwrap(),
+        p.digest_signing_key(uri(ALIAS), ALG).unwrap(),
+    );
+    let later = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h2.preflight().await
+    };
+    let (a, b) = tokio::join!(h1.preflight(), later);
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(bodies(&server, "DescribeKey").await.len(), 2);
+
+    h1.verify_digest(&digest(), &sig(OTHER))
+        .await
+        .expect("the old target from the later-started describe was cached");
+    assert_eq!(bodies(&server, "DescribeKey").await.len(), 3);
+}
+
+/// A response's `KeyId` that overlaps a `DescribeKey` and names another target: the `Sign`,
+/// started first and held, sees the repoint; the `DescribeKey` (a preflight), started later,
+/// answers with the old target before it. Neither is trusted over the other: the handle
+/// describes the alias again, and the next operation accepts the new target.
+#[tokio::test]
+async fn an_overlapping_response_target_that_disagrees_is_described_again() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-amz-target", "TrentService.DescribeKey"))
+        .and(body_partial_json(json!({"KeyId": ALIAS})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"KeyMetadata": ec_meta(EC)})))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("x-amz-target", "TrentService.Sign"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(300))
+                .set_body_json(json!({"KeyId": OTHER, "Signature": b64(b"sig")})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    ec_alias_to(&server, OTHER, Duration::ZERO).await;
+    let p = provider(&server);
+    let h = p.digest_signing_key(uri(ALIAS), ALG).unwrap();
+    h.preflight().await.unwrap(); // caches EC
+
+    let later = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.preflight().await
+    };
+    let dg = digest();
+    let (s, d) = tokio::join!(h.sign_digest(&dg), later);
+    assert_eq!(s.unwrap().key_version().unwrap().as_str(), OTHER);
+    d.unwrap();
+    assert_eq!(bodies(&server, "DescribeKey").await.len(), 2);
+
+    h.verify_digest(&digest(), &sig(OTHER))
+        .await
+        .expect("the old target from the overlapping describe was kept");
+    assert_eq!(bodies(&server, "DescribeKey").await.len(), 3);
 }
