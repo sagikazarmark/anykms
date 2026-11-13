@@ -7,10 +7,13 @@
 //! [`ErrorKind::Backend`] (less specific, never misclassified) with the server message redacted
 //! to a keyed fingerprint (see [`redact`]).
 
+use std::fmt;
 use std::time::Duration;
 
 use anykms_core::{BackendDetail, Error, ErrorKind, Operation, ServerMessage};
 use anykms_http::redact::{Pinned, contains_ci};
+use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::BACKEND;
 
@@ -25,6 +28,7 @@ const KNOWN: &[&str] = &[
     "signing key not found",
     "signature verification key not found",
     "supplied signature is invalid",
+    "supplied signature contains extra data",
     "invalid base64 signature value",
     "invalid signature: no prefix",
     "invalid signature: version is too new",
@@ -114,10 +118,54 @@ pub(crate) fn unusable_response(
     }
 }
 
+/// The `{"errors": [...]}` body of a failed response. Each message is wiped on drop: servers may
+/// echo request input (plaintext, a token in a malformed request) in them.
+#[derive(Deserialize, Default)]
+pub(crate) struct ErrorBody {
+    #[serde(default, deserialize_with = "wiped_strings")]
+    pub(crate) errors: Vec<Zeroizing<String>>,
+}
+
+impl ErrorBody {
+    /// The messages of an error response; none when the body is not one.
+    pub(crate) fn messages(body: &[u8]) -> Vec<Zeroizing<String>> {
+        serde_json::from_slice::<Self>(body)
+            .map(|b| b.errors)
+            .unwrap_or_default()
+    }
+}
+
+/// A list of strings, each wrapped as soon as it is decoded (so a later element that fails to
+/// decode still wipes the earlier ones).
+fn wiped_strings<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<Zeroizing<String>>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<Zeroizing<String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a list of strings")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(Zeroizing::new(s));
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(V)
+}
+
 /// Context of a failed request.
 pub(crate) struct Failure<'a> {
     pub(crate) status: u16,
-    pub(crate) messages: &'a [String],
+    pub(crate) messages: &'a [Zeroizing<String>],
     pub(crate) retry_after: Option<Duration>,
     pub(crate) op: Operation,
     /// For tracing only: errors name the server through their resource.
@@ -127,7 +175,7 @@ pub(crate) struct Failure<'a> {
     pub(crate) key_read: bool,
 }
 
-fn any(messages: &[String], needles: &[&str]) -> bool {
+fn any(messages: &[Zeroizing<String>], needles: &[&str]) -> bool {
     messages
         .iter()
         .any(|m| needles.iter().any(|n| contains_ci(m, n)))
@@ -152,6 +200,8 @@ pub(crate) fn classify(f: &Failure<'_>) -> Error {
             "illegal base64",
             "invalid signature",
             "supplied signature is invalid",
+            // Valid DER followed by extra bytes (ECDSA verify).
+            "supplied signature contains extra data",
             "invalid base64 signature value",
             "invalid hmac",
         ]) =>
@@ -277,7 +327,7 @@ mod tests {
     use super::*;
 
     fn k(status: u16, msg: &str) -> ErrorKind {
-        let m = vec![msg.to_owned()];
+        let m = vec![Zeroizing::new(msg.to_owned())];
         classify(&Failure {
             status,
             messages: &m,
@@ -374,7 +424,7 @@ mod tests {
     #[test]
     fn observed_sign_verify_hmac_messages() {
         let kd = |status: u16, msg: &str| {
-            let m = vec![msg.to_owned()];
+            let m = vec![Zeroizing::new(msg.to_owned())];
             let e = classify(&Failure {
                 status,
                 messages: &m,
@@ -424,6 +474,17 @@ mod tests {
         }
         // Case-insensitive.
         assert_eq!(kd(400, "INVALID hmac: X").0, ErrorKind::DecryptFailed);
+    }
+
+    /// A DER ECDSA signature followed by extra bytes: Vault (`sdk/helper/keysutil/policy.go`,
+    /// v1.20.4 line 1577) and OpenBao (v2.4.4 line 1448) answer 400 with this user error. The
+    /// bytes come from the caller, so it is a malformed signature (VerificationFailed for verify),
+    /// never `Backend`.
+    #[test]
+    fn signature_with_extra_data_is_malformed() {
+        let msg = "supplied signature contains extra data";
+        assert_eq!(k(400, msg), ErrorKind::DecryptFailed);
+        assert_eq!(redact(msg), ServerMessage::Known(msg.into()));
     }
 
     #[test]

@@ -263,12 +263,6 @@ struct AuthData {
     renewable: bool,
 }
 
-#[derive(Deserialize)]
-struct ErrorBody {
-    #[serde(default)]
-    errors: Vec<String>,
-}
-
 const OP: Operation = Operation::Configure;
 
 impl LoginSource {
@@ -459,9 +453,7 @@ impl LoginSource {
         .await?;
         let (status, buf) = (resp.status, resp.body);
         if !status.is_success() {
-            let messages = serde_json::from_slice::<ErrorBody>(&buf)
-                .map(|b| b.errors)
-                .unwrap_or_default();
+            let messages = crate::errors::ErrorBody::messages(&buf);
             let e = crate::errors::classify(&crate::errors::Failure {
                 status: status.as_u16(),
                 messages: &messages,

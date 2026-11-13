@@ -17,7 +17,7 @@ use crate::handles::{
     KeyCtx, TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey, TypeCache,
     mac_path, transit_hash,
 };
-use crate::uri::{SCHEMES, TransitKeyRef};
+use crate::uri::{SCHEMES, TransitKeyRef, label};
 
 /// Opens `hashivault://` and `openbao://` keys on configured Vault and OpenBao servers.
 #[derive(Clone)]
@@ -137,11 +137,12 @@ impl TransitProvider {
             .build()
     }
 
-    /// Resolves a URI to a key context. Errors carry the key's resource: the URI without its
-    /// query string when it does not parse, the key as written in it after that.
+    /// Resolves a URI to a key context. Errors carry the key's resource: when the URI does not
+    /// parse, the URI without its query string and with an authority that is not a valid alias
+    /// redacted ([`label`]: it may hold a pasted token); the key as written in it after that.
     fn resolve(&self, uri: impl IntoKeyUri, check: KeyTypeCheck) -> Result<KeyCtx> {
         let uri = uri.into_key_uri()?;
-        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(uri.without_query()))?;
+        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(label(&uri)))?;
         // No error below names a resource yet.
         let written = KeyCtx::resource(uri.scheme(), &r.alias, &r.mount, &r.name, None);
         self.resolve_inner(uri.scheme(), r, check)
@@ -253,10 +254,10 @@ impl TransitProvider {
                 Operation::Open,
                 "Ed25519 signs messages; use ed25519_key",
             )
-            .with_resource(uri.without_query()));
+            .with_resource(label(&uri)));
         }
         if let Some(h) = alg.hash() {
-            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(uri.without_query()))?;
+            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(label(&uri)))?;
         }
         Ok(TransitDigestKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
@@ -274,7 +275,7 @@ impl TransitProvider {
     /// Opens an HMAC key for `alg`.
     pub fn mac_key(&self, uri: impl IntoKeyUri, alg: MacAlgorithm) -> Result<TransitMacKey> {
         let uri = uri.into_key_uri()?;
-        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(uri.without_query()))?;
+        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(label(&uri)))?;
         Ok(TransitMacKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
             alg,
@@ -282,11 +283,11 @@ impl TransitProvider {
     }
 }
 
-/// [`SignatureAlgorithm::require_shape`], naming the key (`uri` without its query string) on
-/// failure, as every error after the URI is parsed does.
+/// [`SignatureAlgorithm::require_shape`], naming the key ([`label`]: `uri` without its query
+/// string, an invalid authority redacted) on failure.
 fn require_shape(uri: &KeyUri, alg: SignatureAlgorithm, shape: SigningShape) -> Result<()> {
     alg.require_shape(shape, BACKEND)
-        .map_err(|e| e.with_resource(uri.without_query()))
+        .map_err(|e| e.with_resource(label(uri)))
 }
 
 impl Provider for TransitProvider {

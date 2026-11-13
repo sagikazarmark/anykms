@@ -155,7 +155,7 @@ pub(crate) const BACKEND: &str = "transit";
 /// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`ServerConfig::http_transport`].
 pub use anykms_http;
 pub use auth::{KUBERNETES_SERVICE_ACCOUNT_TOKEN, Login};
-pub use config::{EnvConfig, Flavor, ServerConfig};
+pub use config::{EnvConfig, EnvTls, Flavor, ServerConfig};
 pub use handles::{TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey};
 pub use keyinfo::{TransitKeyInfo, TransitKeyType};
 pub use provider::{TransitProvider, TransitProviderBuilder};
@@ -179,14 +179,7 @@ pub mod __fuzz {
 
     /// Error-response classification.
     pub fn classify(status: u16, body: &[u8]) -> anykms_core::ErrorKind {
-        #[derive(serde::Deserialize)]
-        struct E {
-            #[serde(default)]
-            errors: Vec<String>,
-        }
-        let messages = serde_json::from_slice::<E>(body)
-            .map(|e| e.errors)
-            .unwrap_or_default();
+        let messages = crate::errors::ErrorBody::messages(body);
         crate::errors::classify(&crate::errors::Failure {
             status,
             messages: &messages,

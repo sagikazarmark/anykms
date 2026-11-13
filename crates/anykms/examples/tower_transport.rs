@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anykms::prelude::*;
 use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
-use anykms::transit::{EnvConfig, TransitProvider};
+use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
 use tower::ServiceBuilder;
 
 #[tokio::main]
@@ -31,8 +31,11 @@ async fn main() -> anykms::Result<()> {
     };
 
     // The hardened client (TLS, no redirects, timeouts) as a tower service, with the caller's
-    // layers on top. Every request the backend sends passes through the stack; the counters
-    // around the limit show it holding.
+    // layers on top. It is built from the TLS variables (`VAULT_CACERT`, `VAULT_CAPATH`,
+    // `VAULT_CLIENT_CERT`/`VAULT_CLIENT_KEY`) `EnvConfig` reads: the transport passed to
+    // `http_transport` below replaces the one `load` built from them, so building it from
+    // anything else would silently drop a pinned CA or client certificate. Every request the
+    // backend sends passes through the stack; the counters around the limit show it holding.
     let in_flight = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let service = ServiceBuilder::new()
@@ -52,7 +55,12 @@ async fn main() -> anykms::Result<()> {
                 req
             }
         })
-        .service(ReqwestTransport::new()?.into_service());
+        .service(
+            env.tls()?
+                .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+                .build()?
+                .into_service(),
+        );
     let server = env.load()?.http_transport(TowerTransport::new(service));
 
     let registry = anykms::Registry::builder()

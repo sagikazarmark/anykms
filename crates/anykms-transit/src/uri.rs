@@ -64,6 +64,29 @@ fn alias_ok(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+/// The URI as errors name it before it has parsed: without its query and fragment, and with an
+/// authority that is not a valid server alias replaced by `<redacted>`. An authority is the
+/// first place a credential ends up by mistake (`hashivault://hvs.TOKEN@vault/...`, or a bare
+/// token pasted over the alias), and a rejected URI is exactly the one that may hold one, so only
+/// an authority that passed the alias grammar is echoed. The path still names the key.
+pub(crate) fn label(uri: &KeyUri) -> String {
+    let rest = uri.rest();
+    let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    match rest.strip_prefix("//") {
+        Some(r) => {
+            let (authority, path) = r.split_at(r.find('/').unwrap_or(r.len()));
+            let authority = if alias_ok(authority) {
+                authority
+            } else {
+                "<redacted>"
+            };
+            format!("{}://{authority}{path}", uri.scheme())
+        }
+        // Not a `scheme://` URI: nothing in it is known to be safe to echo.
+        None => format!("{}:<redacted>", uri.scheme()),
+    }
+}
+
 pub(crate) fn namespace_ok(s: &str) -> bool {
     !s.is_empty() && s.split('/').all(segment_ok)
 }

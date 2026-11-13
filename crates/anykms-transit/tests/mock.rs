@@ -1855,3 +1855,97 @@ async fn typed_open_parse_errors_name_the_uri() {
         assert_eq!(e.resource(), Some(want), "{e}");
     }
 }
+
+/// L12: a well-formed DER ECDSA signature plus one trailing byte. Vault and OpenBao answer 400
+/// "supplied signature contains extra data"; the bytes are attacker input, so this must be
+/// `VerificationFailed` (caller class), not `Backend` (an operator alert).
+#[tokio::test]
+async fn der_signature_with_trailing_bytes_is_a_verification_failure() {
+    let server = MockServer::start().await;
+    key_type(&server, "ec", "ecdsa-p256").await;
+    Mock::given(method("POST"))
+        .and(path("/v1/transit/verify/ec"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"errors": ["supplied signature contains extra data"]})),
+        )
+        .mount(&server)
+        .await;
+    let p = provider(&server, Flavor::Vault);
+    let ec = p
+        .digest_signing_key(uri("ec"), SignatureAlgorithm::EcdsaP256Sha256)
+        .unwrap();
+    // 30 06 02 01 01 02 01 01 00: SEQUENCE { INTEGER 1, INTEGER 1 } plus a zero byte.
+    let sig = Signature::from_parts(
+        SignatureAlgorithm::EcdsaP256Sha256,
+        Some(KeyVersion::from_u64(1)),
+        vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x00],
+    );
+    let e = ec
+        .verify_digest(&Digest::sha256(b"m"), &sig)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::VerificationFailed, "{e}");
+}
+
+/// L21: a token typed into the URI authority never reaches the error, whether it fails the
+/// user-info check (`@`) or only the alias grammar (a bare `hvs.` token).
+#[tokio::test]
+async fn tokens_in_a_rejected_uri_authority_are_not_echoed() {
+    let server = MockServer::start().await;
+    let p = provider(&server, Flavor::Vault);
+    for s in [
+        "hashivault://hvs.SECRETTOKEN/transit/keys/x",
+        "hashivault://hvs.SECRETTOKEN@vault/transit/keys/x",
+        "hashivault://user:SECRETTOKEN@vault/transit/keys/x?namespace=a",
+        "openbao://s.SECRETTOKEN:8200/transit/keys/x",
+    ] {
+        let e = p.aead_key(s).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Configuration, "{s}: {e}");
+        for shown in [
+            e.to_string(),
+            format!("{e:?}"),
+            e.resource().unwrap_or_default().to_owned(),
+        ] {
+            assert!(!shown.contains("SECRETTOKEN"), "{s}: {shown}");
+        }
+        assert!(
+            e.resource().is_some_and(|r| r.ends_with("/transit/keys/x")),
+            "the path still names the key: {e}"
+        );
+        // The pre-parse checks of the typed openers label errors the same way.
+        let e = p
+            .digest_signing_key(s, SignatureAlgorithm::Ed25519)
+            .unwrap_err();
+        assert!(!e.to_string().contains("SECRETTOKEN"), "{s}: {e}");
+        // And through a registry.
+        let r = anykms_core::Registry::builder()
+            .provider(p.clone())
+            .build()
+            .unwrap();
+        let e = r.aead(s).unwrap_err();
+        assert!(!format!("{e} {e:?}").contains("SECRETTOKEN"), "{s}: {e}");
+    }
+}
+
+/// A MAC whose returned tag is not the algorithm's length is a bad response, never a `Tag`
+/// (`Tag` itself accepts any non-empty length).
+#[tokio::test]
+async fn mac_with_a_wrong_length_tag_is_refused() {
+    use base64::Engine as _;
+    let server = MockServer::start().await;
+    key_type(&server, "m", "hmac").await;
+    let short = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
+    Mock::given(method("POST"))
+        .and(path("/v1/transit/hmac/m/sha2-256"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"hmac": format!("vault:v1:{short}")}})),
+        )
+        .mount(&server)
+        .await;
+    let p = provider(&server, Flavor::Vault);
+    let m = p.mac_key(uri("m"), MacAlgorithm::HmacSha256).unwrap();
+    let e = m.mac(b"x").await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Backend, "{e}");
+}

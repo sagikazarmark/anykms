@@ -4,6 +4,12 @@ This guide is for whoever runs the Vault/OpenBao servers and the services that c
 behavior below was verified against Vault 1.20/2.1 and OpenBao 2.4/2.7 (see
 `research/vault-openbao-transit.md`).
 
+**Minimum server version: Vault 1.13** (any OpenBao release). Transit `encrypt`/`decrypt` take
+the AAD as `associated_data` only since Vault 1.13. Vault 1.11 and 1.12 ignore the parameter but
+warn about it, so anykms fails closed (`Unsupported`); Vault 1.10 and older ignore it silently,
+so a non-empty AAD would not be bound to the ciphertext. anykms does not check the server
+version: do not point it at Vault older than 1.13.
+
 For the cloud backends, see [operations-aws.md](operations-aws.md) (AWS KMS),
 [operations-gcp.md](operations-gcp.md) (Google Cloud KMS) and
 [operations-azure.md](operations-azure.md) (Azure Key Vault and Managed HSM).
@@ -194,7 +200,13 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
   certificate, and `VAULT_CACERT` wins when both are set, as in the Vault CLI.
   `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` configure the client certificate the same way. There
   is no way to skip verification, and `*_SKIP_VERIFY=true` makes `from_env` fail. A transport
-  passed to a `ServerConfig` loaded by `EnvConfig` replaces the one built from the variables.
+  passed to a `ServerConfig` loaded by `EnvConfig` replaces the one built from the variables,
+  dropping their CA and client certificate (a `warn` event with the `tracing` feature): build
+  your own transport from `EnvConfig::tls()` (`EnvTls::into_transport_builder`) to keep them.
+  `VAULT_CACERT`, `VAULT_CAPATH` files and `VAULT_CLIENT_CERT` are read with a 4 MiB bound
+  (16 MiB for a whole `VAULT_CAPATH`), only as regular files; `VAULT_CLIENT_KEY` (1 MiB) must not
+  be group- or world-accessible, as for token files
+  (`ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE=1` accepts one).
 - TLS failures are classified: a rejected server certificate (`TLS certificate rejected: unknown
   issuer`, `name mismatch`, `expired`, ...) or a client certificate the server refuses is
   `Configuration` and is not retried. `DNS lookup failed` stays `Unavailable` (resolver outages
@@ -219,7 +231,7 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
 | Vault/Bao Agent sink file | `VAULT_TOKEN_FILE=/vault/secrets/token` (anykms-specific) or `ServerConfig::token_file` |
 | Agent API proxy (`use_auto_auth_token`) | `VAULT_ADDR=http://127.0.0.1:8100` and `ANYKMS_TRANSIT_NO_TOKEN=1` (`EnvConfig::no_token`, `ServerConfig::no_token`) |
 | Static token | `VAULT_TOKEN` (read on every request) |
-| OpenBao (`from_env_openbao`) | with `BAO_ADDR`: `BAO_TOKEN`, then `BAO_TOKEN_FILE` (anykms-specific), then `~/.bao-token`, `~/.vault-token`; with only `VAULT_ADDR`: the `VAULT_*` equivalents |
+| OpenBao (`from_env_openbao`) | with `BAO_ADDR`: `BAO_TOKEN`, then `BAO_TOKEN_FILE` (anykms-specific), then `~/.bao-token`, `~/.vault-token`; with only `VAULT_ADDR`: the `VAULT_*` equivalents (home file: only `~/.vault-token`) |
 | Developer machine | `~/.vault-token` (disable with `EnvConfig::vault().no_home_token()`) |
 | Kubernetes auth (renewed) | `ANYKMS_TRANSIT_AUTH=kubernetes`, `ANYKMS_TRANSIT_AUTH_ROLE=<role>` or `ServerConfig::login(Login::kubernetes(role))` |
 | JWT auth (renewed) | `ANYKMS_TRANSIT_AUTH=jwt`, `ANYKMS_TRANSIT_AUTH_ROLE=<role>`, `ANYKMS_TRANSIT_AUTH_JWT_FILE=<path>` or `ServerConfig::login(Login::jwt(role, path))` |
@@ -248,10 +260,13 @@ token source is found**, listing the variables and files it checked; without a t
 would fail with `PermissionDenied`. Behind an Agent API proxy, opt out explicitly with
 `ANYKMS_TRANSIT_NO_TOKEN=1` or `EnvConfig::no_token()`.
 
-OpenBao reads every setting (token, namespace, CA, client certificate) from the prefix that
-supplied the address, so a token is never sent to an address configured under the other prefix:
-with `BAO_ADDR` all `VAULT_*` variables are ignored; with only `VAULT_ADDR`, a `BAO_*` setting
-(for example a stray `BAO_TOKEN`) makes loading fail.
+OpenBao reads every setting (token, namespace, CA, client certificate, home token file) from the
+prefix that supplied the address, so a token variable or `~/.bao-token` is never sent to an
+address configured under the other prefix: with `BAO_ADDR` all `VAULT_*` variables are ignored;
+with only `VAULT_ADDR`, a `BAO_*` setting (for example a stray `BAO_TOKEN`) makes loading fail,
+and `~/.bao-token` is not read. `~/.vault-token` is the exception by design: it is the CLI token
+file both tools write (`vault login` and `bao login`), so with `BAO_ADDR` it is still the last
+fallback.
 
 `with_default_providers()` skips transit when neither `VAULT_ADDR` nor `BAO_ADDR` is set. The
 skip is reported by `DefaultProviders::skipped()` (`SkipCause::NotConfigured`) and logged with the

@@ -145,8 +145,13 @@ pub(crate) async fn malformed<F: Fixture>(c: Ctx<F>, alg: SignatureAlgorithm) ->
             x.to_le_bytes()[0]
         })
         .collect();
-    let candidates: [(&str, Vec<u8>); 3] = [
+    // The real signature plus one byte: for ECDSA, valid DER followed by extra data (which a
+    // server may report with its own message, e.g. Vault's "contains extra data").
+    let mut trailing = sig.as_bytes().to_vec();
+    trailing.push(0x00);
+    let candidates: [(&str, Vec<u8>); 4] = [
         ("garbage bytes", garbage),
+        ("the signature plus a trailing byte", trailing),
         // A DER SEQUENCE header whose length runs past the end.
         ("truncated DER", vec![0x30, 0x45, 0x02, 0x21, 0x00]),
         ("a single zero byte", vec![0x00]),

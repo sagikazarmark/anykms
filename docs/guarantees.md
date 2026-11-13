@@ -27,15 +27,26 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   process environment controls trust: pin it with `ca_pem`); `ca_pem` replaces the system roots;
   there is no way to skip verification; redirects are never followed; a configured proxy carries
   only HTTPS, as an end-to-end `CONNECT` tunnel, and is bypassed for link-local and loopback
-  hosts: plain-HTTP requests (the cloud metadata and credential endpoints) never go through it. The backends keep the host policy
-  for key endpoints: plain HTTP only for literal loopback IPs, and only when opted in. The one
+  hosts: plain-HTTP requests (the cloud metadata and credential endpoints) never go through it.
+  The backends keep the host policy for key endpoints: plain HTTP only for literal loopback IPs,
+  and only when opted in (for transit, an `http://` loopback address in `VAULT_ADDR`/`BAO_ADDR`
+  read by `EnvConfig` is that opt-in; `ServerConfig::allow_loopback_http` in code). The one
   plain-HTTP exception needs no opt-in: the built-in credential sources talk to the cloud
   metadata servers over `http://` on their link-local addresses (`169.254.169.254`,
   `169.254.170.2`, `169.254.170.23`, `fd00:ec2::254`, `fd00:ec2::23`, `metadata.google.internal`),
-  as every cloud SDK does. AWS: the container source also accepts loopback and `localhost` (the
-  AWS SDK allowlist); an instance metadata endpoint from `AWS_EC2_METADATA_SERVICE_ENDPOINT` may
-  be `http://` only to loopback, `localhost` or a link-local address unless the code opts in
-  (`ImdsCredentials::allow_http_to_any_host`). Whatever the transport, the
+  as every cloud SDK does, and to the local hosts each platform hands out:
+  - AWS: the container source also accepts loopback and `localhost` (the AWS SDK allowlist); an
+    instance metadata endpoint from `AWS_EC2_METADATA_SERVICE_ENDPOINT` may be `http://` only to
+    loopback, `localhost` or a link-local address unless the code opts in
+    (`ImdsCredentials::allow_http_to_any_host`).
+  - GCP: `GCE_METADATA_HOST` and an `external_account` file's `credential_source.url` may be
+    `http://` only to loopback, `localhost`, a link-local address or `metadata.google.internal`
+    unless the code opts in (`GcpProviderBuilder::allow_remote_http_credentials`).
+  - Azure: `IDENTITY_ENDPOINT` (App Service, Functions, Container Apps) may be `http://` only to
+    `localhost`, loopback, link-local or private (RFC 1918, `fc00::/7`) addresses, because App
+    Service on Linux hands out private addresses; any other host needs `https://`.
+
+  No environment variable widens these rules. Whatever the transport, the
   response limit is enforced twice (by the transport and again by the backend), so an oversized
   body never reaches a backend. Transport failures map to a fixed set of classes
   (`anykms_http::SendError`): a rejected or mismatched certificate is `Configuration` and not

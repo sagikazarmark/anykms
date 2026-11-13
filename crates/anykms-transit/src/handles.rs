@@ -1348,6 +1348,11 @@ impl Mac for TransitMacKey {
                 let (v, payload) =
                     parse_versioned(&r.data.hmac).ok_or_else(|| bad_response(&self.k, op))?;
                 let bytes = B64.decode(payload).map_err(|_| bad_response(&self.k, op))?;
+                // `Tag` accepts any non-empty length; a tag of another length is not this
+                // algorithm's (a hostile or misconfigured server), so never hand it out.
+                if bytes.len() != self.alg.tag_len() {
+                    return Err(bad_response(&self.k, op));
+                }
                 Ok(Tag::from_parts(
                     self.alg,
                     Some(KeyVersion::from_u64(v)),
