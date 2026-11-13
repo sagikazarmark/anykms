@@ -1,8 +1,14 @@
-//! The AWS conformance fixture, against an emulator (Floci, LocalStack) or real AWS.
+//! The AWS conformance fixture, against an emulator (Floci, AWS Emulator, LocalStack) or real AWS.
 //!
-//! Emulator (`tests/conformance_emulator.rs`): `ANYKMS_AWS_EMULATOR_ENDPOINT` (default
-//! `http://127.0.0.1:4566`, `docker compose --profile aws up -d --wait floci`),
-//! `ANYKMS_AWS_EMULATOR` names it (`floci`, default, or `localstack`). Keys are created per case.
+//! Emulator (`tests/conformance_emulator.rs`, `tests/emulator.rs`): `ANYKMS_AWS_EMULATOR` names it
+//! (`floci`, the default, `aws-emulator` or `localstack`), which picks the endpoint of its
+//! compose.yaml service (`http://127.0.0.1:4566`, `https://127.0.0.1:9297`,
+//! `http://127.0.0.1:4567`); `ANYKMS_AWS_EMULATOR_ENDPOINT` overrides it. Floci and LocalStack
+//! take any credentials over plain HTTP. AWS Emulator serves HTTPS with a certificate and checks
+//! SigV4 against credentials it generates on each start, writing both to
+//! `.dev/aws-emulator/9297/` (`ca.pem`, `emulator_credentials`; `scripts/aws-emulator-up.sh`);
+//! `ANYKMS_AWS_EMULATOR_CA_FILE` and `ANYKMS_AWS_EMULATOR_CREDENTIALS_FILE` (a shared credentials
+//! file, its `default` profile) point at other files, for any emulator. Keys are created per case.
 //!
 //! Live (`tests/conformance_live.rs`): `ANYKMS_AWS_LIVE=1` plus credentials of the default chain
 //! (CI: GitHub OIDC web identity), `ANYKMS_AWS_REGION` (else `AWS_REGION`) and optionally a pool
@@ -18,10 +24,12 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anykms_aws::anykms_http::ReqwestTransport;
 use anykms_aws::credentials::StaticCredentials;
 use anykms_aws::{
     AwsProvider, AwsProviderBuilder, Credentials, EncryptionContext, EncryptionContextAead,
@@ -130,22 +138,86 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
+/// A file the emulator writes on start; missing means it is not running.
+fn read_emulator_file(path: &Path) -> std::result::Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// The access key ID and secret access key of a shared credentials file's `default` profile.
+fn default_profile_keys(path: &Path) -> std::result::Result<(String, String), String> {
+    let text = String::from_utf8(read_emulator_file(path)?)
+        .map_err(|_| format!("{} is not UTF-8", path.display()))?;
+    let (mut id, mut secret, mut in_default) = (None, None, false);
+    for line in text.lines().map(str::trim) {
+        if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_default = section.trim() == "default";
+        } else if let (true, Some((k, v))) = (in_default, line.split_once('=')) {
+            match k.trim() {
+                "aws_access_key_id" => id = Some(v.trim().to_owned()),
+                "aws_secret_access_key" => secret = Some(v.trim().to_owned()),
+                _ => {}
+            }
+        }
+    }
+    id.zip(secret)
+        .ok_or_else(|| format!("{} has no default profile keys", path.display()))
+}
+
 impl AwsFixture {
     /// The emulator fixture, or why it is unavailable.
     pub async fn emulator() -> std::result::Result<Self, String> {
-        let endpoint =
-            env("ANYKMS_AWS_EMULATOR_ENDPOINT").unwrap_or_else(|| "http://127.0.0.1:4566".into());
         let name = env("ANYKMS_AWS_EMULATOR").unwrap_or_else(|| "floci".into());
+        let (default_endpoint, files) = match name.as_str() {
+            "aws-emulator" => (
+                "https://127.0.0.1:9297",
+                Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dev/aws-emulator/9297")),
+            ),
+            "localstack" => ("http://127.0.0.1:4567", None),
+            _ => ("http://127.0.0.1:4566", None),
+        };
+        let endpoint =
+            env("ANYKMS_AWS_EMULATOR_ENDPOINT").unwrap_or_else(|| default_endpoint.into());
+        let file = |var: &str, name: &str| {
+            env(var)
+                .map(PathBuf::from)
+                .or_else(|| files.as_ref().map(|d| d.join(name)))
+        };
+        let ca = match file("ANYKMS_AWS_EMULATOR_CA_FILE", "ca.pem") {
+            Some(path) => Some(read_emulator_file(&path)?),
+            None => None,
+        };
+        let (access_key_id, secret, from_file) = match file(
+            "ANYKMS_AWS_EMULATOR_CREDENTIALS_FILE",
+            "emulator_credentials",
+        ) {
+            Some(path) => {
+                let (id, secret) = default_profile_keys(&path)?;
+                (id, secret, true)
+            }
+            None => ("test".to_owned(), "test".to_owned(), false),
+        };
         let ep = endpoint.clone();
+        let key = secret.clone();
         let make: Arc<dyn Fn() -> AwsProviderBuilder + Send + Sync> = Arc::new(move || {
-            AwsProvider::builder()
+            let builder = AwsProvider::builder()
                 .credentials(StaticCredentials::new(Credentials::new(
-                    "test", "test", None,
+                    access_key_id.clone(),
+                    key.clone(),
+                    None,
                 )))
                 .endpoint_url(ep.clone())
-                .allow_loopback_http()
+                .allow_loopback_http();
+            match &ca {
+                Some(pem) => builder.http_transport(
+                    ReqwestTransport::builder()
+                        .ca_pem(pem.clone())
+                        .build()
+                        .expect("transport trusting the emulator CA"),
+                ),
+                None => builder,
+            }
         });
-        let f = Self::new(
+        let mut f = Self::new(
             name,
             Mode::Emulator,
             make,
@@ -154,6 +226,11 @@ impl AwsFixture {
             "000000000000".into(),
             None,
         )?;
+        // A generated secret must never show up in errors or logs; Floci's `test` would match
+        // unrelated text.
+        if from_file {
+            f.markers.push(secret);
+        }
         f.admin("ListKeys", json!({"Limit": 1}))
             .await
             .map_err(|e| format!("AWS KMS emulator at {} unavailable: {e}", f.endpoint))?;
@@ -250,6 +327,13 @@ impl AwsFixture {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Whether `ReEncrypt` takes an RSA ciphertext. AWS Emulator (1.0.337) refuses one that its
+    /// `Decrypt` accepts (`InvalidCiphertextException`); `just` skips the conformance case that
+    /// needs it (`recipes::envelope_native::rewrap_unrotated`).
+    pub fn reencrypts_rsa(&self) -> bool {
+        self.name != "aws-emulator"
     }
 
     pub fn uri_of(arn: &str) -> KeyUri {
@@ -436,12 +520,20 @@ impl Fixture for AwsFixture {
             caps = caps.supports(Signing(alg));
         }
         match self.mode {
-            // n/a, not a skip: CI runs the emulator suite with ANYKMS_FAIL_ON_SKIP=1, and the
-            // live suite checks these cases against real IAM.
-            Mode::Emulator => caps.with_emulated_errors(&self.name).not_applicable(
-                UnauthorizedProvider,
-                "the emulator does not enforce IAM (the live suite checks it)",
-            ),
+            // AWS Emulator answers with AWS's own error messages; the other emulators do not.
+            // IAM is n/a, not a skip: CI runs the emulator suite with ANYKMS_FAIL_ON_SKIP=1, and
+            // the live suite checks these cases against real IAM.
+            Mode::Emulator => {
+                caps = if self.name == "aws-emulator" {
+                    caps.supports(ServerErrorMessages)
+                } else {
+                    caps.with_emulated_errors(&self.name)
+                };
+                caps.not_applicable(
+                    UnauthorizedProvider,
+                    "the emulator does not enforce IAM (the live suite checks it)",
+                )
+            }
             Mode::Live => {
                 caps = caps
                     .supports(ServerErrorMessages)

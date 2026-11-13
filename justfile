@@ -105,7 +105,8 @@ package:
 # conformance (the minimal_backend example) need nothing else, so every case they can run must
 # run: a `skip` (fixture lacks a feature) fails, while `n/a` (absent by design: RSA, credentials,
 # native ciphertexts, request counting) stays ignored. transit, aws and azure run against the
-# servers in compose.yaml: Vault and OpenBao (scripts/dev-up.sh), Floci or LocalStack, and Lowkey
+# servers in compose.yaml: Vault and OpenBao (scripts/dev-up.sh), an AWS KMS emulator (Floci, AWS
+# Emulator via scripts/aws-emulator-up.sh, or LocalStack; ANYKMS_AWS_EMULATOR picks it), and Lowkey
 # Vault; with ANYKMS_FAIL_ON_SKIP=1 (as CI sets for all but LocalStack), a skipped case fails.
 [arg("package", pattern="local|gcp|conformance|transit|aws|azure")]
 [doc("Run a package's conformance suite (the package name without the `anykms-` prefix).")]
@@ -131,7 +132,12 @@ conformance package:
           --test conformance_vault --test conformance_openbao
         ;;
       aws)
-        cargo test -p anykms-aws --all-features --locked --test conformance_emulator
+        # AWS Emulator refuses ReEncrypt of an RSA ciphertext (`reencrypts_rsa` in tests/e2e).
+        skip=()
+        if [ "${ANYKMS_AWS_EMULATOR:-}" = aws-emulator ]; then
+          skip=(-- --skip recipes::envelope_native::rewrap_unrotated)
+        fi
+        cargo test -p anykms-aws --all-features --locked --test conformance_emulator "${skip[@]}"
         ;;
       azure)
         cargo test -p anykms-azure --all-features --locked --test conformance_lowkey
@@ -148,7 +154,12 @@ integration package:
         cargo test -p anykms-transit --all-features --locked
         ;;
       aws)
-        cargo test -p anykms-aws --all-features --locked --test emulator --test conformance_emulator
+        # AWS Emulator refuses ReEncrypt of an RSA ciphertext (`reencrypts_rsa` in tests/e2e).
+        skip=()
+        if [ "${ANYKMS_AWS_EMULATOR:-}" = aws-emulator ]; then
+          skip=(-- --skip recipes::envelope_native::rewrap_unrotated)
+        fi
+        cargo test -p anykms-aws --all-features --locked --test emulator --test conformance_emulator "${skip[@]}"
         ;;
       azure)
         # Mocks (every operation and error row), credentials, the TRACE hygiene test, and Lowkey

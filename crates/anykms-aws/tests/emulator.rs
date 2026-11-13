@@ -189,8 +189,10 @@ async fn rsa_wrap_locally_unwrap_remotely() {
         B64.decode(r["Plaintext"].as_str().unwrap()).unwrap(),
         [9u8; 32]
     );
-    let rewrapped = kek.rewrap(&wrapped, b"").await.unwrap();
-    assert_eq!(&*kek.unwrap_key(&rewrapped).await.unwrap(), &[9u8; 32]);
+    if f.reencrypts_rsa() {
+        let rewrapped = kek.rewrap(&wrapped, b"").await.unwrap();
+        assert_eq!(&*kek.unwrap_key(&rewrapped).await.unwrap(), &[9u8; 32]);
+    }
     // An envelope over it.
     let env = anykms_recipes::EnvelopeAead::new("rsa-kek", kek).unwrap();
     let ct = env.encrypt(&vec![1u8; 100_000], b"aad").await.unwrap();

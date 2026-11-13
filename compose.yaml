@@ -127,7 +127,9 @@ services:
       start_period: 10s
       retries: 30
 
-  # AWS KMS emulators (profile `aws`; `docker compose --profile aws up -d --wait floci`).
+  # AWS KMS emulators: Floci (profile `aws`; `docker compose --profile aws up -d --wait floci`),
+  # AWS Emulator (profile `aws-emulator`; scripts/aws-emulator-up.sh) and LocalStack (profile
+  # `aws-localstack`). The tests pick one with ANYKMS_AWS_EMULATOR (crates/anykms-aws/tests/e2e).
   # Floci (MIT, no token): real AES-GCM, ECDSA, RSA, Ed25519 and HMAC; it does not check SigV4
   # signatures, and its error texts differ from AWS (see docs/research/aws-kms.md).
   floci:
@@ -151,6 +153,26 @@ services:
     ports: ["127.0.0.1:4567:4566"]
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:4566/_localstack/health"]
+      interval: 2s
+      start_period: 10s
+      retries: 30
+
+  # AWS Emulator (CC0, no token), built from docker/aws-emulator (package pinned by checksum).
+  # Start it with scripts/aws-emulator-up.sh: it creates the shared directory and runs the
+  # emulator as the host user, as the emulator writes its files (per-run credentials, the CA of
+  # its HTTPS certificate) readable by their owner only, to .dev/aws-emulator/9297/. The port must
+  # be the same on both sides: the emulator writes it into those files.
+  aws-emulator:
+    profiles: [aws-emulator]
+    build: docker/aws-emulator
+    image: anykms-aws-emulator
+    command: ["-p", "9297"]
+    user: "${AWS_EMULATOR_UID:-1000}:${AWS_EMULATOR_GID:-1000}"
+    volumes: ["./.dev/aws-emulator:/home/emulator/.aws/emulator"]
+    ports: ["127.0.0.1:9297:9297"]
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--cacert", "/home/emulator/.aws/emulator/9297/ca.pem", "https://127.0.0.1:9297/__admin/health"]
       interval: 2s
       start_period: 10s
       retries: 30

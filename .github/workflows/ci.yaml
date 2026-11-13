@@ -302,61 +302,54 @@ jobs:
         if: failure()
         run: docker compose --profile sealed --profile tls logs
 
-  # The AWS conformance suite and end-to-end tests against Floci (MIT, no token, real
-  # cryptography; it neither checks SigV4 nor enforces IAM or disabled keys on Sign). Runs on
-  # every push and PR, forks included: it needs no secret. The mock-server tests run in `check`.
-  # Every conformance case it can run must run: a `skip` fails, while `n/a` (absent by design,
-  # e.g. the IAM cases, as Floci enforces no IAM) stays ignored.
+  # The AWS conformance suite and end-to-end tests against each emulator, on every push and PR.
+  # Floci (MIT, no token, real cryptography; it neither checks SigV4 nor enforces IAM or disabled
+  # keys on Sign) and AWS Emulator (CC0, no token, checks SigV4 against per-run credentials) need
+  # no secret, so they run on forks too; every conformance case they can run must run: a `skip`
+  # fails, while `n/a` (absent by design, e.g. the IAM cases, as no emulator enforces IAM here)
+  # stays ignored. LocalStack runs only where its auth token is available (never on fork PRs):
+  # without it every step is skipped and the job still reports success, so it is not a release
+  # gate (docs/releasing.md): the skip is a visible warning instead. The mock-server tests run in
+  # `check`.
   aws-emulator:
-    name: AWS (Floci emulator)
+    name: AWS (${{ matrix.name }})
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - emulator: floci
+            name: Floci emulator
+            start: docker compose --profile aws up -d --wait floci
+            logs: docker compose --profile aws logs floci
+            fail_on_skip: "1"
+          - emulator: aws-emulator
+            name: AWS Emulator
+            start: scripts/aws-emulator-up.sh
+            logs: docker compose --profile aws-emulator logs aws-emulator
+            fail_on_skip: "1"
+          - emulator: localstack
+            name: LocalStack emulator
+            start: docker compose --profile aws-localstack up -d --wait localstack
+            logs: docker compose --profile aws-localstack logs localstack
+            fail_on_skip: "0"
+            needs_token: true
     env:
+      ANYKMS_AWS_EMULATOR: ${{ matrix.emulator }}
       ANYKMS_REQUIRE_FIXTURE: "1"
-      ANYKMS_FAIL_ON_SKIP: "1"
+      ANYKMS_FAIL_ON_SKIP: ${{ matrix.fail_on_skip }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up devenv
-        uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
-
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cmd-format: devenv shell -- {0}
-
-      - name: Start Floci
-        run: docker compose --profile aws up -d --wait floci
-
-      - name: Conformance and end-to-end
-        run: just integration aws
-
-      - name: Emulator logs
-        if: failure()
-        run: docker compose --profile aws logs floci
-
-  # The same against LocalStack, only where its auth token is available (never on fork PRs).
-  # Without the token every step is skipped and the job still reports success, so it is not a
-  # release gate (Floci is; docs/releasing.md): the skip is a visible warning instead.
-  aws-localstack:
-    name: AWS (LocalStack emulator)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    env:
-      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
-      ANYKMS_REQUIRE_FIXTURE: "1"
-      ANYKMS_AWS_EMULATOR: localstack
-      ANYKMS_AWS_EMULATOR_ENDPOINT: http://127.0.0.1:4567
-    steps:
+      # The LocalStack token is in scope only here and where compose starts LocalStack, never
+      # where third-party code builds or runs.
       - name: Token available
         id: token
         shell: bash
+        env:
+          NEEDS_TOKEN: ${{ matrix.needs_token || false }}
+          LOCALSTACK_AUTH_TOKEN: ${{ matrix.needs_token && secrets.LOCALSTACK_AUTH_TOKEN || '' }}
         run: |
-          if [ -n "$LOCALSTACK_AUTH_TOKEN" ]; then
+          if [ "$NEEDS_TOKEN" != "true" ] || [ -n "$LOCALSTACK_AUTH_TOKEN" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::LOCALSTACK_AUTH_TOKEN is not available (fork PR or unset): LocalStack conformance did not run"
@@ -380,13 +373,24 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cmd-format: devenv shell -- {0}
 
-      - name: Start LocalStack
+      - name: Start ${{ matrix.name }}
         if: steps.token.outputs.present == 'true'
-        run: docker compose --profile aws-localstack up -d --wait localstack
+        shell: bash
+        env:
+          START: ${{ matrix.start }}
+          LOCALSTACK_AUTH_TOKEN: ${{ matrix.needs_token && secrets.LOCALSTACK_AUTH_TOKEN || '' }}
+        run: $START
 
       - name: Conformance and end-to-end
         if: steps.token.outputs.present == 'true'
         run: just integration aws
+
+      - name: Emulator logs
+        if: failure() && steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          LOGS: ${{ matrix.logs }}
+        run: $LOGS
 
   # Live AWS: nightly and on demand, in this repository only (never forks), with GitHub OIDC
   # federation to a test-account role. The backend's own web-identity source exchanges the OIDC

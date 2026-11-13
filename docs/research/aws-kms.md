@@ -102,17 +102,23 @@ source list of `docs/cloud/aws.md`.
 | IMDSv2 | `PUT /latest/api/token` (TTL header), then `GET /latest/meta-data/iam/security-credentials/[role]` with the token; `fd00:ec2::254` in IPv6 mode | no IMDSv1 fallback; 1 s connect / 2 s request |
 | Expiry | temporary credentials carry `Expiration` (RFC 3339) | refreshed 5 minutes before (half the lifetime for short ones) |
 
-## 5. Emulators (2026-10-06)
+## 5. Emulators (2026-10-06; AWS Emulator 2026-11-13)
 
-| | Floci 2.1.0 | LocalStack 2026.9.0 |
-|---|---|---|
-| License, token | MIT, none | needs `LOCALSTACK_AUTH_TOKEN` since 2026-03-23 (exits with code 55 without one) |
-| Image | `floci/floci:2.1.0@sha256:f5aa8c18…ba102db`, port 4566, health `/_floci/health` | `localstack/localstack:2026.9.0@sha256:801a3dff…b792` |
-| Cryptography | real: AES-GCM blobs, ECDSA P-256/384/521 (DER over the given digest), RSA PSS/PKCS#1, Ed25519, HMAC, RSA-OAEP-SHA-256 (local wraps decrypt) | not evaluated (no token) |
-| SigV4 | not checked (any or no signature accepted); region from the credential scope, account `000000000000` (or a 12-digit access key id) | — |
-| Deviations | no `x-amzn-ErrorType` header (type only in the body; `x-amzn-query-error` instead); invalid signature → 200 `SignatureValid: false`; signs with disabled keys; no context size limit; accepts empty / 4097-byte Ed25519 RAW messages; ignores grant tokens; `UnsupportedOperationException` for signing with a symmetric key; digest length and algorithm/curve pairing unchecked; `Enabled` stays true during pending deletion; NotFound is HTTP 404 | — |
-| Use | CI on every PR: the conformance suite (`ServerErrorMessages` not applicable, IAM cases skipped) and `tests/emulator.rs` | CI when the token secret exists |
+| | Floci 2.1.0 | AWS Emulator 1.0.337 | LocalStack 2026.9.0 |
+|---|---|---|---|
+| License, token | MIT, none | CC0 (vendored crates Apache-2.0), none; telemetry on by default (off in `docker/aws-emulator`) | needs `LOCALSTACK_AUTH_TOKEN` since 2026-03-23 (exits with code 55 without one) |
+| Image | `floci/floci:2.1.0@sha256:f5aa8c18…ba102db`, port 4566, health `/_floci/health` | none published: built from `docker/aws-emulator` (Amazon Linux 2023 minimal by digest, the signed RPM by checksum), HTTPS on 9297, health `/__admin/health` | `localstack/localstack:2026.9.0@sha256:801a3dff…b792` |
+| Cryptography | real: AES-GCM blobs, ECDSA P-256/384/521 (DER over the given digest), RSA PSS/PKCS#1, Ed25519, HMAC, RSA-OAEP-SHA-256 (local wraps decrypt) | real: every key spec the suite uses; local RSA-OAEP-SHA-256 wraps decrypt | not evaluated (no token) |
+| SigV4 | not checked (any or no signature accepted); region from the credential scope, account `000000000000` (or a 12-digit access key id) | checked against credentials generated on each start (written with a self-signed certificate for `127.0.0.1` to `~/.aws/emulator/<port>/`); account `000000000000`, one region (`us-east-1`) | — |
+| Deviations | no `x-amzn-ErrorType` header (type only in the body; `x-amzn-query-error` instead); invalid signature → 200 `SignatureValid: false`; signs with disabled keys; no context size limit; accepts empty / 4097-byte Ed25519 RAW messages; ignores grant tokens; `UnsupportedOperationException` for signing with a symmetric key; digest length and algorithm/curve pairing unchecked; `Enabled` stays true during pending deletion; NotFound is HTTP 404 | `ReEncrypt` refuses an RSA ciphertext (`RSAES_OAEP_SHA_256` source and destination) with `InvalidCiphertextException`, although `Decrypt` accepts it; at most 500 keys per run (`LimitExceededException`); no IAM or key-policy denial for its own credentials. Its error codes and messages pass the suite's `ServerErrorMessages` cases. Published fidelity: 291 of 310 KMS tests (v1.0.322) | — |
+| Use | CI on every PR: the conformance suite (`ServerErrorMessages` not applicable, IAM cases skipped) and `tests/emulator.rs` | CI on every PR: the conformance suite (`ServerErrorMessages` included, IAM cases n/a, `recipes::envelope_native::rewrap_unrotated` skipped by `just`) and `tests/emulator.rs` (RSA rewrap step skipped) | CI when the token secret exists |
 
 The conformance run against Floci passes every applicable case, the HMAC-SHA-384/512 MAC cases
 included: the suite asks for an HMAC key per algorithm (`TestKeyKind::Hmac(alg)`), as an AWS HMAC
 key supports one.
+
+Against AWS Emulator (verified 2026-11-13, arm64 Docker): 359 cases pass (20 more than Floci, the
+`ServerErrorMessages` ones), 117 are n/a, and `recipes::envelope_native::rewrap_unrotated` (typed
+and registry) fails on the `ReEncrypt` deviation above. Not yet reported upstream
+(github.com/aws/aws-emulator takes issues, not pull requests). A run makes about 130 keys, so
+`scripts/aws-emulator-up.sh` recreates the container each time.

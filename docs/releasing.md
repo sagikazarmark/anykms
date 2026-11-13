@@ -71,10 +71,10 @@ repository, workflow run and commit of every version published through Trusted P
 1. **Merge everything into `main` and wait for its CI run to pass.** The README links point at
    `blob/main/docs/...`, so the documents they name must be on `main` when the crates.io page goes
    live. The Release workflow does not check CI. The `push` run of `CI` on `main` covers the MSRV
-   job, the docs.rs job, the service jobs (Floci and Lowkey, both of which fail on a skipped
-   conformance case) and the Vault/OpenBao integration matrix. The LocalStack job is not a gate:
-   without `LOCALSTACK_AUTH_TOKEN` it skips every step and still reports success (with a warning),
-   and Floci covers the same suite.
+   job, the docs.rs job, the service jobs (Floci, AWS Emulator and Lowkey, each of which fails on
+   a skipped conformance case) and the Vault/OpenBao integration matrix. The LocalStack job is not
+   a gate: without `LOCALSTACK_AUTH_TOKEN` it skips every step and still reports success (with a
+   warning), and Floci and AWS Emulator cover the same suite.
 2. **Start the Release workflow** from `main` (Actions → Release → Run workflow), with a `bump`
    (`patch`, `minor`, `major`) or an exact `version` (`vX.Y.Z`):
 

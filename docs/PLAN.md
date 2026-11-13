@@ -1951,6 +1951,10 @@ AWS:
   recorded error bodies are replayed by a mock test.
 - **Floci** is the free emulator for per-PR conformance (LocalStack needs a paid token). Its
   deviations are listed in `docs/research/aws-kms.md`.
+- **AWS Emulator** (2026-11-13) runs the same suite on every PR next to Floci: it checks SigV4
+  and returns AWS's own error messages, so the `ServerErrorMessages` cases run against it. Built
+  from `docker/aws-emulator` (no published image); its one deviation the suite hits (RSA
+  `ReEncrypt`) is in the same document.
 
 GCP:
 
