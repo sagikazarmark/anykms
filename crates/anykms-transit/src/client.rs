@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use anykms_core::time::Instant;
 use anykms_core::{BackendDetail, Error, ErrorKind, Operation, Result};
 use anykms_http::HttpTransport;
 use anykms_http::http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -166,12 +165,11 @@ impl Server {
         Ok(url)
     }
 
-    /// Sends one attempt; with the instant it was handed to the transport.
     async fn send(
         &self,
         call: &Call<'_>,
         token: Option<&Token>,
-    ) -> Result<(StatusCode, HeaderMap, Zeroizing<Vec<u8>>, Instant)> {
+    ) -> Result<(StatusCode, HeaderMap, Zeroizing<Vec<u8>>)> {
         let url = self.url(&call.segments)?;
         let mut req = anykms_http::client::request(call.method.clone(), &url)
             .header("X-Vault-Request", "true");
@@ -204,7 +202,6 @@ impl Server {
         // server, trusted only up to a small cap, so a lying header cannot make us allocate up
         // front; the body grows into fresh zeroizing buffers (the old one is wiped), never
         // beyond the limit.
-        let sent = Instant::now();
         let r = send(
             &*self.http,
             req.body(body),
@@ -214,16 +211,14 @@ impl Server {
             "response exceeds the maximum size",
         )
         .await?;
-        Ok((r.status, r.headers, r.body, sent))
+        Ok((r.status, r.headers, r.body))
     }
 
     /// Performs a call, retrying once after a 403 if the token source yields a new token.
-    /// Returns the success body, with the instant the attempt that got it was handed to the
-    /// transport (after any wait for a token; the retry's after a 403), by which metadata reads
-    /// are ordered (see [`TypeCache`](crate::handles::TypeCache)). Every non-success response is
-    /// classified. Runs inside the request span (`anykms.transit`, the shared schema of
+    /// Returns the success body; every non-success response is classified.
+    /// Runs inside the request span (`anykms.transit`, the shared schema of
     /// [`anykms_http::span`]).
-    pub(crate) async fn call(&self, call: Call<'_>) -> Result<(Zeroizing<Vec<u8>>, Instant)> {
+    pub(crate) async fn call(&self, call: Call<'_>) -> Result<Zeroizing<Vec<u8>>> {
         let version = call.key_version.map(|v| v.to_string());
         let span = anykms_http::request_span!(
             "anykms.transit",
@@ -238,7 +233,7 @@ impl Server {
         r
     }
 
-    async fn call_inner(&self, call: &Call<'_>) -> Result<(Zeroizing<Vec<u8>>, Instant)> {
+    async fn call_inner(&self, call: &Call<'_>) -> Result<Zeroizing<Vec<u8>>> {
         // First: a transport that cannot send from this context (reqwest outside a Tokio
         // runtime) fails here, before the token source is asked.
         self.http
@@ -250,7 +245,7 @@ impl Server {
             .await
             .map_err(|e| e.with_operation(call.op))?;
         anykms_http::span::record_attempt(1);
-        let (mut status, mut headers, mut body, mut sent) = self.send(call, token.as_ref()).await?;
+        let (mut status, mut headers, mut body) = self.send(call, token.as_ref()).await?;
         if status == StatusCode::FORBIDDEN
             && let Some(rejected) = &token
         {
@@ -266,7 +261,7 @@ impl Server {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(reason = "token refreshed after 403", "retrying once");
                     anykms_http::span::record_attempt(2);
-                    (status, headers, body, sent) = self.send(call, fresh.as_ref()).await?;
+                    (status, headers, body) = self.send(call, fresh.as_ref()).await?;
                 }
             }
         }
@@ -307,7 +302,7 @@ impl Server {
                     ));
                 }
             }
-            return Ok((body, sent));
+            return Ok(body);
         }
         let messages = ErrorBody::messages(&body);
         let mut e = classify(&Failure {

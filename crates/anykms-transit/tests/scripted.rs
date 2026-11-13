@@ -793,11 +793,61 @@ fn by_path_login_provider(t: &std::sync::Arc<ByPath>, test: &str) -> (TransitPro
     (p, dir)
 }
 
-/// A metadata read refused with a 403 is sent again after a new login, later than a read that
-/// started after it. It is ordered by when that retry was sent, not by when it started: the
-/// recreated key's type it returns replaces the older one the other read cached.
+/// After two overlapping metadata reads of `key` that returned different types, the next
+/// request reads the key again (a fourth `keys/k` answer, [`KEY_INFO`], must be scripted) and
+/// then encrypts: neither read's type was kept.
+async fn reads_the_type_again(t: &ByPath, key: &anykms_transit::TransitAeadKey) {
+    let before = t.paths().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("a type from one of the conflicting reads was kept");
+    assert_eq!(
+        t.paths()[before..],
+        ["/v1/transit/keys/k", "/v1/transit/encrypt/k"]
+    );
+}
+
+/// A transport may hold a request for any time after it is handed over, so of two overlapping
+/// metadata reads the one sent first may reach the server last, after the key was recreated.
+/// Neither is trusted over the other: the later-sent read's older type does not replace the
+/// type the earlier-sent one cached, and the key is read again.
 #[tokio::test(start_paused = true)]
-async fn a_type_read_retried_after_a_403_is_ordered_by_its_retry() {
+async fn overlapping_type_reads_that_disagree_are_read_again() {
+    let t = ByPath::new();
+    // Sent first, it reaches the server after the key was recreated.
+    t.answer(
+        "/keys/k",
+        Hold::For(std::time::Duration::from_secs(5)),
+        200,
+        KEY_INFO,
+    )
+    // Sent later, it was answered before.
+    .answer(
+        "/keys/k",
+        Hold::For(std::time::Duration::from_secs(10)),
+        200,
+        RSA_INFO,
+    )
+    .answer("/keys/k", Hold::No, 200, KEY_INFO)
+    .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
+    let p = by_path_provider(&t);
+    let key = p.aead_key(uri()).unwrap();
+    let earlier = tokio::spawn({
+        let key = key.clone();
+        async move { key.describe().await }
+    });
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    key.describe().await.unwrap();
+    earlier.await.unwrap().unwrap();
+    assert_eq!(t.paths().len(), 2, "{:?}", t.paths());
+    reads_the_type_again(&t, &key).await;
+}
+
+/// A metadata read refused with a 403 is sent again after a new login, later than a read that
+/// started after it and cached the key's older type. The recreated key's type it returns
+/// conflicts with that one: the key is read again.
+#[tokio::test(start_paused = true)]
+async fn a_type_read_retried_after_a_403_that_disagrees_is_read_again() {
     let t = ByPath::new();
     t.login(Hold::No, "s.1")
         .answer(
@@ -808,6 +858,7 @@ async fn a_type_read_retried_after_a_403_is_ordered_by_its_retry() {
         )
         .answer("/keys/k", Hold::No, 200, RSA_INFO)
         .login(Hold::No, "s.2")
+        .answer("/keys/k", Hold::No, 200, KEY_INFO)
         .answer("/keys/k", Hold::No, 200, KEY_INFO)
         .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
     let (p, dir) = by_path_login_provider(&t, "retried-type-read");
@@ -823,24 +874,20 @@ async fn a_type_read_retried_after_a_403_is_ordered_by_its_retry() {
     key.describe().await.unwrap();
     earlier.await.unwrap().unwrap();
     assert_eq!(t.paths().len(), 5, "{:?}", t.paths());
-
-    let before = t.paths().len();
-    key.encrypt(b"z", b"")
-        .await
-        .expect("the retried read's newer type was discarded");
-    assert_eq!(t.paths()[before..], ["/v1/transit/encrypt/k"]);
+    reads_the_type_again(&t, &key).await;
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A metadata read that waits for a login is sent only after it, later than a read that
-/// started after it but logged in itself (the first login stalled). It is ordered by when it
-/// was sent: the recreated key's type it returns replaces the older one the other read cached.
+/// started after it but logged in itself (the first login stalled) and cached the key's older
+/// type. The recreated key's type it returns conflicts with that one: the key is read again.
 #[tokio::test(start_paused = true)]
-async fn a_type_read_that_waited_for_a_login_is_ordered_by_its_send() {
+async fn a_type_read_that_waited_for_a_login_and_disagrees_is_read_again() {
     let t = ByPath::new();
     t.login(Hold::Release, "s.stalled")
         .login(Hold::No, "s.fresh")
         .answer("/keys/k", Hold::No, 200, RSA_INFO)
+        .answer("/keys/k", Hold::No, 200, KEY_INFO)
         .answer("/keys/k", Hold::No, 200, KEY_INFO)
         .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
     let (p, dir) = by_path_login_provider(&t, "login-wait-type-read");
@@ -857,11 +904,6 @@ async fn a_type_read_that_waited_for_a_login_is_ordered_by_its_send() {
     t.release.notify_one();
     earlier.await.unwrap();
     assert_eq!(t.paths().len(), 4, "{:?}", t.paths());
-
-    let before = t.paths().len();
-    key.encrypt(b"z", b"")
-        .await
-        .expect("the read that waited for its login had its newer type discarded");
-    assert_eq!(t.paths()[before..], ["/v1/transit/encrypt/k"]);
+    reads_the_type_again(&t, &key).await;
     std::fs::remove_dir_all(&dir).unwrap();
 }
