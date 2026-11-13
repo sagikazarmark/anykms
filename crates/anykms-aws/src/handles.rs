@@ -86,33 +86,93 @@ impl Seen {
 /// Metadata and when its `DescribeKey` observed the server.
 type Described = (Seen, Arc<AwsKeyInfo>);
 
-/// Key metadata cache, shared per provider: URI ARN → (expiry, (seen, metadata)).
+/// Key metadata cache, shared per provider: URI ARN → slot (expiry, (seen, metadata), forget
+/// mark).
 ///
-/// A `DescribeKey` stores its metadata only if no entry was dropped since it started
-/// ([`generation`](Self::generation)), and one that a stalled flight's replacement superseded
-/// stores nothing: metadata never comes back after the key was found missing or changed. Over a
-/// cached entry ([`Seen`]), a read that started after the entry's read ended replaces it, one
-/// that ended before it started stores nothing, and one that overlapped it stores nothing if it
-/// returned the same metadata. Overlapping reads that returned different metadata (an alias's
-/// previous and new target, say) are a conflict: which one saw the server later is unknown, so
-/// the entry is dropped like a forget and the next request describes the key again.
+/// A `DescribeKey` stores its metadata only if its key was not forgotten since it started
+/// ([`KeyCtx::forget`]), and one that a stalled flight's replacement superseded stores nothing:
+/// metadata never comes back after the key was found missing or changed. Over a cached entry
+/// ([`Seen`]), a read that started after the entry's read ended replaces it, one that ended
+/// before it started stores nothing, and one that overlapped it stores nothing if it returned
+/// the same metadata. Overlapping reads that returned different metadata (an alias's previous
+/// and new target, say) are a conflict: which one saw the server later is unknown, so the key
+/// is forgotten and the next request describes it again.
+///
+/// # Per-key forget marks
+///
+/// A forget ticks the [`clock`](Self::clock) and marks its own key's slot with the new value; a
+/// read stores only if its key's mark is not newer than its start ([`Seen::start`]). A forget
+/// therefore discards concurrent reads of its own key only: reads of other keys still store.
+/// The mark is kept in the key's slot, which a forget empties rather than removes (and creates
+/// for a key with no entry), so it outlives the entry it dropped. Slots expire like entries (an
+/// emptied one a TTL after its forget) and are pruned with them, whenever a read stores or a
+/// key is forgotten, so the cache holds at most one slot per key used within a TTL. Pruning a
+/// mark raises `pruned` to it, and a read that started before `pruned` stores nothing: a
+/// forgotten key's read can never store once its mark is gone, and a read of another key loses
+/// its store to a pruned mark only when it was in flight for longer than that mark's TTL (it is
+/// then described again by the next request).
 #[derive(Default)]
 pub(crate) struct DescribeCache {
-    entries: Mutex<HashMap<String, (Instant, Described)>>,
-    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget`]).
-    generation: AtomicU64,
-    /// Ticked as every request whose response is an observation ([`Seen`]) completes: a
-    /// `DescribeKey`, or a request whose `KeyId` names the alias's target.
+    slots: Mutex<Slots>,
+    /// Ticked as every request whose response is an observation ([`Seen`]) completes (a
+    /// `DescribeKey`, or a request whose `KeyId` names the alias's target) and by every forget.
     clock: AtomicU64,
     /// One `DescribeKey` at a time for concurrent misses (R-34), per URI ARN and grant tokens
     /// (a failure with one handle's grant tokens says nothing about another's).
     flights: SingleFlight<(String, usize), Result<Described>>,
 }
 
+#[derive(Default)]
+struct Slots {
+    by_key: HashMap<String, Slot>,
+    /// The newest forget mark pruned with its slot.
+    pruned: u64,
+}
+
+/// One key's cached metadata and forget mark.
+struct Slot {
+    /// When the slot may be pruned: its entry's expiry, or a TTL after its forget.
+    expires: Instant,
+    /// The cached metadata, while `expires` is ahead; `None` once forgotten.
+    described: Option<Described>,
+    /// The clock value of the key's latest forget (0: never forgotten).
+    forgotten: u64,
+}
+
+impl Slots {
+    /// Drops expired slots, keeping their forget marks in `pruned`.
+    fn prune(&mut self, now: Instant) {
+        let pruned = &mut self.pruned;
+        self.by_key.retain(|_, slot| {
+            let keep = now < slot.expires;
+            if !keep {
+                *pruned = (*pruned).max(slot.forgotten);
+            }
+            keep
+        });
+    }
+}
+
 impl DescribeCache {
-    /// The generation a `DescribeKey` about to be sent stores under (see [`KeyCtx::store`]).
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Slots> {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Forgets `arn`'s metadata (see [`KeyCtx::forget`]), under the lock.
+    fn forget(&self, slots: &mut Slots, arn: &str, now: Instant) {
+        slots.prune(now);
+        let mark = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
+        // The slot stays, emptied, to keep the mark.
+        slots.by_key.insert(
+            arn.to_owned(),
+            Slot {
+                expires: now + DESCRIBE_TTL,
+                described: None,
+                forgotten: mark,
+            },
+        );
     }
 
     /// The clock as a request starts ([`Seen::start`]).
@@ -554,61 +614,55 @@ impl KeyCtx {
         r
     }
 
-    /// Drops the cached metadata; a `DescribeKey` that started before cannot store its own.
+    /// Drops the cached metadata; a `DescribeKey` of this key that started before cannot store
+    /// its own. Reads of other keys are unaffected (see [`DescribeCache`]).
     fn forget(&self) {
-        let mut c = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.forget_locked(&mut c);
+        let mut slots = self.cache.lock();
+        self.cache.forget(&mut slots, &self.key.arn, Instant::now());
     }
 
-    fn forget_locked(&self, entries: &mut HashMap<String, (Instant, Described)>) {
-        self.cache.generation.fetch_add(1, Ordering::SeqCst);
-        entries.remove(&self.key.arn);
-    }
-
-    /// Caches a `DescribeKey`'s metadata (see [`DescribeCache`]): not if an entry was dropped
-    /// since `generation` was current, nor over an entry from a read that did not end before
-    /// this one started. Overlapping reads that disagree drop the entry.
-    fn store(&self, generation: u64, d: &Described) {
-        let mut c = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.cache.generation() != generation {
+    /// Caches a `DescribeKey`'s metadata (see [`DescribeCache`]): not if this key was forgotten
+    /// since the read started (or a mark newer than its start was pruned), nor over an entry
+    /// from a read that did not end before this one started. Overlapping reads that disagree
+    /// forget the key.
+    fn store(&self, d: &Described) {
+        let mut slots = self.cache.lock();
+        let now = Instant::now();
+        slots.prune(now);
+        let start = d.0.start;
+        if start < slots.pruned {
             return;
         }
-        let now = Instant::now();
-        c.retain(|_, (exp, _)| now < *exp);
-        if let Some((_, (held, info))) = c.get(&self.key.arn) {
-            match d.0.order(*held) {
-                Order::Newer => {}
-                Order::Older => return,
-                Order::Overlap if *info == d.1 => return,
-                Order::Overlap => return self.forget_locked(&mut c),
+        if let Some(slot) = slots.by_key.get(&self.key.arn) {
+            if start < slot.forgotten {
+                return;
+            }
+            if let Some((held, info)) = &slot.described {
+                match d.0.order(*held) {
+                    Order::Newer => {}
+                    Order::Older => return,
+                    Order::Overlap if *info == d.1 => return,
+                    Order::Overlap => return self.cache.forget(&mut slots, &self.key.arn, now),
+                }
             }
         }
-        c.insert(
-            self.key.arn.clone(),
-            (
-                now + anykms_http::cache::jittered_ttl(DESCRIBE_TTL),
-                d.clone(),
-            ),
-        );
+        let slot = slots.by_key.entry(self.key.arn.clone()).or_insert(Slot {
+            expires: now,
+            described: None,
+            forgotten: 0,
+        });
+        slot.expires = now + anykms_http::cache::jittered_ttl(DESCRIBE_TTL);
+        slot.described = Some(d.clone());
     }
 
     fn cached(&self) -> Option<Described> {
         let now = Instant::now();
         self.cache
-            .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_key
             .get(&self.key.arn)
-            .filter(|(exp, _)| now < *exp)
-            .map(|(_, d)| d.clone())
+            .filter(|slot| now < slot.expires)
+            .and_then(|slot| slot.described.clone())
     }
 
     /// One uncached `DescribeKey` of `key_id` (the URI's key or alias, or the resolved key
@@ -646,9 +700,8 @@ impl KeyCtx {
 
     /// [`describe`](Self::describe), with when the request observed the server.
     async fn describe_at(&self, op: Operation) -> Result<Described> {
-        let generation = self.cache.generation();
         let d = self.describe_seen(op).await?;
-        self.store(generation, &d);
+        self.store(&d);
         self.note_resolved(&d.1.arn, d.0);
         Ok(d)
     }
@@ -674,7 +727,6 @@ impl KeyCtx {
                 self.key.arn.clone(),
                 self.grant_tokens.as_ref().map_or(0, GrantTokens::identity),
             );
-            let generation = self.cache.generation();
             self.cache
                 .flights
                 .run_and_commit(
@@ -688,7 +740,7 @@ impl KeyCtx {
                     },
                     |r| {
                         if let Ok(d) = r {
-                            self.store(generation, d);
+                            self.store(d);
                         }
                     },
                 )
@@ -1946,5 +1998,54 @@ pub(crate) fn fuzz_decode_success(which: u8, body: &[u8]) -> bool {
         _ => AwsKeyInfo::parse(body)
             .map(|i| drop(i.to_key_info()))
             .is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Expired slots are pruned, forget marks included, so the cache stays bounded; a pruned
+    /// mark is kept in `pruned`, which still stops a read from before it.
+    #[test]
+    fn expired_slots_and_their_forget_marks_are_pruned() {
+        let now = Instant::now();
+        let info = AwsKeyInfo::parse(
+            br#"{"KeyMetadata": {"Arn": "arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-111111111111",
+                "KeyId": "k", "AWSAccountId": "111122223333", "KeySpec": "SYMMETRIC_DEFAULT",
+                "KeyUsage": "ENCRYPT_DECRYPT", "KeyState": "Enabled",
+                "CreationDate": 1700000000, "EncryptionAlgorithms": ["SYMMETRIC_DEFAULT"]}}"#,
+        )
+        .unwrap();
+        let described = (Seen { start: 1, end: 2 }, Arc::new(info));
+        let mut slots = Slots::default();
+        slots.by_key.insert(
+            "forgotten".to_owned(),
+            Slot {
+                expires: now + DESCRIBE_TTL,
+                described: None,
+                forgotten: 3,
+            },
+        );
+        slots.by_key.insert(
+            "cached".to_owned(),
+            Slot {
+                expires: now + 2 * DESCRIBE_TTL,
+                described: Some(described),
+                forgotten: 1,
+            },
+        );
+        slots.prune(now);
+        assert_eq!((slots.by_key.len(), slots.pruned), (2, 0));
+        slots.prune(now + DESCRIBE_TTL);
+        assert_eq!(slots.by_key.len(), 1);
+        assert!(slots.by_key.contains_key("cached"));
+        assert_eq!(
+            slots.pruned, 3,
+            "a read from before the pruned mark stores nothing"
+        );
+        slots.prune(now + 2 * DESCRIBE_TTL);
+        assert!(slots.by_key.is_empty());
+        assert_eq!(slots.pruned, 3, "the newest pruned mark is kept");
     }
 }
