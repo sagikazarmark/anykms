@@ -120,6 +120,8 @@ client at the bottom of it and its own layers (a concurrency limit, a rate limit
 on top; the backend sends every request, credential fetches included, through the stack:
 
 ```rust
+use std::time::Duration;
+
 use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
 use anykms::transit::{EnvConfig, TransitProvider};
 use tower::ServiceBuilder;
@@ -127,9 +129,10 @@ use tower::ServiceBuilder;
 let service = ServiceBuilder::new()
     .concurrency_limit(4)
     .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
-let server = EnvConfig::vault()
-    .load()?
-    .http_transport(TowerTransport::new(service));
+// Above the client's timeouts (twice connect plus request: 24 s with the defaults).
+let transport = TowerTransport::new(service)
+    .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
+let server = EnvConfig::vault().load()?.http_transport(transport);
 let registry = anykms::Registry::builder()
     .provider(TransitProvider::builder().server("default", server).build()?)
     .build()?;
@@ -154,6 +157,14 @@ credential fetch, so that running outside a Tokio runtime fails with one `NoRunt
 look through a tower stack. With `into_service()` at the bottom, `NoRuntime` still has its class
 and is still a `Configuration` error, but it surfaces from the first request, after the credential
 chain has started.
+
+A second: the adapter cannot see the client's timeouts either, so it does not bound how long a
+backend's single-flight followers wait for another caller's credential or metadata request
+(`HttpTransport::follower_wait`; the built-in transport bounds it at twice its connect plus request
+timeout). Without a bound, a caller that stops polling its request mid-flight (a dropped
+`select!` branch that is never polled again, say) leaves every later caller waiting for as long as
+that future lives. `with_follower_wait` sets the bound, measured with the given sleep (a JS timer
+on a Worker); pick one above the stack's request timeout, as above.
 
 The same adapter is how anykms runs where reqwest cannot, such as Cloudflare Workers: with
 `default-features = false`, a backend feature, `tower` and `js` (the host's clocks and RNG), the

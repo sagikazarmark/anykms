@@ -311,6 +311,10 @@ pub struct CaseReport {
 }
 
 /// Every case's outcome plus the declarations check, as produced by [`run_async`].
+///
+/// Non-exhaustive: the runner builds it, a host reads it, and new coverage fields land without a
+/// breaking change (`not_applicable` and `unchecked` were added in 0.4).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     /// Cases in run order.

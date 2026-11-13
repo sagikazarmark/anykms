@@ -141,6 +141,8 @@ async fn env_config() -> anyhow::Result<()> {
 #[rustfmt::skip]
 async fn tower_stack() -> anyhow::Result<()> {
     // snippet: docs/guide.md
+    use std::time::Duration;
+
     use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
     use anykms::transit::{EnvConfig, TransitProvider};
     use tower::ServiceBuilder;
@@ -148,9 +150,10 @@ async fn tower_stack() -> anyhow::Result<()> {
     let service = ServiceBuilder::new()
         .concurrency_limit(4)
         .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
-    let server = EnvConfig::vault()
-        .load()?
-        .http_transport(TowerTransport::new(service));
+    // Above the client's timeouts (twice connect plus request: 24 s with the defaults).
+    let transport = TowerTransport::new(service)
+        .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
+    let server = EnvConfig::vault().load()?.http_transport(transport);
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .build()?;

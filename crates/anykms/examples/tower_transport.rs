@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anykms::prelude::*;
 use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
@@ -61,7 +62,14 @@ async fn main() -> anykms::Result<()> {
                 .build()?
                 .into_service(),
         );
-    let server = env.load()?.http_transport(TowerTransport::new(service));
+    // `TowerTransport` cannot see the client's timeouts through the stack, so it does not bound how
+    // long a backend's single-flight followers wait for another caller's credential or metadata
+    // request; the built-in transport does (twice its connect plus request timeout: 24 s with the
+    // defaults). Without a bound, a caller that stops polling its request mid-flight leaves later
+    // callers waiting for as long as that future lives. Set one above the request timeout.
+    let transport = TowerTransport::new(service)
+        .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
+    let server = env.load()?.http_transport(transport);
 
     let registry = anykms::Registry::builder()
         .provider(

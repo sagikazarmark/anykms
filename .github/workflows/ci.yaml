@@ -486,7 +486,7 @@ jobs:
           echo "AWS_WEB_IDENTITY_TOKEN_FILE=$token_file" >> "$GITHUB_ENV"
 
       - name: Live conformance
-        run: scripts/live-tests.sh run live-bin
+        run: scripts/live-tests.sh run aws live-bin
 
   # Mocks, credentials, the TRACE hygiene test, and Lowkey Vault end to end with the conformance
   # suite (every case runs or is n/a by declaration). The live targets run in azure-live.
@@ -617,7 +617,7 @@ jobs:
           curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
             | jq -r .value > "$AZURE_FEDERATED_TOKEN_FILE"
-          scripts/live-tests.sh run live-bin
+          scripts/live-tests.sh run azure live-bin
 
       # Purges keys the fixture created more than a day ago (a cancelled run leaves some).
       - name: Janitor
@@ -873,4 +873,4 @@ jobs:
           ANYKMS_GCP_ADMIN_TOKEN: ${{ steps.admin.outputs.access_token }}
           ANYKMS_GCP_DATA_TOKEN: ${{ steps.data.outputs.access_token }}
           ANYKMS_GCP_UNAUTHORIZED_TOKEN: ${{ steps.unauthorized.outputs.access_token }}
-        run: scripts/live-tests.sh run live-bin
+        run: scripts/live-tests.sh run gcp live-bin
