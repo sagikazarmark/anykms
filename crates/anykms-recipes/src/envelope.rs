@@ -451,8 +451,12 @@ fn serialize(
     Ok(out)
 }
 
-// HKDF keeps its PRK as HMAC state, i.e. two SHA-256 cores keyed by the data key; sha2's
-// `zeroize` feature (set in the workspace) wipes them on drop. Fails to build if it is lost.
+// HKDF keeps its PRK as HMAC state, i.e. two SHA-256 cores keyed by the PRK; sha2's `zeroize`
+// feature (set in the workspace) wipes them on drop. Fails to build if it is lost. The PRK array
+// `extract` returns is wiped below. Not wiped (defense in depth only, see docs/guarantees.md):
+// temporaries inside hkdf 0.13 and hmac 0.13 that are plain arrays on the stack, namely
+// `expand`'s previous block (T(1) equals the encryption key) and HMAC's padded key and inner
+// hash. Neither crate offers a way to wipe them.
 const _: fn() = || {
     fn zeroized_on_drop<T: zeroize::ZeroizeOnDrop>() {}
     zeroized_on_drop::<sha2::block_api::Sha256VarCore>();
@@ -460,7 +464,8 @@ const _: fn() = || {
 
 /// Derives `(enc_key, commit)` from the data key.
 fn derive(dek: &[u8]) -> (Zeroizing<[u8; 32]>, [u8; COMMIT_LEN]) {
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, dek);
+    let (mut prk, hk) = hkdf::Hkdf::<sha2::Sha256>::extract(None, dek);
+    zeroize::Zeroize::zeroize(&mut prk[..]);
     let mut okm = Zeroizing::new([0u8; 64]);
     hk.expand(HKDF_INFO, &mut okm[..])
         .expect("64 bytes is a valid HKDF-SHA256 length");
@@ -562,7 +567,8 @@ fn open(env: &Envelope<'_>, dek: &[u8], user_aad: &[u8]) -> Result<Zeroizing<Vec
     }
 }
 
-/// Maps a KEK unwrap error: failures that depend on the (attacker-supplied) wrapped key become
+/// Maps a KEK unwrap error: failures that depend on the (attacker-supplied) wrapped key
+/// (`DecryptFailed`, `InvalidArgument`, `VerificationFailed`, `UnknownKeyVersion`) become
 /// `DecryptFailed` (labeled `op`, the caller-facing operation) with the distinct message
 /// "envelope data key does not unwrap", but keep the KEK backend's name, detail, retry hint and
 /// the original error as source, so logs show which KMS refused the wrapped key; availability
@@ -570,7 +576,10 @@ fn open(env: &Envelope<'_>, dek: &[u8], user_aad: &[u8]) -> Result<Zeroizing<Vec
 /// [`malformed`].
 fn map_unwrap_error(e: Error, op: Operation) -> Error {
     match e.kind() {
-        ErrorKind::DecryptFailed | ErrorKind::InvalidArgument | ErrorKind::VerificationFailed => {
+        ErrorKind::DecryptFailed
+        | ErrorKind::InvalidArgument
+        | ErrorKind::VerificationFailed
+        | ErrorKind::UnknownKeyVersion => {
             let mut mapped = Error::new(
                 ErrorKind::DecryptFailed,
                 e.backend(),
@@ -1355,26 +1364,16 @@ mod tests {
         }
     }
 
-    const ALL_KINDS: &[ErrorKind] = &[
-        ErrorKind::NotFound,
-        ErrorKind::PermissionDenied,
-        ErrorKind::KeyStateInvalid,
-        ErrorKind::DecryptFailed,
-        ErrorKind::VerificationFailed,
-        ErrorKind::InvalidArgument,
-        ErrorKind::KeyMismatch,
-        ErrorKind::Unsupported,
-        ErrorKind::Configuration,
-        ErrorKind::Throttled,
-        ErrorKind::Unavailable,
-        ErrorKind::Timeout,
-        ErrorKind::Backend,
-    ];
+    // L18: every kind core has, so a new kind is covered without editing this list.
+    const ALL_KINDS: &[ErrorKind] = ErrorKind::ALL;
 
     fn hidden(kind: ErrorKind) -> bool {
         matches!(
             kind,
-            ErrorKind::DecryptFailed | ErrorKind::InvalidArgument | ErrorKind::VerificationFailed
+            ErrorKind::DecryptFailed
+                | ErrorKind::InvalidArgument
+                | ErrorKind::VerificationFailed
+                | ErrorKind::UnknownKeyVersion
         )
     }
 

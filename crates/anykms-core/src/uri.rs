@@ -68,9 +68,15 @@ impl KeyUri {
         &self.rest
     }
 
-    /// The URI without its query string (everything from the first `?`), which is how core
-    /// names the key in errors ([`Error::resource`](crate::Error::resource)). Backends label
-    /// their own errors with it too: a query string may carry options that must not reach logs.
+    /// The URI without its query string (everything from the first `?`), fragment (everything
+    /// from the first `#`) or userinfo (an authority's `user:password@` or `token@`), which is how
+    /// core names the key in errors ([`Error::resource`](crate::Error::resource)). Backends label
+    /// their own errors with it too: a query string may carry options that must not reach logs,
+    /// and a credential pasted into the authority of a mistyped URI must not either. No valid key
+    /// URI of a built-in backend has userinfo or a fragment, so the label of a valid URI is the
+    /// URI without its query. A third-party scheme that puts an `@` in the authority (say
+    /// `scheme://name@version`) gets labels without what precedes the `@`: the label cannot
+    /// tell a name from a pasted credential, and errs on the side of the credential.
     ///
     /// ```
     /// let uri: anykms_core::KeyUri = "local://default/kek?opt=1".parse().unwrap();
@@ -82,7 +88,16 @@ impl KeyUri {
     /// different URIs, and name the same key only when the provider's default server is the one
     /// called `default`.
     pub fn without_query(&self) -> String {
-        let rest = self.rest.split_once('?').map_or(&*self.rest, |(r, _)| r);
+        let end = self.rest.find(['?', '#']).unwrap_or(self.rest.len());
+        let rest = &self.rest[..end];
+        // Userinfo: the authority (after `//`, up to the next `/`) up to its last `@`. Working on
+        // the raw string: `url::Url` cannot parse every key URI (an AWS ARN is not a port).
+        if let Some(after) = rest.strip_prefix("//") {
+            let auth_end = after.find('/').unwrap_or(after.len());
+            if let Some(at) = after[..auth_end].rfind('@') {
+                return format!("{}://{}", self.scheme, &after[at + 1..]);
+            }
+        }
         format!("{}:{rest}", self.scheme)
     }
 }
@@ -178,6 +193,46 @@ mod tests {
                 "{s:?}"
             );
             assert!(e.is_config_error(), "{s:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_l21_tests {
+    use super::KeyUri;
+
+    /// L21: the label form of a URI never carries userinfo (a password or token pasted before
+    /// an `@`) or a fragment, whatever the scheme; ARNs and ordinary URIs are unchanged.
+    #[test]
+    fn without_query_drops_userinfo_and_fragment() {
+        for (uri, label) in [
+            ("postgres://app:s3cret@db/app", "postgres://db/app"),
+            (
+                "hashivault://hvs.TOKEN@vault.internal/transit/keys/app",
+                "hashivault://vault.internal/transit/keys/app",
+            ),
+            ("x://user@host", "x://host"),
+            ("x://a@b@host/p?q=1", "x://host/p"),
+            ("x://host/p#frag@x", "x://host/p"),
+            ("x://host/p?q=a@b", "x://host/p"),
+            (
+                "aws-kms://arn:aws:kms:us-east-1:111122223333:key/abcd",
+                "aws-kms://arn:aws:kms:us-east-1:111122223333:key/abcd",
+            ),
+            ("local://default/kek?opt=1", "local://default/kek"),
+            (
+                "hashivault:///transit/keys/k",
+                "hashivault:///transit/keys/k",
+            ),
+            // No authority: an `@` in the path is not userinfo.
+            ("x:a@b", "x:a@b"),
+            (
+                "gcp-kms://projects/p/keys/k@3",
+                "gcp-kms://projects/p/keys/k@3",
+            ),
+        ] {
+            let u: KeyUri = uri.parse().unwrap();
+            assert_eq!(u.without_query(), label, "{uri}");
         }
     }
 }

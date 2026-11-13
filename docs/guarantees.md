@@ -11,7 +11,10 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   copies reqwest/hyper/rustls make (including the request body reqwest sends and the token's
   `X-Vault-Token` header value). anykms also cannot zeroize the token in the process environment
   (`VAULT_TOKEN`), the parsed mTLS key inside the crypto provider (ring does not wipe it; aws-lc
-  does), kernel socket buffers, or the server.
+  does), kernel socket buffers, or the server. Nor can it wipe the stack temporaries of the
+  crypto crates it calls: deriving an envelope's keys leaves copies of key-derived blocks (one
+  equal to the encryption key) and of HMAC's padded key on the stack inside `hkdf` and `hmac`,
+  until the stack is reused; how long that is depends on the optimizer.
 - **Transport.** Every HTTP backend moves bytes through one `anykms_http::HttpTransport`,
   injected with the builder's `.http_transport(..)` or, by default, the built-in
   `ReqwestTransport` (feature `reqwest`; without it, building a backend fails with

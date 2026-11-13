@@ -319,24 +319,52 @@ ships no type for it yet; an application implements it in a few lines:
 ```rust
 /// Canonical AAD for `purpose` over non-secret `fields` (docs/aad-format.md): a purpose tag, then
 /// the fields length-prefixed and key-sorted, so no two field sets share bytes and every writer
-/// produces the same bytes. Apply the document's caps and charsets before calling it.
-fn aad(purpose: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+/// produces the same bytes. It checks every rule of the document: without them (a duplicate key,
+/// a value of 64 KiB or more) two different field sets can encode to the same bytes.
+fn aad(purpose: &str, fields: &[(&str, &str)]) -> anykms::Result<Vec<u8>> {
+    let bad = |m: &'static str| Err(anykms::Error::invalid_argument(m));
+    // 1..=max bytes, a lowercase letter, then bytes accepted by `rest`.
+    let name = |s: &str, max: usize, rest: fn(u8) -> bool| {
+        (1..=max).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase() && s.bytes().all(rest)
+    };
+    if !name(purpose, 48, |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return bad("AAD purpose must be 1..=48 bytes of [a-z][a-z0-9-]*");
+    }
+    if fields.len() > 15 {
+        return bad("at most 15 AAD fields");
+    }
+    for &(k, v) in fields {
+        if k == "purpose" || !name(k, 32, |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+            return bad("AAD keys must be 1..=32 bytes of [a-z][a-z0-9_]*, other than `purpose`");
+        }
+        if v.is_empty() || v.len() > 255 || v.chars().any(char::is_control) {
+            return bad("AAD values must be 1..=255 bytes without control characters");
+        }
+    }
     let mut fields = fields.to_vec();
     fields.push(("purpose", purpose));
     fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    if fields.windows(2).any(|w| w[0].0 == w[1].0) {
+        return bad("duplicate AAD key");
+    }
+    // Every length fits a u16 after the checks above; `try_from` keeps it from ever wrapping.
+    let len = |n: usize| u16::try_from(n).expect("within the caps").to_be_bytes();
     let mut out = b"anykms/aad/v1\0".to_vec();
-    out.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+    out.extend_from_slice(&len(fields.len()));
     for (k, v) in fields {
-        out.extend_from_slice(&(k.len() as u16).to_be_bytes());
+        out.extend_from_slice(&len(k.len()));
         out.extend_from_slice(k.as_bytes());
-        out.extend_from_slice(&(v.len() as u16).to_be_bytes());
+        out.extend_from_slice(&len(v.len()));
         out.extend_from_slice(v.as_bytes());
     }
-    out
+    if out.len() > 3072 {
+        return bad("AAD encoding is longer than 3072 bytes");
+    }
+    Ok(out)
 }
 
-let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])).await?;
-let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])).await?;
+let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])?).await?;
+let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])?).await?;
 ```
 
 What this buys, and what it does not: it is misuse resistance for the binding convention, not a
@@ -377,13 +405,18 @@ let jwt = signer.sign(&claims, &JwtOptions::new().with_ttl(Duration::from_secs(3
 let jwks = signer.jwks().await?;
 
 // Relying party, with jsonwebtoken (`rust_crypto` or `aws_lc_rs` feature): the key by kid, the
-// algorithm pinned, exp (required by default), iss and aud checked.
+// algorithm pinned, the token typed as a JWT, `exp`, `iss` and `aud` required (`set_issuer` and
+// `set_audience` alone let a token without the claim through) and `nbf` checked.
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 let jwks: JwkSet = serde_json::from_value(jwks)?;
+let header = decode_header(&jwt)?;
 // (`ok_or_else(|| anyhow!(..))` works with anyhow; with `Box<dyn Error>`, `ok_or("..")` does too.)
-let kid = decode_header(&jwt)?.kid.ok_or_else(|| anyhow::anyhow!("token has no kid"))?;
+anyhow::ensure!(header.typ.as_deref() == Some("JWT"), "not a JWT");
+let kid = header.kid.ok_or_else(|| anyhow::anyhow!("token has no kid"))?;
 let key = DecodingKey::from_jwk(jwks.find(&kid).ok_or_else(|| anyhow::anyhow!("unknown kid"))?)?;
 let mut validation = Validation::new(Algorithm::ES256);
+validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+validation.validate_nbf = true;
 validation.set_issuer(&["https://issuer.example"]);
 validation.set_audience(&["api"]);
 let claims: Claims = decode(&jwt, &key, &validation)?.claims;

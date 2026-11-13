@@ -111,7 +111,7 @@ pub fn std_clock() -> ClockFn {
 
 /// Retry-After values and retry hints above this are treated as this (and then exceed any sane
 /// cap).
-const MAX_RETRY_AFTER: Duration = Duration::from_hours(24);
+const MAX_RETRY_AFTER: Duration = crate::Error::MAX_RETRY_AFTER;
 
 /// Retry limits.
 #[non_exhaustive]

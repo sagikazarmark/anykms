@@ -93,8 +93,15 @@
 //! let jwks: JwkSet = serde_json::from_str(jwks_json)?;
 //! let kid = decode_header(token)?.kid.ok_or("token has no kid")?;
 //! let key = DecodingKey::from_jwk(jwks.find(&kid).ok_or("unknown kid")?)?;
-//! // The algorithm is pinned, never taken from the token; `exp` is required by default.
+//! // The algorithm is pinned, never taken from the token. `exp`, `iss` and `aud` are required:
+//! // `set_issuer` and `set_audience` alone let a token that lacks the claim through (another
+//! // token type signed by the same key, a `sign_jws` payload).
+//! if decode_header(token)?.typ.as_deref() != Some("JWT") {
+//!     return Err("not a JWT".into());
+//! }
 //! let mut validation = Validation::new(Algorithm::ES256);
+//! validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+//! validation.validate_nbf = true;
 //! validation.set_issuer(&["https://issuer.example"]);
 //! validation.set_audience(&["api"]);
 //! let claims = decode::<Claims>(token, &key, &validation)?.claims;
@@ -517,6 +524,22 @@ impl JwtOptions {
                  or call JwtOptions::without_expiry() to sign a token without exp",
             ));
         }
+        // NumericDate (RFC 7519 §2): a claims type whose `exp` serializes as a string or an
+        // object would be signed, and a verifier that skips a malformed `exp` would accept the
+        // token forever. `null` is an absent claim. Integers only: jsonwebtoken parses these as
+        // `u64` and refuses fractions.
+        for name in ["exp", "iat", "nbf"] {
+            if obj
+                .get(name)
+                .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+            {
+                return Err(invalid(
+                    op,
+                    "JWT time claims (exp, iat, nbf) must be non-negative integers (seconds since \
+                     the epoch)",
+                ));
+            }
+        }
         Ok(serde_json::to_vec(&Value::Object(obj)).expect("serializes"))
     }
 }
@@ -808,5 +831,48 @@ mod tests {
         ] {
             assert_eq!(o.payload(&claims).unwrap_err().kind(), kind, "{claims}");
         }
+    }
+}
+
+#[cfg(test)]
+mod review_l35_tests {
+    use super::*;
+    use anykms_core::ErrorKind;
+    use serde_json::json;
+
+    /// L35: time claims the caller supplies must be non-negative integers (NumericDate), or a
+    /// verifier that skips a malformed `exp` would accept the token forever.
+    #[test]
+    fn time_claims_must_be_numeric_dates() {
+        for claims in [
+            json!({"exp": "2030-01-01T00:00:00Z"}),
+            json!({"exp": {"secs_since_epoch": 1}}),
+            json!({"exp": -1}),
+            json!({"exp": 1.5}),
+            json!({"exp": true}),
+            json!({"exp": 9, "nbf": "soon"}),
+            json!({"exp": 9, "iat": "now"}),
+        ] {
+            let e = JwtOptions::new().payload(&claims).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::InvalidArgument, "{claims}");
+        }
+        // Even with without_expiry, a present exp must be well formed.
+        let e = JwtOptions::new()
+            .without_expiry()
+            .payload(&json!({"exp": "never"}))
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+        // Valid numeric dates pass.
+        assert!(
+            JwtOptions::new()
+                .payload(&json!({"exp": 9, "iat": 1, "nbf": 0}))
+                .is_ok()
+        );
+        assert!(
+            JwtOptions::new()
+                .without_expiry()
+                .payload(&json!({"exp": null}))
+                .is_ok()
+        );
     }
 }

@@ -3,22 +3,33 @@
 //! **Emulates:** nothing; it saves KMS calls. **Enforced by:** the KMS unwraps each distinct
 //! wrapped key once per TTL; repeats are answered from this process's memory.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anykms_core::time::Instant;
-use anykms_core::{Ciphertext, KeyVersion, KeyWrap, Result, Rewrap};
+use anykms_core::{Ciphertext, Error, ErrorKind, KeyVersion, KeyWrap, Result, Rewrap};
 use zeroize::Zeroizing;
 
 const DEFAULT_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_ENTRIES: usize = 1000;
+/// Longer unwrap results are returned but not cached: envelope data keys are 32 bytes.
+const DEFAULT_MAX_DEK_LEN: usize = 64;
+
+/// A cached data key: when it was unwrapped, its insertion number, the data key.
+type Entry = (Instant, u64, Zeroizing<Vec<u8>>);
 
 #[derive(Default)]
 struct Cache {
-    /// Wrapped key → (when it was unwrapped, the data key). The data keys are `Zeroizing`, so
-    /// they are wiped when evicted, replaced, invalidated or dropped with the cache.
-    entries: HashMap<Vec<u8>, (Instant, Zeroizing<Vec<u8>>)>,
+    /// Wrapped key → (when it was unwrapped, its insertion number, the data key). The data keys
+    /// are `Zeroizing`, so they are wiped when evicted, replaced, invalidated or dropped with the
+    /// cache.
+    entries: HashMap<Vec<u8>, Entry>,
+    /// The same entries by (when, insertion number): eviction takes the oldest in O(log n)
+    /// instead of scanning the map under the lock.
+    order: BTreeMap<(Instant, u64), Vec<u8>>,
+    /// The next insertion number (orders entries stamped with equal instants).
+    seq: u64,
     /// Bumped by `invalidate`, so an unwrap that started before it does not cache its result.
     epoch: u64,
 }
@@ -64,9 +75,19 @@ struct Cache {
 /// [`EnvelopeAead`] checks after unwrapping (data-key length, key commitment, AES-GCM with the
 /// caller's AAD) still runs on every decrypt.
 ///
+/// - **A hit is observable.** A cached unwrap answers without a KMS round trip, so whoever can
+///   submit stored envelopes for decryption and time the responses learns whether that row's
+///   data key was unwrapped within the TTL: an access-pattern signal, never the data.
+///
+/// A miss that fails with `PermissionDenied`, `Unauthenticated` or `KeyStateInvalid` (the KEK
+/// was revoked or disabled) drops every cached data key, as [`invalidate`](Self::invalidate)
+/// does; errors a crafted wrapped key can cause (`DecryptFailed`, `InvalidArgument`, version
+/// errors) never do, so they cannot be used to flush the cache. Only results of at most
+/// [`with_max_dek_len`](Self::with_max_dek_len) bytes are cached.
+///
 /// Expiry reads a monotonic clock (`anykms_core::time`; on `wasm32-unknown-unknown` the `js`
-/// feature is required, otherwise `Instant::now` panics there). Expiry
-/// is checked on lookup and eviction scans the whole map only when it is full. Concurrent misses
+/// feature is required, otherwise `Instant::now` panics there). Expiry is checked on lookup;
+/// eviction takes the oldest entries through an ordered index. Concurrent misses
 /// for the same wrapped key are not coalesced: each calls the KMS once.
 ///
 #[cfg_attr(feature = "envelope", doc = "[`EnvelopeAead`]: crate::EnvelopeAead")]
@@ -86,6 +107,7 @@ pub struct CachingKeyWrap<K> {
     inner: K,
     ttl: Duration,
     max_entries: usize,
+    max_dek_len: usize,
     cache: Arc<Mutex<Cache>>,
 }
 
@@ -95,6 +117,7 @@ impl<K: Clone> Clone for CachingKeyWrap<K> {
             inner: self.inner.clone(),
             ttl: self.ttl,
             max_entries: self.max_entries,
+            max_dek_len: self.max_dek_len,
             cache: self.cache.clone(),
         }
     }
@@ -118,6 +141,7 @@ impl<K> CachingKeyWrap<K> {
             inner,
             ttl: DEFAULT_TTL,
             max_entries: DEFAULT_MAX_ENTRIES,
+            max_dek_len: DEFAULT_MAX_DEK_LEN,
             cache: Arc::default(),
         }
     }
@@ -136,6 +160,14 @@ impl<K> CachingKeyWrap<K> {
         self
     }
 
+    /// The longest unwrap result that is cached (default 64 bytes; envelope data keys are 32).
+    /// A longer one is returned but not cached, so a misbehaving KMS, or a KEK that also wraps
+    /// other secrets, cannot pin large plaintexts in memory for the TTL.
+    pub fn with_max_dek_len(mut self, n: usize) -> Self {
+        self.max_dek_len = n;
+        self
+    }
+
     /// The decorated KEK.
     pub fn inner(&self) -> &K {
         &self.inner
@@ -147,6 +179,7 @@ impl<K> CachingKeyWrap<K> {
     pub fn invalidate(&self) {
         let mut c = self.lock();
         c.entries.clear();
+        c.order.clear();
         c.epoch = c.epoch.wrapping_add(1);
     }
 
@@ -168,11 +201,13 @@ impl<K> CachingKeyWrap<K> {
 
     /// The cached data key, or the current epoch to pass to `put` after a miss.
     fn get(&self, wrapped: &[u8]) -> std::result::Result<Zeroizing<Vec<u8>>, u64> {
-        let mut c = self.lock();
+        let mut guard = self.lock();
+        let c = &mut *guard;
         match c.entries.get(wrapped) {
-            Some((at, dek)) if at.elapsed() < self.ttl => Ok(dek.clone()),
-            Some(_) => {
+            Some((at, _, dek)) if at.elapsed() < self.ttl => Ok(dek.clone()),
+            Some(&(at, seq, _)) => {
                 c.entries.remove(wrapped);
+                c.order.remove(&(at, seq));
                 Err(c.epoch)
             }
             None => Err(c.epoch),
@@ -180,27 +215,41 @@ impl<K> CachingKeyWrap<K> {
     }
 
     fn put(&self, wrapped: &[u8], dek: &Zeroizing<Vec<u8>>, epoch: u64) {
-        let mut c = self.lock();
+        if dek.len() > self.max_dek_len {
+            return;
+        }
+        let mut guard = self.lock();
+        let c = &mut *guard;
         if c.epoch != epoch {
             return;
         }
-        if c.entries.len() >= self.max_entries && !c.entries.contains_key(wrapped) {
-            let ttl = self.ttl;
-            c.entries.retain(|_, (at, _)| at.elapsed() < ttl);
-            while c.entries.len() >= self.max_entries {
-                let oldest = c
-                    .entries
-                    .iter()
-                    .min_by_key(|(_, (at, _))| *at)
-                    .map(|(k, _)| k.clone());
-                match oldest {
-                    Some(k) => c.entries.remove(&k),
-                    None => break,
-                };
-            }
+        if let Some((at, seq, _)) = c.entries.remove(wrapped) {
+            c.order.remove(&(at, seq));
         }
-        c.entries
-            .insert(wrapped.to_vec(), (Instant::now(), dek.clone()));
+        // Oldest first, so expired entries go before any live one.
+        while c.entries.len() >= self.max_entries {
+            let Some((_, k)) = c.order.pop_first() else {
+                break;
+            };
+            c.entries.remove(&k);
+        }
+        let (at, seq) = (Instant::now(), c.seq);
+        c.seq = c.seq.wrapping_add(1);
+        c.order.insert((at, seq), wrapped.to_vec());
+        c.entries.insert(wrapped.to_vec(), (at, seq, dek.clone()));
+    }
+
+    /// After a failed unwrap: an authorization or key-state failure means the KEK was revoked
+    /// or disabled, so the cached data keys go at once instead of at the TTL. Only kinds that
+    /// do not depend on the wrapped key count: a crafted wrapped key can cause `DecryptFailed`,
+    /// `InvalidArgument` or a version error at will and must not be able to flush the cache.
+    fn on_unwrap_error(&self, e: &Error) {
+        if matches!(
+            e.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::Unauthenticated | ErrorKind::KeyStateInvalid
+        ) {
+            self.invalidate();
+        }
     }
 }
 
@@ -214,7 +263,11 @@ impl<K: KeyWrap> KeyWrap for CachingKeyWrap<K> {
             Ok(dek) => return Ok(dek),
             Err(epoch) => epoch,
         };
-        let dek = self.inner.unwrap_key(wrapped).await?;
+        let dek = self
+            .inner
+            .unwrap_key(wrapped)
+            .await
+            .inspect_err(|e| self.on_unwrap_error(e))?;
         self.put(wrapped.as_bytes(), &dek, epoch);
         Ok(dek)
     }
@@ -366,5 +419,120 @@ mod tests {
             env.decrypt(&ct, b"b").await.unwrap_err().kind(),
             ErrorKind::DecryptFailed
         );
+    }
+}
+
+#[cfg(test)]
+mod review_l32_tests {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use anykms_core::{Error, ErrorKind, Operation};
+
+    use super::*;
+
+    /// Unwraps to the wrapped bytes (any length), or fails with the configured kind.
+    #[derive(Default)]
+    struct Scripted {
+        unwraps: AtomicUsize,
+        fail: StdMutex<Option<ErrorKind>>,
+    }
+
+    impl KeyWrap for Scripted {
+        async fn wrap_key(&self, key: &[u8]) -> Result<Ciphertext> {
+            Ok(Ciphertext::from_bytes(key.to_vec()))
+        }
+
+        async fn unwrap_key(&self, wrapped: &Ciphertext) -> Result<Zeroizing<Vec<u8>>> {
+            self.unwraps.fetch_add(1, Ordering::SeqCst);
+            if let Some(kind) = *self.fail.lock().unwrap() {
+                return Err(Error::new(kind, "test", Operation::Decrypt, "scripted"));
+            }
+            Ok(Zeroizing::new(wrapped.as_bytes().to_vec()))
+        }
+    }
+
+    fn n(c: &CachingKeyWrap<Arc<Scripted>>) -> usize {
+        c.inner().unwraps.load(Ordering::SeqCst)
+    }
+
+    /// L32(b): a response longer than a data key is returned but never cached, so a hostile KMS
+    /// (or a KEK that is not dedicated) cannot pin large plaintexts in the cache.
+    #[tokio::test]
+    async fn oversized_results_are_not_cached() {
+        let c = CachingKeyWrap::new(Arc::new(Scripted::default()));
+        let big = Ciphertext::from_bytes(vec![1u8; 4096]);
+        assert_eq!(c.unwrap_key(&big).await.unwrap().len(), 4096);
+        assert!(c.is_empty());
+        let c = c.with_max_dek_len(8192);
+        c.unwrap_key(&big).await.unwrap();
+        assert_eq!(c.len(), 1);
+        // The default admits a 32-byte data key.
+        let c = CachingKeyWrap::new(Arc::new(Scripted::default()));
+        c.unwrap_key(&Ciphertext::from_bytes(vec![2u8; 32]))
+            .await
+            .unwrap();
+        assert_eq!(c.len(), 1);
+    }
+
+    /// L32(c): an authorization or key-state failure on a miss drops the cache (the KEK was
+    /// revoked), while failures an attacker can cause with crafted wrapped keys do not.
+    #[tokio::test]
+    async fn revocation_errors_clear_the_cache_and_input_errors_do_not() {
+        for (kind, clears) in [
+            (ErrorKind::PermissionDenied, true),
+            (ErrorKind::Unauthenticated, true),
+            (ErrorKind::KeyStateInvalid, true),
+            (ErrorKind::DecryptFailed, false),
+            (ErrorKind::InvalidArgument, false),
+            (ErrorKind::KeyVersionUnusable, false),
+            (ErrorKind::UnknownKeyVersion, false),
+            (ErrorKind::Unavailable, false),
+        ] {
+            let c = CachingKeyWrap::new(Arc::new(Scripted::default()));
+            let w = Ciphertext::from_bytes(vec![1u8; 32]);
+            c.unwrap_key(&w).await.unwrap();
+            *c.inner().fail.lock().unwrap() = Some(kind);
+            assert!(
+                c.unwrap_key(&Ciphertext::from_bytes(vec![2u8; 32]))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(c.is_empty(), clears, "{kind:?}");
+            *c.inner().fail.lock().unwrap() = None;
+            c.unwrap_key(&w).await.unwrap();
+            assert_eq!(n(&c), if clears { 3 } else { 2 }, "{kind:?}");
+        }
+    }
+
+    /// L32(d): eviction removes the oldest entries first (now through an ordered index).
+    #[tokio::test]
+    async fn eviction_is_oldest_first() {
+        let c = CachingKeyWrap::new(Arc::new(Scripted::default())).with_max_entries(3);
+        for i in 0..6u8 {
+            c.unwrap_key(&Ciphertext::from_bytes(vec![i; 32]))
+                .await
+                .unwrap();
+            assert!(c.len() <= 3);
+        }
+        let before = n(&c);
+        for i in 3..6u8 {
+            c.unwrap_key(&Ciphertext::from_bytes(vec![i; 32]))
+                .await
+                .unwrap();
+        }
+        assert_eq!(n(&c), before, "the three newest stayed");
+        c.unwrap_key(&Ciphertext::from_bytes(vec![0; 32]))
+            .await
+            .unwrap();
+        assert_eq!(n(&c), before + 1, "the oldest went");
+        // Re-caching an existing key replaces it rather than growing the index.
+        c.invalidate();
+        for _ in 0..3 {
+            c.unwrap_key(&Ciphertext::from_bytes(vec![9; 32]))
+                .await
+                .unwrap();
+        }
+        assert_eq!(c.len(), 1);
     }
 }
