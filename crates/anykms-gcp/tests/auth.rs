@@ -877,11 +877,16 @@ mod gca {
     async fn library_errors_keep_their_kind() {
         let cases: [(Make, ErrorKind); 2] = [
             (
-                || Err(CredentialsError::from_msg(true, "metadata server down")),
+                || {
+                    Err(CredentialsError::from_msg(
+                        true,
+                        "metadata server down LIBMARKER",
+                    ))
+                },
                 ErrorKind::Unavailable,
             ),
             (
-                || Err(CredentialsError::from_msg(false, "invalid_grant")),
+                || Err(CredentialsError::from_msg(false, "invalid_grant LIBMARKER")),
                 ErrorKind::Unauthenticated,
             ),
         ];
@@ -890,7 +895,9 @@ mod gca {
             let (creds, _) = fake(make);
             let e = encrypt(&provider(&server, creds)).await.unwrap_err();
             assert_eq!(e.kind(), kind, "{e}");
-            assert!(std::error::Error::source(&e).is_some(), "{e}");
+            // The library's error text may carry a response body: it is not kept.
+            assert!(std::error::Error::source(&e).is_none(), "{e}");
+            assert!(!format!("{e} {e:?}").contains("LIBMARKER"), "{e:?}");
             assert!(server.received_requests().await.unwrap().is_empty());
         }
     }

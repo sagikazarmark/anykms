@@ -40,7 +40,9 @@ impl GoogleCloudAuth {
                     "google-cloud-auth refused to issue an access token",
                 )
             };
-            auth_err(kind, m).with_source(e)
+            // The library's error is not attached as a source: its text may carry a token
+            // endpoint's response, which errors never echo. Only its kind is kept.
+            auth_err(kind, m)
         })?;
         Ok(Some(Token::new(t.token, None)))
     }

@@ -66,6 +66,9 @@ impl AdcSource {
             log("gcloud ADC file");
             return self.load_path(&p);
         }
+        // A GCE_METADATA_HOST that is unusable (malformed, or plain HTTP to a remote host
+        // without the opt-in) is named, not skipped as "no metadata server".
+        metadata::origin(&self.ctx)?;
         if metadata::probe(&self.ctx).await {
             log("metadata server");
             return Ok(Arc::new(metadata::source(&self.ctx)?));

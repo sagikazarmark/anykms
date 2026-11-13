@@ -112,6 +112,7 @@ pub(crate) fn from_file(f: CredFile, ctx: &AuthCtx) -> Result<Cached<ExternalAcc
                     "external_account credential_source.url must be http:// or https://",
                 ));
             }
+            super::check_plain_http(&url, ctx, "external_account credential_source.url")?;
             let mut headers = HeaderMap::new();
             for (k, v) in cs.headers {
                 let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| {

@@ -320,6 +320,41 @@ impl UrlField {
     }
 }
 
+/// Whether a plain-`http://` credential endpoint at `u` stays on this machine or its link: a
+/// loopback or link-local IP (IPv4, IPv6, or IPv4-mapped IPv6), `localhost`, or
+/// `metadata.google.internal`. Anything else needs
+/// [`GcpProviderBuilder::allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials).
+pub(crate) fn local_http_host(u: &Url) -> bool {
+    use anykms_http::url::Host;
+    let v4 = |ip: std::net::Ipv4Addr| ip.is_loopback() || ip.is_link_local();
+    match u.host() {
+        Some(Host::Ipv4(ip)) => v4(ip),
+        Some(Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().is_some_and(v4)
+        }
+        Some(Host::Domain(d)) => {
+            d.eq_ignore_ascii_case("localhost")
+                || d.eq_ignore_ascii_case("metadata.google.internal")
+        }
+        None => false,
+    }
+}
+
+/// Refuses a plain-`http://` credential endpoint (`what`) on a remote host unless the provider
+/// opted in.
+pub(crate) fn check_plain_http(u: &Url, ctx: &AuthCtx, what: &str) -> Result<()> {
+    if u.scheme() == "http" && !ctx.allow_remote_http && !local_http_host(u) {
+        return Err(config_err(format!(
+            "{what} is plain http:// to a host that is not loopback, link-local or \
+             metadata.google.internal: the token would cross the network in clear text; use \
+             https://, or opt in with GcpProviderBuilder::allow_remote_http_credentials()"
+        )));
+    }
+    Ok(())
+}
+
 /// What every credential source needs: the HTTP transport, the endpoints and where environment
 /// variables come from.
 #[derive(Clone)]
@@ -328,6 +363,8 @@ pub(crate) struct AuthCtx {
     pub(crate) endpoints: AuthEndpoints,
     /// The variables ADC and the metadata server read on first use.
     pub(crate) env: EnvVars,
+    /// [`GcpProviderBuilder::allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials).
+    pub(crate) allow_remote_http: bool,
 }
 
 /// An environment-variable lookup ([`GcpProviderBuilder::from_env_with`]).
@@ -388,7 +425,11 @@ impl EnvVars {
 ///    `~/.config/gcloud/…`, or `%APPDATA%\gcloud\…` on Windows), written by
 ///    `gcloud auth application-default login`;
 /// 3. the metadata server (GCE, GKE Workload Identity, Cloud Run, Cloud Functions), at
-///    `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 1 s connect timeout.
+///    `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 3 s request timeout (the
+///    built-in transport connects within 2 s). A `GCE_METADATA_HOST` that is malformed, or plain
+///    HTTP to a host other than loopback, link-local or `metadata.google.internal` without
+///    [`allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials),
+///    is `Configuration`.
 ///
 /// With none of them, every operation fails with `Configuration`. The source chosen is logged at
 /// INFO (`tracing` feature), never a value.
@@ -578,8 +619,9 @@ impl Credentials {
     /// off (as this crate depends on it), it needs a process-wide rustls provider
     /// (`rustls::crypto::CryptoProvider::install_default`), or enable its
     /// `default-rustls-provider` feature in your `Cargo.toml`. Building the library's credentials
-    /// spawns its refresh task, so do it inside a tokio runtime. Errors carry the library's error
-    /// as their source.
+    /// spawns its refresh task, so do it inside a tokio runtime. Errors keep only whether the
+    /// library's failure was transient (`Unavailable`) or not (`Unauthenticated`); its error text is
+    /// not attached, as it may carry a token endpoint's response.
     #[cfg(feature = "google-cloud-auth")]
     pub fn google_cloud_auth(
         credentials: ::google_cloud_auth::credentials::AccessTokenCredentials,
@@ -940,6 +982,43 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L1: which plain-HTTP credential hosts need no opt-in.
+    #[test]
+    fn local_http_hosts() {
+        let local = |s: &str| local_http_host(&Url::parse(s).unwrap());
+        for ok in [
+            "http://169.254.169.254/",
+            "http://169.254.169.252:988/",
+            "http://169.254.170.2/",
+            "http://127.0.0.1:8080/",
+            "http://127.9.9.9/",
+            "http://[::1]:8080/",
+            "http://[fe80::1]/",
+            "http://[fe80::a9fe:a9fe]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://localhost:8080/",
+            "http://LOCALHOST/",
+            "http://metadata.google.internal/",
+            "http://Metadata.Google.Internal:80/",
+        ] {
+            assert!(local(ok), "{ok}");
+        }
+        for remote in [
+            "http://metadata-proxy.corp:8080/",
+            "http://metadata/",
+            "http://metadata.google.internal./",
+            "http://x.metadata.google.internal/",
+            "http://localhost.evil.example/",
+            "http://10.0.0.1/",
+            "http://172.16.0.4/",
+            "http://8.8.8.8/",
+            "http://[fd00:ec2::254]/",
+            "http://[::ffff:10.0.0.1]/",
+        ] {
+            assert!(!local(remote), "{remote}");
+        }
+    }
 
     #[test]
     fn rfc3339() {

@@ -175,6 +175,16 @@ fn service_account(_f: CredFile, _ctx: &AuthCtx) -> Result<Built> {
     ))
 }
 
+/// The credential file `type`s Google defines (built in or not), the only ones errors name.
+const KNOWN_TYPES: [&str; 6] = [
+    "service_account",
+    "authorized_user",
+    "external_account",
+    "impersonated_service_account",
+    "external_account_authorized_user",
+    "gdch_service_account",
+];
+
 /// Parses a credential document (the `expected` type, when given) and builds its source.
 pub(crate) fn parse(json: &[u8], expected: Option<&str>, ctx: &AuthCtx) -> Result<Built> {
     let f: CredFile = serde_json::from_slice(json)
@@ -182,9 +192,11 @@ pub(crate) fn parse(json: &[u8], expected: Option<&str>, ctx: &AuthCtx) -> Resul
     if let (Some(want), Some(got)) = (expected, f.kind.as_deref())
         && want != got
     {
-        return Err(config_err(format!(
-            "credential file has type `{got}`, expected `{want}`"
-        )));
+        // The file's contents are never echoed: a type is named only if it is a known one.
+        return Err(config_err(match KNOWN_TYPES.iter().find(|t| **t == got) {
+            Some(got) => format!("credential file has type `{got}`, expected `{want}`"),
+            None => format!("credential file has an unknown type, expected `{want}`"),
+        }));
     }
     build(f, ctx, 0)
 }

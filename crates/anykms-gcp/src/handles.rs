@@ -30,6 +30,10 @@ use crate::wire::{
 /// 64 KiB; HSM keys have lower limits, which the server enforces).
 pub(crate) const MAX_INPUT: usize = 64 * 1024;
 
+/// The largest ciphertext sent to `decrypt`: twice [`MAX_INPUT`], far above the few dozen bytes
+/// of overhead Cloud KMS adds to a 64 KiB plaintext, so no valid ciphertext is refused.
+const MAX_CIPHERTEXT: usize = 2 * MAX_INPUT;
+
 /// How long a passed key-type check is trusted before it runs again. Each entry gets ±10%
 /// jitter, so keys opened together do not all re-check in the same instant.
 const TYPE_CACHE_TTL: Duration = Duration::from_secs(600);
@@ -183,6 +187,14 @@ fn mismatch(op: Operation, m: impl Into<std::borrow::Cow<'static, str>>) -> Erro
 
 fn other_key(op: Operation) -> Error {
     crate::errors::unusable_response(op, Some(200), "response for another key")
+}
+
+/// When a cache entry stored `now` for (a jittered) `ttl` expires. The builder caps the TTL, so
+/// this never overflows; if it would, the entry is born expired (not cached) rather than
+/// panicking.
+fn expiry(now: Instant, ttl: Duration) -> Instant {
+    now.checked_add(anykms_http::cache::jittered_ttl(ttl))
+        .unwrap_or(now)
 }
 
 fn check_size(len: usize, op: Operation, what: &'static str) -> Result<()> {
@@ -478,10 +490,7 @@ impl KeyCtx {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     cache.retain(|_, (expires, _)| now < *expires);
-                    cache.insert(
-                        name.clone(),
-                        (now + anykms_http::cache::jittered_ttl(ttl), k.clone()),
-                    );
+                    cache.insert(name.clone(), (expiry(now, ttl), k.clone()));
                     drop(cache);
                     self.shared
                         .unknown_versions
@@ -591,10 +600,7 @@ impl KeyCtx {
         {
             unknown.remove(&oldest);
         }
-        unknown.insert(
-            name,
-            (now + anykms_http::cache::jittered_ttl(ttl), e.clone()),
-        );
+        unknown.insert(name, (expiry(now, ttl), e.clone()));
     }
 
     async fn fetch_public_key(
@@ -856,6 +862,11 @@ struct DecryptResp<'a> {
     plaintext_crc32c: Option<u64>,
     #[serde(default)]
     used_primary: bool,
+    /// Always present in a real response (`SOFTWARE`, `HSM`, …). Required, so that a 200 body that
+    /// is not a decrypt response (`{}` from a gateway or emulator, `[]`) is never taken for an
+    /// empty plaintext: every other field may be absent (proto3 JSON omits an empty plaintext
+    /// and a zero CRC, and a missing CRC reads as the empty data's 0).
+    protection_level: String,
 }
 
 fn opt_len(s: Option<&Zeroizing<String>>) -> usize {
@@ -908,6 +919,9 @@ fn encrypt_result(
 /// Checks and decodes a decrypt response: the plaintext and `usedPrimary`.
 fn decrypt_result(resp: &[u8], op: Operation) -> Result<(Zeroizing<Vec<u8>>, bool)> {
     let r: DecryptResp<'_> = serde_json::from_slice(resp).map_err(|_| bad_response(op))?;
+    if r.protection_level.is_empty() {
+        return Err(bad_response(op));
+    }
     let used_primary = r.used_primary;
     let crc32c = r.plaintext_crc32c;
     let pt = decode_secret(r.plaintext, op)?;
@@ -924,7 +938,9 @@ impl GcpAeadKey {
 
     async fn decrypt_raw(&self, ct: &Ciphertext, aad: &[u8]) -> Result<(Zeroizing<Vec<u8>>, bool)> {
         let op = Operation::Decrypt;
-        if ct.is_empty() {
+        // Empty, or larger than any ciphertext of a plaintext within the 64 KiB limit: refused
+        // before any request, as the caller's (possibly attacker-supplied) input.
+        if ct.is_empty() || ct.as_bytes().len() > MAX_CIPHERTEXT {
             return Err(Error::new(
                 ErrorKind::DecryptFailed,
                 BACKEND,

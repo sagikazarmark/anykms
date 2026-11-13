@@ -314,14 +314,16 @@ async fn trace_output_and_errors_never_contain_secrets() {
     Mock::given(method("POST"))
         .and(path(format!("/v1/{key}:encrypt")))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": {
-            "code": 500, "status": "INTERNAL", "message": format!("odd {PT} {}", b64(PT))}})))
+            // L22: a non-canonical `status` echoing input never reaches the code, span or log.
+            "code": 500, "status": format!("INTERNAL {PT}"),
+            "message": format!("odd {PT} {}", b64(PT))}})))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path(format!("/v1/{key}:decrypt")))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(json!({"plaintext": format!("!{PT}!"), "plaintextCrc32c": "1"})),
+                .set_body_json(json!({"plaintext": format!("!{PT}!"), "plaintextCrc32c": "1", "protectionLevel": "SOFTWARE"})),
         )
         .mount(&server)
         .await;
