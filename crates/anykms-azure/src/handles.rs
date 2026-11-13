@@ -53,10 +53,10 @@ pub(crate) enum Origin {
 /// (host, lowercase name, version).
 pub(crate) type CacheKey = (String, String, Option<String>);
 
-/// Key bundles read for the key-type check, shared per provider: key → (expiry, bundle, store
-/// mark).
+/// Key bundles read for the key-type check, shared per provider: key → slot (expiry, bundle,
+/// store and drop marks).
 ///
-/// A read stores its bundle only if no entry was dropped since it started
+/// A read stores its bundle only if its key was not dropped since it started
 /// ([`KeyCtx::forget`]), and a read that a stalled flight's replacement superseded stores
 /// nothing: a bundle never comes back after the key was found missing or changed.
 ///
@@ -71,6 +71,20 @@ pub(crate) type CacheKey = (String, String, Option<String>);
 /// it neither replaces the cached bundle nor keeps it, but drops it, so the next request reads
 /// the key again (and reads still in flight from before the conflict store nothing). The same
 /// key from an overlapping read just stores again.
+///
+/// # Per-key drop marks
+///
+/// A drop, like a store, takes the next mark and records it in its own key's slot; a read
+/// stores only if its key's drop mark is not newer than the mark it started at. A drop
+/// therefore discards concurrent reads of its own key only: reads of other keys still store.
+/// The slot is emptied rather than removed (and created for a key with no entry), so the mark
+/// outlives the bundle it dropped. Slots expire like entries (an emptied one a TTL after its
+/// drop) and are pruned with them, whenever a read stores or a key is dropped, so the cache
+/// holds at most one slot per key used within a TTL. Pruning a drop mark raises `pruned` to
+/// it, and a read that started before `pruned` stores nothing: a dropped key's read can never
+/// store once its mark is gone, and a read of another key loses its store to a pruned mark only
+/// when it was in flight for longer than that mark's TTL (it is then read again by the next
+/// request).
 #[derive(Default)]
 pub(crate) struct DescribeCache {
     entries: Mutex<Entries>,
@@ -80,27 +94,52 @@ pub(crate) struct DescribeCache {
 
 #[derive(Default)]
 struct Entries {
-    by_key: HashMap<CacheKey, Entry>,
+    by_key: HashMap<CacheKey, Slot>,
     /// Bumped by every store and every drop, under this lock: the mark a read starts at.
     mark: u64,
-    /// The mark of the latest drop: a read that started before it stores nothing.
+    /// The newest drop mark pruned with its slot: a read that started before it stores nothing.
+    pruned: u64,
+}
+
+/// One key's cached bundle, with its store and drop marks.
+struct Slot {
+    /// When the slot may be pruned: its bundle's expiry, or a TTL after its drop.
+    expires: Instant,
+    /// The cached bundle, while `expires` is ahead; `None` once dropped.
+    bundle: Option<Arc<KeyBundle>>,
+    /// The mark `bundle` was stored at (0: nothing stored).
+    stored: u64,
+    /// The mark of the key's latest drop (0: never dropped).
     dropped: u64,
 }
 
-/// One cached bundle.
-struct Entry {
-    expires: Instant,
-    bundle: Arc<KeyBundle>,
-    /// The mark the bundle was stored at.
-    stored: u64,
-}
-
 impl Entries {
-    /// Drops `key`'s bundle; a read that started before cannot store its own.
-    fn drop_key(&mut self, key: &CacheKey) {
+    /// Drops expired slots, keeping their drop marks in `pruned`.
+    fn prune(&mut self, now: Instant) {
+        let pruned = &mut self.pruned;
+        self.by_key.retain(|_, slot| {
+            let keep = now < slot.expires;
+            if !keep {
+                *pruned = (*pruned).max(slot.dropped);
+            }
+            keep
+        });
+    }
+
+    /// Drops `key`'s bundle; a read of that key that started before cannot store its own.
+    fn drop_key(&mut self, key: &CacheKey, now: Instant, ttl: Duration) {
+        self.prune(now);
         self.mark += 1;
-        self.dropped = self.mark;
-        self.by_key.remove(key);
+        // The slot stays, emptied, to keep the mark.
+        self.by_key.insert(
+            key.clone(),
+            Slot {
+                expires: now.checked_add(ttl).unwrap_or(now),
+                bundle: None,
+                stored: 0,
+                dropped: self.mark,
+            },
+        );
     }
 }
 
@@ -281,9 +320,12 @@ impl KeyCtx {
         )
     }
 
-    /// Drops the cached bundle; a read that started before cannot store its own.
+    /// Drops the cached bundle; a read of this key that started before cannot store its own.
+    /// Reads of other keys are unaffected (see [`DescribeCache`]).
     fn forget(&self) {
-        self.cache.lock().drop_key(&self.cache_key());
+        self.cache
+            .lock()
+            .drop_key(&self.cache_key(), Instant::now(), self.client.cache_ttl);
     }
 
     fn cached(&self) -> Option<Arc<KeyBundle>> {
@@ -292,8 +334,8 @@ impl KeyCtx {
             .lock()
             .by_key
             .get(&self.cache_key())
-            .filter(|e| now < e.expires)
-            .map(|e| e.bundle.clone())
+            .filter(|slot| now < slot.expires)
+            .and_then(|slot| slot.bundle.clone())
     }
 
     fn url(&self, version: Option<&str>, action: Option<&str>) -> Result<anykms_http::url::Url> {
@@ -409,35 +451,39 @@ impl KeyCtx {
     }
 
     /// Caches the bundle a read that started at mark `started` returned, as the bundle of the
-    /// URI's version (or the current one), see [`DescribeCache`]: not if an entry was dropped
-    /// since. A different key stored since by an overlapping read is a conflict, which drops
-    /// the entry instead.
+    /// URI's version (or the current one), see [`DescribeCache`]: not if this key was dropped
+    /// since (or a drop mark newer than `started` was pruned). A different key stored since by
+    /// an overlapping read is a conflict, which drops the key instead.
     fn store(&self, started: u64, b: &Arc<KeyBundle>) {
         let key = self.cache_key();
+        let ttl = self.client.cache_ttl;
         let mut cache = self.cache.lock();
-        if started < cache.dropped {
+        let now = Instant::now();
+        cache.prune(now);
+        if started < cache.pruned {
             return;
         }
-        let now = Instant::now();
-        cache.by_key.retain(|_, e| now < e.expires);
-        let conflict = cache
-            .by_key
-            .get(&key)
-            .is_some_and(|e| started < e.stored && !same_key(&e.bundle, b));
-        if conflict {
-            cache.drop_key(&key);
-            return;
+        if let Some(slot) = cache.by_key.get(&key) {
+            if started < slot.dropped {
+                return;
+            }
+            if started < slot.stored && slot.bundle.as_ref().is_some_and(|c| !same_key(c, b)) {
+                cache.drop_key(&key, now, ttl);
+                return;
+            }
         }
         cache.mark += 1;
         let stored = cache.mark;
-        cache.by_key.insert(
-            key,
-            Entry {
-                expires: expiry(now, self.client.cache_ttl),
-                bundle: b.clone(),
-                stored,
-            },
-        );
+        let expires = expiry(now, ttl);
+        let slot = cache.by_key.entry(key).or_insert(Slot {
+            expires,
+            bundle: None,
+            stored: 0,
+            dropped: 0,
+        });
+        slot.expires = expires;
+        slot.bundle = Some(b.clone());
+        slot.stored = stored;
     }
 
     /// The `Preflight` of every handle: a fresh read of the key (the metadata `describe`
@@ -1981,5 +2027,64 @@ pub(crate) fn fuzz_decode_success(which: u8, body: &[u8]) -> bool {
             .is_some(),
         1 => serde_json::from_slice::<VerifyResp>(body).is_ok(),
         _ => KeyBundle::parse(body, VaultKind::Vault).is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Expired slots are pruned, drop marks included, so the cache stays bounded; a pruned mark
+    /// is kept in `pruned`, which still stops a read from before it.
+    #[test]
+    fn expired_slots_and_their_drop_marks_are_pruned() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(600);
+        let key = |n: &str| ("kv1.vault.azure.net".to_owned(), n.to_owned(), None);
+        let bundle = KeyBundle::parse(
+            br#"{"key": {"kid": "https://kv1.vault.azure.net/keys/cached/0123456789abcdef0123456789abcdef", "kty": "oct-HSM"}}"#,
+            VaultKind::ManagedHsm,
+        )
+        .unwrap();
+        let mut entries = Entries {
+            mark: 3,
+            ..Entries::default()
+        };
+        entries.by_key.insert(
+            key("dropped"),
+            Slot {
+                expires: now + ttl,
+                bundle: None,
+                stored: 0,
+                dropped: 3,
+            },
+        );
+        entries.by_key.insert(
+            key("cached"),
+            Slot {
+                expires: now + 2 * ttl,
+                bundle: Some(Arc::new(bundle)),
+                stored: 2,
+                dropped: 1,
+            },
+        );
+        entries.prune(now);
+        assert_eq!((entries.by_key.len(), entries.pruned), (2, 0));
+        entries.prune(now + ttl);
+        assert_eq!(entries.by_key.len(), 1);
+        assert!(entries.by_key.contains_key(&key("cached")));
+        assert_eq!(
+            entries.pruned, 3,
+            "a read from before the pruned mark stores nothing"
+        );
+        entries.prune(now + 2 * ttl);
+        assert!(entries.by_key.is_empty());
+        assert_eq!(entries.pruned, 3, "the newest pruned mark is kept");
+
+        // A drop prunes too, and keeps its own mark in an emptied slot.
+        entries.drop_key(&key("again"), now + 3 * ttl, ttl);
+        let slot = &entries.by_key[&key("again")];
+        assert!(slot.bundle.is_none());
+        assert_eq!((slot.dropped, entries.mark), (4, 4));
     }
 }

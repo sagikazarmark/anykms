@@ -261,25 +261,31 @@ async fn a_default_transport_does_not_block_the_providers_binding() {
     assert_eq!(t.count(), 2, "{:?}", t.seen());
 }
 
+/// A path's scripted answers: (delay in seconds, status, body).
+type Queue = std::collections::VecDeque<(u64, u16, String)>;
+
 /// Answers each request from a per-path queue (the path without the query), after holding it
 /// for the answer's delay, and records the path of every request.
 #[derive(Default)]
 struct Delayed {
-    answers: std::sync::Mutex<
-        std::collections::HashMap<&'static str, std::collections::VecDeque<(u64, String)>>,
-    >,
+    answers: std::sync::Mutex<std::collections::HashMap<&'static str, Queue>>,
     seen: std::sync::Mutex<Vec<String>>,
 }
 
 impl Delayed {
     /// Answers the next request for `path` with 200 and `body` after `secs` seconds.
     fn answer(&self, path: &'static str, secs: u64, body: String) -> &Self {
+        self.answer_status(path, secs, 200, body)
+    }
+
+    /// Answers the next request for `path` with `status` and `body` after `secs` seconds.
+    fn answer_status(&self, path: &'static str, secs: u64, status: u16, body: String) -> &Self {
         self.answers
             .lock()
             .unwrap()
             .entry(path)
             .or_default()
-            .push_back((secs, body));
+            .push_back((secs, status, body));
         self
     }
 
@@ -309,13 +315,15 @@ impl anykms_azure::anykms_http::HttpTransport for Delayed {
             .get_mut(path.as_str())
             .and_then(std::collections::VecDeque::pop_front);
         Box::pin(async move {
-            let (secs, body) = next.ok_or_else(|| {
+            let (secs, status, body) = next.ok_or_else(|| {
                 anykms_azure::anykms_http::SendError::Other(format!("unscripted {path}").into())
             })?;
             tokio::time::sleep(Duration::from_secs(secs)).await;
             let mut r = anykms_azure::anykms_http::http::Response::new(zeroize::Zeroizing::new(
                 body.into_bytes(),
             ));
+            *r.status_mut() =
+                anykms_azure::anykms_http::http::StatusCode::from_u16(status).unwrap();
             r.headers_mut()
                 .insert("content-type", "application/json".parse().unwrap());
             Ok(r)
@@ -390,4 +398,52 @@ async fn overlapping_key_reads_that_disagree_are_read_again() {
         .await
         .expect("the later-sent read's older bundle was kept");
     assert_eq!(t.paths()[4..], ["/keys/k", "/keys/k/wrapkey"]);
+}
+
+/// Dropping one key's cached bundle (a request found that key missing) does not discard a read
+/// of another key that was in flight meanwhile: that key's bundle is cached, and its next
+/// request reads no key.
+#[tokio::test(start_paused = true)]
+async fn dropping_one_keys_bundle_keeps_a_concurrent_read_of_another_key() {
+    let t = std::sync::Arc::new(Delayed::default());
+    t.answer("/keys/k", 5, rsa_bundle())
+        .answer("/keys/k/wrapkey", 0, wrap_ok())
+        .answer("/keys/k/wrapkey", 0, wrap_ok())
+        .answer_status(
+            "/keys/b/wrapkey",
+            0,
+            404,
+            json!({"error": {"code": "KeyNotFound", "message": "no key b"}}).to_string(),
+        );
+    let p = AzureProvider::builder()
+        .credential(StaticToken::new("tok"))
+        .http_transport(t.clone())
+        .build()
+        .unwrap();
+    let a = p.key_wrap_key(KEY).unwrap();
+    let in_flight = tokio::spawn({
+        let a = a.clone();
+        async move { a.wrap_key(&[0u8; 32]).await.map(drop) }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(t.paths(), ["/keys/k"]);
+
+    // Key `b` is found missing (and its bundle dropped) while `k`'s read is in flight.
+    let e = p
+        .key_wrap_key("azure-kv://kv1.vault.azure.net/keys/b")
+        .unwrap()
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .wrap_key(&[0u8; 32])
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound, "{e}");
+    in_flight.await.unwrap().unwrap();
+    assert_eq!(t.paths().len(), 3, "{:?}", t.paths());
+
+    a.wrap_key(&[0u8; 32]).await.unwrap();
+    assert_eq!(
+        t.paths()[3..],
+        ["/keys/k/wrapkey"],
+        "another key's dropped bundle discarded this key's read"
+    );
 }
