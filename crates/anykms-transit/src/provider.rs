@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anykms_core::{
     AeadKey, DataKeysKey, DescribeKey, DigestSignerKey, DigestVerifierKey, Error, ErrorKind,
-    IntoKeyUri, KeyTypeCheck, KeyUri, KeyWrapKey, MacAlgorithm, MacKey, MessageSignerKey,
-    MessageVerifierKey, OpenOptions, Operation, Provider, PublicKeysKey, Result,
+    IntoKeyUri, KeyTypeCheck, KeyUri, KeyVersion, KeyWrapKey, MacAlgorithm, MacKey,
+    MessageSignerKey, MessageVerifierKey, OpenOptions, Operation, Provider, PublicKeysKey, Result,
     SignatureAlgorithm, SigningShape,
 };
 
@@ -314,6 +314,19 @@ impl Provider for TransitProvider {
 
     fn name(&self) -> &'static str {
         BACKEND
+    }
+
+    /// `Unsupported`: transit URIs address no key version. The error names the key as open errors
+    /// do (`uri_label`): left unnamed, the registry would label it with the whole URI, including
+    /// an authority that is not a configured server alias (a pasted token, say).
+    fn pin(&self, uri: &KeyUri, _version: &KeyVersion) -> Result<KeyUri> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            BACKEND,
+            Operation::Open,
+            "provider does not address key versions in URIs",
+        )
+        .with_resource(self.uri_label(uri)))
     }
 
     fn aead(&self, uri: &KeyUri, opts: &OpenOptions) -> Result<AeadKey> {

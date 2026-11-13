@@ -849,6 +849,11 @@ struct Unconfigured {
 }
 
 impl Unconfigured {
+    /// The skip reason, naming the scheme only (`hashivault:`), as the registry does for a
+    /// scheme with no provider. A placeholder does not know its backend's grammar, so it cannot
+    /// tell which parts of the URI are safe to echo (transit, say, redacts an authority that is
+    /// not a configured server alias, since it may be a pasted token); left unnamed, the
+    /// registry would label the error with the whole URI.
     fn err<T>(&self, uri: &KeyUri) -> Result<T> {
         Err(Error::new(
             ErrorKind::Configuration,
@@ -860,7 +865,8 @@ impl Unconfigured {
                 self.skip.backend,
                 self.skip.reason
             ),
-        ))
+        )
+        .with_resource(format!("{}:", uri.scheme())))
     }
 }
 
@@ -982,6 +988,65 @@ mod tests {
         assert_eq!(r.schemes().count(), 0);
     }
 
+    /// A placeholder names only the scheme of a URI it refuses: it does not know its backend's
+    /// grammar, and transit's authority may be a pasted token that fits the alias grammar. Holds
+    /// for a skipped backend and an excluded one, for every open method and `pin`.
+    #[test]
+    fn placeholder_errors_name_only_the_scheme() {
+        let excluded = DefaultProviders {
+            builder: Registry::builder(),
+            claimed: Vec::new(),
+            defaults: vec![DefaultProvider {
+                backend: "transit",
+                schemes: &["hashivault", "openbao"],
+                provider: Arc::new(Claims(&["hashivault", "openbao"])),
+            }],
+            skipped: Vec::new(),
+        }
+        .without("transit")
+        .unwrap();
+        assert_eq!(excluded.skipped()[0].cause(), SkipCause::Excluded);
+        let s = SignatureAlgorithm::EcdsaP256Sha256;
+        let m = SignatureAlgorithm::Ed25519;
+        for (d, why) in [
+            (skipped_transit(), "VAULT_ADDR/BAO_ADDR not set"),
+            (excluded, "excluded by the application"),
+        ] {
+            let r = d.build().unwrap();
+            for (uri, scheme) in [
+                ("hashivault://SECRET_TOKEN/transit/keys/k", "hashivault:"),
+                (
+                    "openbao://SECRET_TOKEN/transit/keys/k?namespace=a",
+                    "openbao:",
+                ),
+                (
+                    "hashivault://hvs.SECRET_TOKEN@vault/transit/keys/k",
+                    "hashivault:",
+                ),
+            ] {
+                for e in [
+                    r.pin(uri, &KeyVersion::new("1")).unwrap_err(),
+                    r.aead(uri).unwrap_err(),
+                    r.key_wrap(uri).unwrap_err(),
+                    r.data_keys(uri).unwrap_err(),
+                    r.digest_signer(uri, s).unwrap_err(),
+                    r.digest_verifier(uri, s).unwrap_err(),
+                    r.message_signer(uri, m).unwrap_err(),
+                    r.message_verifier(uri, m).unwrap_err(),
+                    r.mac(uri, MacAlgorithm::HmacSha256).unwrap_err(),
+                    r.public_keys(uri, s).unwrap_err(),
+                    r.describe(uri).unwrap_err(),
+                ] {
+                    assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
+                    assert!(e.message().contains(why), "{e}");
+                    assert_eq!(e.resource(), Some(scheme), "{e}");
+                    let shown = format!("{e}\n{e:?}");
+                    assert!(!shown.contains("SECRET_TOKEN"), "{uri}: {shown}");
+                }
+            }
+        }
+    }
+
     /// Runs the calling test `name` (without the `tests::` prefix) again in a child process whose
     /// environment holds only `vars` (plus what a process needs to start), and runs `body` there:
     /// [`with_default_providers`] reads the process environment, which tests may not change
@@ -1020,13 +1085,19 @@ mod tests {
     /// Azure is not under test: keeps an Azure build without credentials out of the way.
     const NO_AZURE: (&str, &str) = ("ANYKMS_AZURE_CREDENTIAL", "none");
 
-    /// Opening `uri` from the default registry fails with `Configuration` containing `needle`.
+    /// Opening `uri` from the default registry fails with `Configuration` containing `needle`,
+    /// naming only the scheme of the URI.
     fn open_explains(d: DefaultProviders, uri: &str, needle: &str) {
         let r = d.build().unwrap();
         let uri: KeyUri = uri.parse().unwrap();
         let e = r.aead(&uri).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
         assert!(e.to_string().contains(needle), "{e}");
+        assert_eq!(
+            e.resource(),
+            Some(format!("{}:", uri.scheme()).as_str()),
+            "{e}"
+        );
     }
 
     // Unused in some feature combinations (e.g. `gcp` without a `rustls-*` feature).

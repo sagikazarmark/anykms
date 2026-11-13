@@ -1971,12 +1971,37 @@ async fn alias_shaped_tokens_in_the_uri_authority_are_not_echoed() {
             r.message_signer(s, ecdsa).unwrap_err(),
             p.mac_key(s, MacAlgorithm::HmacSha256).unwrap_err(),
         ];
-        for e in errors {
+        // Every registry entry point. `pin` is unsupported, but left unnamed its error would be
+        // labelled by the registry with the whole URI.
+        let ed = SignatureAlgorithm::Ed25519;
+        let registry = [
+            r.pin(s, &anykms_core::KeyVersion::new("1")).unwrap_err(),
+            r.key_wrap(s).unwrap_err(),
+            r.data_keys(s).unwrap_err(),
+            r.digest_signer(s, ecdsa).unwrap_err(),
+            r.digest_verifier(s, ecdsa).unwrap_err(),
+            r.message_signer(s, ed).unwrap_err(),
+            r.message_verifier(s, ed).unwrap_err(),
+            r.mac(s, MacAlgorithm::HmacSha256).unwrap_err(),
+            r.public_keys(s, ecdsa).unwrap_err(),
+            r.public_keys(s, ed).unwrap_err(),
+            r.describe(s).unwrap_err(),
+        ];
+        for e in errors.into_iter().chain(registry) {
             assert_eq!(e.resource(), Some(want), "{s}: {e}");
             let shown = format!("{e}\n{e:?}");
             assert!(!shown.contains("SECRET_TOKEN"), "{s}: {shown}");
         }
     }
+    // `pin` names a configured alias, and is `Unsupported`.
+    let e = r
+        .pin(
+            "hashivault://default/transit/keys/x?namespace=a",
+            &anykms_core::KeyVersion::new("1"),
+        )
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Unsupported, "{e}");
+    assert_eq!(e.resource(), Some("hashivault://default/transit/keys/x"));
     // A configured alias is echoed, on parse and resolve errors alike.
     for (s, want) in [
         (
