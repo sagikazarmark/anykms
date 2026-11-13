@@ -674,22 +674,20 @@ impl Credentials {
                     .bounded_by(&*ctx.http),
                 )
             }
-            Spec::Custom(c) => Arc::new(Cached::new(CustomFetch {
-                source: c,
-                last: Mutex::new(None),
-            })),
+            Spec::Custom(c) => {
+                Arc::new(Cached::new(CustomFetch { source: c }).bounded_by(&*ctx.http))
+            }
             #[cfg(feature = "google-cloud-auth")]
             Spec::GoogleCloudAuth(c) => Arc::new(gca::GoogleCloudAuth(c)),
         })
     }
 }
 
-/// A custom [`CredentialSource`] behind [`Cached`] (P1-7): the cache, the token span and the
-/// refresh-once trigger apply to it as to every built-in source.
+/// A custom [`CredentialSource`] behind [`Cached`] (P1-7): the cache, the token span, the
+/// refresh-once trigger and the stall bound apply to it as to every built-in source. A rejection
+/// is forwarded with exactly the source's token that was rejected ([`Fetched::origin`]).
 struct CustomFetch {
     source: Arc<dyn CredentialSource>,
-    /// The token the source last handed out, for forwarding [`CredentialSource::invalidate`].
-    last: Mutex<Option<Token>>,
 }
 
 impl Fetch for CustomFetch {
@@ -704,37 +702,33 @@ impl Fetch for CustomFetch {
     fn fetch(&self) -> BoxFuture<'_, Result<Expiring<Fetched>>> {
         Box::pin(async move {
             let t = self.source.token().await?;
-            self.last
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone_from(&t);
             Ok(match t {
                 None => Expiring::new(Fetched::none(), None),
                 Some(t) => {
                     let secret = Zeroizing::new(t.expose().to_owned());
-                    match t.expires_at() {
+                    let fetched = match t.expires_at() {
                         Some(at) => Fetched::valid_until(secret, at),
                         None => Expiring::new(
                             Fetched {
                                 secret: Some(Arc::new(secret)),
                                 expires_at: None,
+                                origin: None,
                             },
                             None,
                         ),
-                    }
+                    };
+                    let expires_at = fetched.expires_at();
+                    let mut value = fetched.value().clone();
+                    value.origin = Some(t);
+                    Expiring::new(value, expires_at)
                 }
             })
         })
     }
 
-    fn rejected(&self) {
-        let last = self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(t) = last {
-            self.source.invalidate(&t);
+    fn rejected(&self, rejected: &Fetched) {
+        if let Some(t) = &rejected.origin {
+            self.source.invalidate(t);
         }
     }
 
@@ -774,6 +768,9 @@ pub(crate) struct Fetched {
     /// `None`: send no `Authorization` header (a custom source that returned no token).
     secret: Option<Arc<Zeroizing<String>>>,
     expires_at: Option<SystemTime>,
+    /// The token a custom source returned, which `secret` copies: what [`Fetch::rejected`]
+    /// hands back to the source's [`CredentialSource::invalidate`].
+    origin: Option<Token>,
 }
 
 impl Fetched {
@@ -783,6 +780,7 @@ impl Fetched {
             Self {
                 secret: Some(Arc::new(secret)),
                 expires_at: system_now().checked_add(lifetime),
+                origin: None,
             },
             lifetime,
         )
@@ -794,6 +792,7 @@ impl Fetched {
             Self {
                 secret: Some(Arc::new(secret)),
                 expires_at: Some(at),
+                origin: None,
             },
             at,
         )
@@ -809,6 +808,7 @@ impl Fetched {
         Self {
             secret: None,
             expires_at: None,
+            origin: None,
         }
     }
 }
@@ -826,9 +826,11 @@ pub(crate) trait Fetch: Send + Sync + 'static {
     fn quota_project(&self) -> Option<&str> {
         None
     }
-    /// Cloud KMS rejected the token this fetcher produced last (a custom source drops its own
-    /// cache).
-    fn rejected(&self) {}
+    /// Cloud KMS rejected `rejected`, a token this fetcher produced (a custom source drops its
+    /// own cache).
+    fn rejected(&self, rejected: &Fetched) {
+        let _ = rejected;
+    }
     /// `Debug` of the cached source.
     fn describe(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CachedToken")
@@ -940,7 +942,7 @@ impl<F: Fetch> CredentialSource for Cached<F> {
             && rejected.generation != 0
         {
             self.cache.invalidate(c);
-            self.fetcher.rejected();
+            self.fetcher.rejected(c.value());
         }
     }
 
@@ -1222,5 +1224,120 @@ mod tests {
         assert!(!format!("{c:?}").contains("SECRET"));
         let c = Credentials::from_json(b"{\"private_key\":\"SECRET\"}".to_vec());
         assert!(!format!("{c:?}").contains("SECRET"));
+    }
+
+    /// A transport that sends nothing (the custom source fetches on its own) but bounds
+    /// single-flight followers at 30 s, on tokio's timer.
+    #[derive(Debug)]
+    struct BoundOnly;
+
+    impl HttpTransport for BoundOnly {
+        fn send(
+            &self,
+            _: anykms_http::transport::Request,
+            _: usize,
+        ) -> BoxFuture<
+            '_,
+            std::result::Result<anykms_http::transport::Response, anykms_http::SendError>,
+        > {
+            unreachable!("the custom source sends nothing")
+        }
+
+        fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+            Some((
+                Duration::from_secs(30),
+                Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+            ))
+        }
+    }
+
+    /// A custom source whose first `token()` returns `old` after 1 s (its timer wakes it), and
+    /// later ones `new-<n>` at once. It records the tokens passed to `invalidate`.
+    #[derive(Debug, Default)]
+    struct SlowFirst {
+        calls: std::sync::atomic::AtomicUsize,
+        invalidated: Mutex<Vec<String>>,
+    }
+
+    impl CredentialSource for SlowFirst {
+        fn token(&self) -> BoxFuture<'_, Result<Option<Token>>> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                if n == 1 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    return Ok(Some(Token::new("old", None)));
+                }
+                Ok(Some(Token::new(format!("new-{n}"), None)))
+            })
+        }
+
+        fn invalidate(&self, rejected: &Token) {
+            self.invalidated
+                .lock()
+                .unwrap()
+                .push(rejected.expose().to_owned());
+        }
+    }
+
+    fn custom_over_bound_only(src: &Arc<SlowFirst>) -> Arc<dyn CredentialSource> {
+        let ctx = AuthCtx {
+            http: Arc::new(BoundOnly),
+            endpoints: AuthEndpoints::default(),
+            env: EnvVars::default(),
+            allow_remote_http: false,
+        };
+        Credentials::custom(src.clone()).into_source(&ctx).unwrap()
+    }
+
+    /// Polls `f` once: a caller that starts fetching a token, then stops polling.
+    async fn poll_once<F: std::future::Future + Unpin>(f: &mut F) {
+        std::future::poll_fn(|cx| {
+            assert!(std::pin::Pin::new(&mut *f).poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    /// A custom source's fetch whose caller stalled (alive, unpolled, its fetch woken) does not
+    /// strand the callers waiting for it: the transport's bound applies to it as to the
+    /// built-in sources, and a waiter fetches in its place.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_custom_fetch_does_not_strand_waiters() {
+        let src = Arc::new(SlowFirst::default());
+        let source = custom_over_bound_only(&src);
+        let mut stalled = Box::pin(source.token());
+        poll_once(&mut stalled).await;
+        let t = tokio::time::timeout(Duration::from_secs(120), source.token())
+            .await
+            .expect("a waiter is stranded behind a stalled custom fetch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.expose(), "new-2");
+        drop(stalled);
+    }
+
+    /// A stalled custom fetch that resumes after a waiter replaced it hands its caller the
+    /// newer token; when Cloud KMS rejects that token, the custom source is told about exactly
+    /// that token, not the older one the superseded fetch returned last.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejection_after_a_superseded_custom_fetch_forwards_the_rejected_token() {
+        let src = Arc::new(SlowFirst::default());
+        let source = custom_over_bound_only(&src);
+        let mut stalled = Box::pin(source.token());
+        poll_once(&mut stalled).await;
+        let newer = tokio::time::timeout(Duration::from_secs(120), source.token())
+            .await
+            .expect("a waiter is stranded behind a stalled custom fetch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(newer.expose(), "new-2");
+        // The stalled fetch resumes: its source returned `old`, but its caller gets the newer
+        // token, the one it will send.
+        let resumed = stalled.await.unwrap().unwrap();
+        assert_eq!(resumed.expose(), "new-2");
+        source.invalidate(&resumed);
+        assert_eq!(*src.invalidated.lock().unwrap(), ["new-2"]);
+        // The rejection forces one refresh.
+        assert_eq!(source.token().await.unwrap().unwrap().expose(), "new-3");
     }
 }
