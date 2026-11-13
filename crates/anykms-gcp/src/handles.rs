@@ -104,7 +104,7 @@ pub(crate) struct Shared {
     /// expires (L17).
     latest_versions: Mutex<HashMap<String, LatestRead>>,
     /// Bumped by [`Shared::invalidate_public_keys`], so a fetch that started before cannot put
-    /// its (possibly stale) answer back into the caches.
+    /// its (possibly stale) answer back into the caches: see [`Shared::current`].
     generation: AtomicU64,
     pub(crate) public_key_ttl: Duration,
     /// The handles' semantics (verification depends on `public_key_ttl`).
@@ -141,15 +141,32 @@ impl Shared {
 
     /// Drops every cached public key, remembered refused version and latest-version read (see
     /// [`GcpProvider::invalidate_public_keys`](crate::GcpProvider::invalidate_public_keys)).
+    ///
+    /// Once this returns, no fetch that started before it writes to any of the three caches: the
+    /// generation is bumped with all three locked, and every write checks it under the lock of
+    /// the cache it writes ([`current`](Self::current)).
     pub(crate) fn invalidate_public_keys(&self) {
+        // Always locked in this order; nothing else holds two of them at once.
+        let mut public_keys = lock(&self.public_keys);
+        let mut unknown_versions = lock(&self.unknown_versions);
+        let mut latest_versions = lock(&self.latest_versions);
         self.generation.fetch_add(1, Ordering::SeqCst);
-        lock(&self.public_keys).clear();
-        lock(&self.unknown_versions).clear();
-        lock(&self.latest_versions).clear();
+        public_keys.clear();
+        unknown_versions.clear();
+        latest_versions.clear();
     }
 
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Whether no invalidation happened since `generation` was read. A cache write calls it
+    /// while holding the lock of the cache it writes: then either the write lands before the
+    /// invalidation clears that cache, or it sees the new generation and is skipped. Checked
+    /// before taking the lock, an invalidation could run to completion between the check and
+    /// the write.
+    fn current(&self, generation: u64) -> bool {
+        self.generation() == generation
     }
 
     /// The state-check single flight's wait bound (tests).
@@ -161,6 +178,31 @@ impl Shared {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A test hook: what a fetch on this thread runs just before it locks a public-key cache to
+/// write to it, given the cache's name. Tests invalidate there, pinning the race between a
+/// fetch and an invalidation.
+#[cfg(test)]
+type CacheWriteHook = Box<dyn FnMut(&'static str)>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_CACHE_WRITE: std::cell::RefCell<Option<CacheWriteHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the test hook (`CacheWriteHook`) for a write to `cache`; a no-op outside tests.
+#[cfg_attr(not(test), inline)]
+fn before_cache_write(cache: &'static str) {
+    #[cfg(test)]
+    BEFORE_CACHE_WRITE.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f(cache);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = cache;
 }
 
 /// Everything a handle needs to reach one key.
@@ -488,25 +530,22 @@ impl KeyCtx {
         }
         let generation = self.shared.generation();
         let r = self.fetch_public_key(v, &name, op, origin).await;
-        // An invalidation while the fetch ran: answer the caller, but cache nothing from it.
-        let current = self.shared.generation() == generation;
+        // An invalidation since the fetch started: answer the caller, but cache nothing from it.
+        // Each write checks the generation under the lock of the cache it writes (see
+        // `Shared::current`); a check made before taking the lock could pass, then let an
+        // invalidation run to completion before the write.
         match r {
             Ok(k) => {
-                if !ttl.is_zero() && current {
+                if !ttl.is_zero() {
                     let now = Instant::now();
-                    let mut cache = self
-                        .shared
-                        .public_keys
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    cache.retain(|_, (expires, _)| now < *expires);
-                    cache.insert(name.clone(), (expiry(now, ttl), k.clone()));
+                    before_cache_write("public_keys");
+                    let mut cache = lock(&self.shared.public_keys);
+                    if self.shared.current(generation) {
+                        cache.retain(|_, (expires, _)| now < *expires);
+                        cache.insert(name.clone(), (expiry(now, ttl), k.clone()));
+                    }
                     drop(cache);
-                    self.shared
-                        .unknown_versions
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&name);
+                    lock(&self.shared.unknown_versions).remove(&name);
                 }
                 Ok(k)
             }
@@ -531,9 +570,11 @@ impl KeyCtx {
                     )
                     && e.retry_hint().is_none()
                     && !ttl.is_zero()
-                    && current
+                    // Saves the latest-version read its request after an invalidation; the
+                    // writes check again under their locks.
+                    && self.shared.current(generation)
                 {
-                    self.remember_unknown(name, &e, ttl);
+                    self.remember_unknown(name, &e, ttl, generation);
                     if e.kind() == ErrorKind::UnknownKeyVersion {
                         self.read_latest(&e, op, ttl, generation).await;
                     }
@@ -562,8 +603,11 @@ impl KeyCtx {
         let key = self.key.key_name();
         let now = Instant::now();
         {
+            before_cache_write("latest_versions");
             let mut latest = lock(&self.shared.latest_versions);
-            if latest.get(&key).is_some_and(|(expires, _)| now < *expires) {
+            if !self.shared.current(generation)
+                || latest.get(&key).is_some_and(|(expires, _)| now < *expires)
+            {
                 return;
             }
             latest.retain(|_, (expires, _)| now < *expires);
@@ -580,23 +624,26 @@ impl KeyCtx {
         else {
             return;
         };
-        if self.shared.generation() != generation {
-            return;
-        }
-        if let Some((_, slot)) = lock(&self.shared.latest_versions).get_mut(&key) {
+        before_cache_write("latest_versions_read");
+        let mut latest = lock(&self.shared.latest_versions);
+        // After an invalidation, the slot (if any) is a newer read's.
+        if self.shared.current(generation)
+            && let Some((_, slot)) = latest.get_mut(&key)
+        {
             *slot = Some((max, missing.clone()));
         }
     }
 
     /// Remembers an input version that was refused (see
-    /// [`version_key`](Self::version_key)), evicting the entry closest to expiry when full.
-    fn remember_unknown(&self, name: String, e: &Error, ttl: Duration) {
+    /// [`version_key`](Self::version_key)), evicting the entry closest to expiry when full;
+    /// nothing after an invalidation since `generation` was read.
+    fn remember_unknown(&self, name: String, e: &Error, ttl: Duration, generation: u64) {
         let now = Instant::now();
-        let mut unknown = self
-            .shared
-            .unknown_versions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        before_cache_write("unknown_versions");
+        let mut unknown = lock(&self.shared.unknown_versions);
+        if !self.shared.current(generation) {
+            return;
+        }
         unknown.retain(|_, (expires, _)| now < *expires);
         if unknown.len() >= MAX_UNKNOWN_VERSIONS
             && !unknown.contains_key(&name)
@@ -2158,5 +2205,217 @@ mod tests {
             &[0; 384]
         ));
         assert!(signature_shape_ok(Ed25519, None, &[0; 64]));
+    }
+}
+
+/// An invalidation that lands while a public-key fetch runs is never undone by that fetch: once
+/// `invalidate_public_keys` returns, a fetch that started before it writes to none of the
+/// caches it clears. The test hook pauses the fetch right before it locks a cache to write,
+/// and invalidates there: the interleaving a preempted fetch thread would have.
+#[cfg(test)]
+mod invalidation_race_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    use anykms_core::PublicKeys;
+    use anykms_http::transport::{Request, Response};
+    use anykms_http::{HttpTransport, SendError};
+    use base64::Engine as _;
+    use serde_json::json;
+
+    use super::*;
+    use crate::{Credentials, Endpoint, GcpProvider};
+
+    const KEY: &str = "projects/my-project/locations/global/keyRings/r/cryptoKeys/k";
+
+    /// A Cloud KMS that knows one P-256 signing version, 1, whose state the test sets.
+    #[derive(Default)]
+    struct Kms {
+        disabled: std::sync::atomic::AtomicBool,
+        requests: AtomicUsize,
+    }
+
+    /// The SPKI of the P-256 base point: a valid public key.
+    fn spki_pem() -> String {
+        const HEX: &str = "3059301306072a8648ce3d020106082a8648ce3d030107034200\
+            046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
+            4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+        let der: Vec<u8> = (0..HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&HEX[i..i + 2], 16).unwrap())
+            .collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----\n")
+    }
+
+    impl Kms {
+        fn answer(&self, path: &str) -> (u16, serde_json::Value) {
+            let v1 = format!("{KEY}/cryptoKeyVersions/1");
+            let version = |name: &str, state: &str| {
+                json!({"name": name, "state": state, "algorithm": "EC_SIGN_P256_SHA256",
+                       "protectionLevel": "SOFTWARE"})
+            };
+            let state = if self.disabled.load(Ordering::SeqCst) {
+                "DISABLED"
+            } else {
+                "ENABLED"
+            };
+            match path.strip_prefix("/v1/").unwrap_or_default() {
+                p if p == KEY => (200, json!({"name": KEY, "purpose": "ASYMMETRIC_SIGN"})),
+                p if p == v1 => (200, version(&v1, state)),
+                p if p == format!("{v1}/publicKey") => {
+                    let pem = spki_pem();
+                    let crc = crate::crc32c::crc32c(pem.as_bytes()).to_string();
+                    (
+                        200,
+                        json!({"name": v1, "pem": pem, "pemCrc32c": crc,
+                               "algorithm": "EC_SIGN_P256_SHA256", "protectionLevel": "SOFTWARE"}),
+                    )
+                }
+                p if p == format!("{KEY}/cryptoKeyVersions") => {
+                    (200, json!({"cryptoKeyVersions": [version(&v1, state)]}))
+                }
+                p => (
+                    404,
+                    json!({"error": {"code": 404, "status": "NOT_FOUND",
+                                     "message": format!("CryptoKeyVersion {p} not found.")}}),
+                ),
+            }
+        }
+    }
+
+    impl HttpTransport for Kms {
+        fn send(
+            &self,
+            req: Request,
+            _limit: usize,
+        ) -> anykms_core::BoxFuture<'_, std::result::Result<Response, SendError>> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = self.answer(req.uri().path());
+            let resp = anykms_http::http::Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Zeroizing::new(serde_json::to_vec(&body).unwrap()))
+                .unwrap();
+            Box::pin(std::future::ready(Ok(resp)))
+        }
+    }
+
+    fn setup() -> (Arc<Kms>, GcpProvider, GcpDigestKey) {
+        let kms = Arc::new(Kms::default());
+        let p = GcpProvider::builder()
+            .credentials(Credentials::static_token("ya29.test"))
+            .endpoint(Endpoint::custom("http://127.0.0.1:9"))
+            .allow_loopback_http()
+            .http_transport(kms.clone())
+            .build()
+            .unwrap();
+        let h = p
+            .digest_signing_key(
+                format!("gcp-kms://{KEY}/cryptoKeyVersions/1"),
+                SignatureAlgorithm::EcdsaP256Sha256,
+            )
+            .unwrap()
+            .with_key_type_check(KeyTypeCheck::TrustCaller);
+        (kms, p, h)
+    }
+
+    /// Until [`clear_hook`]: the first write to `cache` on this thread is preceded by a provider
+    /// invalidation.
+    fn invalidate_before_writing(p: &GcpProvider, cache: &'static str) {
+        let p = p.clone();
+        let mut fired = false;
+        BEFORE_CACHE_WRITE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |c| {
+                if c == cache && !fired {
+                    fired = true;
+                    p.invalidate_public_keys();
+                }
+            }));
+        });
+    }
+
+    fn clear_hook() {
+        BEFORE_CACHE_WRITE.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// The number of entries in (public keys, refused versions, latest-version reads).
+    fn cached(h: &GcpDigestKey) -> (usize, usize, usize) {
+        let s = &h.k.shared;
+        (
+            lock(&s.public_keys).len(),
+            lock(&s.unknown_versions).len(),
+            lock(&s.latest_versions).len(),
+        )
+    }
+
+    /// A public key fetched before an invalidation is not cached after it, so a version
+    /// disabled meanwhile is refused at once rather than for another `public_key_ttl`.
+    #[tokio::test]
+    async fn a_fetch_does_not_cache_a_public_key_across_an_invalidation() {
+        let (kms, p, h) = setup();
+        // Without an invalidation, the key is cached.
+        h.public_key().await.unwrap();
+        let before = kms.requests.load(Ordering::SeqCst);
+        h.public_key().await.unwrap();
+        assert_eq!(
+            kms.requests.load(Ordering::SeqCst),
+            before,
+            "served from the cache"
+        );
+        assert_eq!(cached(&h), (1, 0, 0));
+
+        p.invalidate_public_keys();
+        invalidate_before_writing(&p, "public_keys");
+        // The caller gets its answer...
+        h.public_key().await.unwrap();
+        clear_hook();
+        // ...but the invalidation that returned before the write stands: the version, disabled
+        // since, is refused at once.
+        kms.disabled.store(true, Ordering::SeqCst);
+        let r = h.public_key().await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.kind() == ErrorKind::KeyStateInvalid),
+            "a disabled version was served from a stale cache entry: {r:?}"
+        );
+        assert_eq!(cached(&h), (0, 0, 0));
+    }
+
+    /// An input version refused before an invalidation, written to `cache` after it, leaves no
+    /// entry in any cache, and the next lookup asks the server again.
+    async fn refused_version_across_an_invalidation(cache: &'static str) {
+        let (kms, p, h) = setup();
+        invalidate_before_writing(&p, cache);
+        let e = h
+            .public_key_version(&KeyVersion::from_u64(99))
+            .await
+            .unwrap_err();
+        clear_hook();
+        assert_eq!(e.kind(), ErrorKind::UnknownKeyVersion, "{e}");
+        assert_eq!(cached(&h), (0, 0, 0), "a stale entry was cached");
+        let before = kms.requests.load(Ordering::SeqCst);
+        h.public_key_version(&KeyVersion::from_u64(99))
+            .await
+            .unwrap_err();
+        assert!(kms.requests.load(Ordering::SeqCst) > before);
+    }
+
+    /// The negative cache (`unknown_versions`).
+    #[tokio::test]
+    async fn a_refused_version_is_not_remembered_across_an_invalidation() {
+        refused_version_across_an_invalidation("unknown_versions").await;
+    }
+
+    /// The latest-version read's placeholder (`latest_versions`), written before its list.
+    #[tokio::test]
+    async fn a_latest_version_read_does_not_start_across_an_invalidation() {
+        refused_version_across_an_invalidation("latest_versions").await;
+    }
+
+    /// The latest-version read's result (`latest_versions`), written after its list.
+    #[tokio::test]
+    async fn a_latest_version_read_does_not_land_across_an_invalidation() {
+        refused_version_across_an_invalidation("latest_versions_read").await;
     }
 }

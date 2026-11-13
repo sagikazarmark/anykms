@@ -1,18 +1,28 @@
 //! Application Default Credentials: the chain of the [module docs](super), resolved on the first
 //! token request. A failed resolution is not cached: the next request tries again.
+//!
+//! Concurrent first requests share one resolution (one metadata-server probe), but wait for it
+//! no longer than the transport's follower bound
+//! ([`HttpTransport::follower_wait`](anykms_http::HttpTransport::follower_wait)): a resolving
+//! caller that is alive but no longer polled would otherwise strand every later caller before
+//! they reach the (equally bounded) token cache. A caller that gives up resolves for itself;
+//! the first resolution to finish is kept.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anykms_core::{BoxFuture, Result};
+use anykms_http::cache::SingleFlight;
 
 use super::file;
 use super::{AuthCtx, CredentialSource, EnvVars, Token, config_err, metadata};
 
 pub(crate) struct AdcSource {
     ctx: AuthCtx,
-    resolved: tokio::sync::OnceCell<Arc<dyn CredentialSource>>,
+    resolved: OnceLock<Arc<dyn CredentialSource>>,
+    /// The resolution in progress, bounded by the transport's follower wait.
+    resolving: SingleFlight<(), Result<Arc<dyn CredentialSource>>>,
 }
 
 impl fmt::Debug for AdcSource {
@@ -39,9 +49,12 @@ pub(crate) fn well_known_file(env: &EnvVars) -> Option<PathBuf> {
 
 impl AdcSource {
     pub(crate) fn new(ctx: AuthCtx) -> Self {
+        let resolving = SingleFlight::new();
+        resolving.bound_by(&*ctx.http);
         Self {
             ctx,
-            resolved: tokio::sync::OnceCell::new(),
+            resolved: OnceLock::new(),
+            resolving,
         }
     }
 
@@ -95,7 +108,21 @@ impl AdcSource {
     }
 
     async fn source(&self) -> Result<&Arc<dyn CredentialSource>> {
-        self.resolved.get_or_try_init(|| self.resolve()).await
+        if let Some(s) = self.resolved.get() {
+            return Ok(s);
+        }
+        let s = self
+            .resolving
+            .run(&(), || async {
+                // A resolution that finished after the check above is kept.
+                match self.resolved.get() {
+                    Some(s) => Ok(s.clone()),
+                    None => self.resolve().await,
+                }
+            })
+            .await?;
+        // The first resolution wins, so every caller shares one source and its token cache.
+        Ok(self.resolved.get_or_init(|| s))
     }
 }
 

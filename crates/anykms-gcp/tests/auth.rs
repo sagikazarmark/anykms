@@ -902,3 +902,172 @@ mod gca {
         }
     }
 }
+
+/// A transport for ADC discovery with no credential files: the metadata server's probe, its
+/// token endpoint and KMS encrypt. The first probe stays in flight until `release`; followers'
+/// wait bound ([`HttpTransport::follower_wait`]) elapses when `bound_elapsed` is set.
+struct ProbeStall {
+    probes: std::sync::atomic::AtomicUsize,
+    probe_started: tokio::sync::Notify,
+    release: tokio::sync::watch::Sender<bool>,
+    bound_elapsed: tokio::sync::watch::Sender<bool>,
+}
+
+impl ProbeStall {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            probes: 0.into(),
+            probe_started: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+            bound_elapsed: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    fn probes(&self) -> usize {
+        self.probes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl anykms_http::HttpTransport for ProbeStall {
+    fn send(
+        &self,
+        req: anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<'_, Result<anykms_http::transport::Response, anykms_http::SendError>>
+    {
+        Box::pin(async move {
+            let path = req.uri().path().to_owned();
+            let ok = |body: serde_json::Value| {
+                http::Response::builder()
+                    .status(200)
+                    .header("Metadata-Flavor", "Google")
+                    .header("content-type", "application/json")
+                    .body(zeroize::Zeroizing::new(serde_json::to_vec(&body).unwrap()))
+                    .unwrap()
+            };
+            if path == "/" {
+                let n = self
+                    .probes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    self.probe_started.notify_one();
+                    let mut rx = self.release.subscribe();
+                    let _ = rx.wait_for(|r| *r).await;
+                }
+                return Ok(ok(json!({})));
+            }
+            if path == METADATA_TOKEN {
+                return Ok(ok(json!({
+                    "access_token": "ya29.metadata", "expires_in": 3599, "token_type": "Bearer"
+                })));
+            }
+            let b64 = base64::engine::general_purpose::STANDARD;
+            Ok(ok(json!({
+                "name": format!("{KEY}/cryptoKeyVersions/1"),
+                "ciphertext": b64.encode(b"ct"),
+                "ciphertextCrc32c": crc(b"ct"),
+                "verifiedPlaintextCrc32c": true,
+            })))
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        let rx = self.bound_elapsed.subscribe();
+        Some((
+            Duration::from_secs(24),
+            Arc::new(move |_| {
+                let mut rx = rx.clone();
+                Box::pin(async move {
+                    let _ = rx.wait_for(|e| *e).await;
+                })
+            }),
+        ))
+    }
+}
+
+/// ADC with no credential files and the metadata server reached through `t`.
+fn adc_over(t: &Arc<ProbeStall>) -> GcpProvider {
+    anykms_gcp::GcpProviderBuilder::from_env_with(|v| match v {
+        "GCE_METADATA_HOST" => Some("127.0.0.1:9".to_owned()),
+        "HOME" | "APPDATA" => Some("/nonexistent/anykms-gcp-probe".to_owned()),
+        _ => None,
+    })
+    .unwrap()
+    .credentials(Credentials::adc())
+    .endpoint(Endpoint::custom("http://127.0.0.1:9"))
+    .allow_loopback_http()
+    .http_transport(t.clone())
+    .build()
+    .unwrap()
+}
+
+/// Polls `f` until it completes, yielding in between, at most `polls` times: `None` if it is
+/// still pending. Every future here completes without a timer, so the bound is never what ends
+/// a passing run.
+async fn poll_up_to<F: std::future::Future + Unpin>(f: &mut F, polls: usize) -> Option<F::Output> {
+    for _ in 0..polls {
+        tokio::select! {
+            biased;
+            r = &mut *f => return Some(r),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    None
+}
+
+/// ADC discovery's first metadata probe, held by a caller that is alive but no longer polled,
+/// strands later callers no longer than the transport's follower bound: then they probe for
+/// themselves. The resolution is kept, so callers after that do not probe again.
+#[tokio::test]
+async fn an_unpolled_adc_probe_does_not_strand_later_callers() {
+    if child() {
+        return;
+    }
+    let t = ProbeStall::new();
+    let p = adc_over(&t);
+    let mut stalled = Box::pin(encrypt(&p));
+    tokio::select! {
+        biased;
+        _ = &mut stalled => panic!("the first probe is held"),
+        () = t.probe_started.notified() => {}
+    }
+    // From here on, `stalled` is alive and never polled.
+    let mut later = Box::pin(encrypt(&p));
+    assert!(
+        poll_up_to(&mut later, 50).await.is_none(),
+        "within the bound, a later caller waits for the probe in flight"
+    );
+    assert_eq!(t.probes(), 1);
+    t.bound_elapsed.send_replace(true);
+    poll_up_to(&mut later, 1000)
+        .await
+        .expect("a later caller is stranded past the follower bound")
+        .unwrap();
+    assert_eq!(t.probes(), 2);
+    encrypt(&p).await.unwrap();
+    assert_eq!(t.probes(), 2, "the resolution is kept");
+    drop(stalled);
+}
+
+/// Concurrent first callers share one ADC discovery: one metadata probe.
+#[tokio::test]
+async fn concurrent_adc_callers_share_one_probe() {
+    if child() {
+        return;
+    }
+    let t = ProbeStall::new();
+    let p = adc_over(&t);
+    let mut first = Box::pin(encrypt(&p));
+    tokio::select! {
+        biased;
+        _ = &mut first => panic!("the first probe is held"),
+        () = t.probe_started.notified() => {}
+    }
+    let mut second = Box::pin(encrypt(&p));
+    assert!(poll_up_to(&mut second, 50).await.is_none());
+    t.release.send_replace(true);
+    let (a, b) = tokio::join!(first, second);
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(t.probes(), 1);
+}
