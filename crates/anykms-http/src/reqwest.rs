@@ -267,7 +267,14 @@ impl ReqwestTransportBuilder {
         let client = b
             .build()
             .map_err(|_| config_err("cannot build the HTTP client"))?;
-        Ok(ReqwestTransport { client })
+        Ok(ReqwestTransport {
+            client,
+            // Above one request's whole life (connect, then the request timeout), twice over.
+            follower_wait: self
+                .connect_timeout
+                .saturating_add(self.request_timeout)
+                .saturating_mul(2),
+        })
     }
 }
 
@@ -302,6 +309,8 @@ fn normalize_proxy(raw: &str) -> std::result::Result<url::Url, &'static str> {
 #[derive(Clone)]
 pub struct ReqwestTransport {
     client: ::reqwest::Client,
+    /// [`HttpTransport::follower_wait`]: twice the connect plus request timeout.
+    follower_wait: Duration,
 }
 
 impl fmt::Debug for ReqwestTransport {
@@ -374,6 +383,15 @@ impl HttpTransport for ReqwestTransport {
             return Err(SendError::NoRuntime);
         }
         Ok(())
+    }
+
+    /// Twice the connect plus request timeout, on Tokio's timer: reqwest's own timeouts already
+    /// need a Tokio runtime with its time driver.
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        Some((
+            self.follower_wait,
+            Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
     }
 }
 

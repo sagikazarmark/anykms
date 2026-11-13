@@ -122,10 +122,14 @@ impl std::fmt::Debug for Shared {
 
 impl Shared {
     pub(crate) fn new(client: Client, public_key_ttl: Duration) -> Self {
+        // Followers give up waiting for another caller's state check after the transport's
+        // bound (L29).
+        let check_flights = SingleFlight::new();
+        check_flights.bound_by(&*client.http);
         Self {
             client,
             checks: Mutex::default(),
-            check_flights: SingleFlight::new(),
+            check_flights,
             public_keys: Mutex::default(),
             unknown_versions: Mutex::default(),
             latest_versions: Mutex::default(),
@@ -146,6 +150,12 @@ impl Shared {
 
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The state-check single flight's wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn check_wait_bound(&self) -> Option<Duration> {
+        self.check_flights.max_wait()
     }
 }
 

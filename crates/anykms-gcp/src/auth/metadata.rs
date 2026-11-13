@@ -81,7 +81,8 @@ pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
     Ok(Cached::new(Metadata {
         http: ctx.http.clone(),
         token_url,
-    }))
+    })
+    .bounded_by(&*ctx.http))
 }
 
 /// Whether a metadata server answers at `base` (any response with `Metadata-Flavor: Google`)

@@ -158,6 +158,8 @@ impl AzureCredential for StaticToken {
 pub(crate) struct Tokens {
     cred: Arc<dyn AzureCredential>,
     caches: Mutex<HashMap<String, Arc<CredentialCache<Arc<AccessToken>>>>>,
+    /// The provider's transport: its follower bound applies to every cache (L29).
+    http: Arc<dyn HttpTransport>,
 }
 
 impl fmt::Debug for Tokens {
@@ -176,6 +178,7 @@ impl Tokens {
         Self {
             cred,
             caches: Mutex::default(),
+            http: http.clone(),
         }
     }
 
@@ -183,12 +186,18 @@ impl Tokens {
         &*self.cred
     }
 
-    fn cache(&self, scope: &str) -> Arc<CredentialCache<Arc<AccessToken>>> {
+    pub(crate) fn cache(&self, scope: &str) -> Arc<CredentialCache<Arc<AccessToken>>> {
         self.caches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(scope.to_owned())
-            .or_insert_with(|| Arc::new(CredentialCache::new()))
+            .or_insert_with(|| {
+                // Callers waiting for another caller's token fetch give up after the
+                // transport's bound (L29).
+                let c = CredentialCache::new();
+                c.bound_by(&*self.http);
+                Arc::new(c)
+            })
             .clone()
     }
 

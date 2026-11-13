@@ -188,13 +188,28 @@ pub(crate) struct Call<'a> {
 
 impl Kms {
     pub(crate) fn new(http: Arc<Http>, source: Arc<dyn CredentialSource>) -> Self {
+        let creds = CredsCache::new(source);
+        // Callers waiting for another caller's credential fetch give up after the transport's
+        // bound (L29).
+        creds.cache.bound_by(&*http.transport);
         Self {
             http,
-            creds: CredsCache::new(source),
+            creds,
             skew_ms: Mutex::default(),
             default_skew_ms: AtomicI64::new(0),
             requests: None,
         }
+    }
+
+    /// The transport requests go through.
+    pub(crate) fn transport(&self) -> &dyn HttpTransport {
+        &*self.http.transport
+    }
+
+    /// The credential cache's wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn creds_wait_bound(&self) -> Option<Duration> {
+        self.creds.cache.wait_bound()
     }
 
     pub(crate) fn source_context(&self) -> SourceContext {

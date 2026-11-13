@@ -166,7 +166,8 @@ pub(crate) fn from_file(f: CredFile, ctx: &AuthCtx) -> Result<Cached<ExternalAcc
         lifetime,
         user_project: f.workforce_pool_user_project,
         quota_project: f.quota_project_id,
-    }))
+    })
+    .bounded_by(&*ctx.http))
 }
 
 impl ExternalAccount {

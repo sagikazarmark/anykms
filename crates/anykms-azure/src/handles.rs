@@ -61,6 +61,21 @@ pub(crate) struct DescribeCache {
     flights: SingleFlight<CacheKey, Result<Arc<KeyBundle>>>,
 }
 
+impl DescribeCache {
+    /// An empty cache whose followers give up waiting after `transport`'s bound (L29).
+    pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
+        let c = Self::default();
+        c.flights.bound_by(transport);
+        c
+    }
+
+    /// The single-flight wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_bound(&self) -> Option<Duration> {
+        self.flights.max_wait()
+    }
+}
+
 /// Everything a handle needs to reach one key.
 #[derive(Clone)]
 pub(crate) struct KeyCtx {

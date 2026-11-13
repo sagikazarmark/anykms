@@ -112,7 +112,8 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
                     client_secret: require(f.client_secret, &kind, "client_secret")?,
                     refresh_token: require(f.refresh_token, &kind, "refresh_token")?,
                     quota_project: quota,
-                })),
+                })
+                .bounded_by(&*ctx.http)),
                 kind: "authorized_user",
             })
         }
@@ -142,7 +143,8 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
                     delegates: f.delegates.unwrap_or_default(),
                     lifetime: Duration::from_secs(3600),
                     quota_project: quota,
-                })),
+                })
+                .bounded_by(&*ctx.http)),
                 kind: "impersonated_service_account",
             })
         }

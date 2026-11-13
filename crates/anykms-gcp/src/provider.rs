@@ -913,3 +913,33 @@ mod tests {
         assert!(b.build().is_ok());
     }
 }
+
+/// Regression test for the security review (L29, by default).
+#[cfg(test)]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::auth::{AuthCtx, EnvVars};
+
+    /// With the built-in transport, the state-check flight and a token cache bound how long a
+    /// caller waits for another caller's request: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_caches() {
+        let p = GcpProvider::builder()
+            .credentials(Credentials::none())
+            .endpoint(Endpoint::custom("http://127.0.0.1:9"))
+            .allow_loopback_http()
+            .build()
+            .unwrap();
+        assert_eq!(p.shared.check_wait_bound(), Some(Duration::from_secs(24)));
+        let ctx = AuthCtx {
+            http: anykms_http::default_transport(BACKEND, false).unwrap(),
+            endpoints: AuthEndpoints::default(),
+            env: EnvVars::default(),
+            allow_remote_http: false,
+        };
+        let metadata = crate::auth::metadata::source(&ctx).unwrap();
+        assert_eq!(metadata.wait_bound(), Some(Duration::from_secs(24)));
+    }
+}

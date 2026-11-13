@@ -8,7 +8,10 @@
 //!   it and all get its result: the credential, **or the error**. If the fetching caller is
 //!   cancelled, one of the waiting callers fetches instead. If it is alive but not being
 //!   polled, they wait for as long as it lives, unless [`max_wait`](CredentialCache::max_wait)
-//!   bounds the wait (then a waiting caller fetches for itself).
+//!   or [`bound_by`](CredentialCache::bound_by) bounds the wait (then a waiting caller fetches
+//!   for itself). The built-in backends bound every cache by their transport's
+//!   [`follower_wait`](crate::HttpTransport::follower_wait): twice the connect plus request
+//!   timeout with the built-in transport.
 //! - **Refresh ahead, without waiting.** A credential is refreshed `refresh_ahead` before it
 //!   expires (at half its lifetime for short-lived ones), while it is still usable. The first
 //!   caller to find it due fetches; every other caller keeps getting the current credential
@@ -256,6 +259,18 @@ impl<T: Clone + Send> CredentialCache<T> {
         let flight = std::mem::take(&mut self.flight);
         self.flight = flight.with_max_wait(max, sleep);
         self
+    }
+
+    /// Takes the wait bound from `transport` ([`HttpTransport::follower_wait`](crate::HttpTransport::follower_wait))
+    /// unless one is set already (see [`SingleFlight::bound_by`]). The built-in backends call it
+    /// with the transport the credential is fetched with.
+    pub fn bound_by(&self, transport: &dyn crate::HttpTransport) {
+        self.flight.bound_by(transport);
+    }
+
+    /// The wait bound, if any.
+    pub fn wait_bound(&self) -> Option<Duration> {
+        self.flight.max_wait()
     }
 
     /// The least time between two refreshes forced by [`invalidate`](Self::invalidate), so a
@@ -772,6 +787,39 @@ mod review_tests {
     #[tokio::test(start_paused = true)]
     async fn review_l29_a_waiter_does_not_wait_forever_on_an_unpolled_fetch() {
         let cache: CredentialCache<String> = review_cache();
+        let mut leader = Box::pin(cache.get(|| async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(Expiring::never_expires("slow".to_owned()))
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let r = tokio::time::timeout(
+            Duration::from_secs(120),
+            cache.get(|| async { Ok(Expiring::never_expires("own".to_owned())) }),
+        )
+        .await
+        .expect("the waiter hung on the unpolled fetch")
+        .unwrap();
+        assert_eq!(r.value(), "own");
+        drop(leader);
+    }
+
+    /// L29, by default: a credential cache bound by the built-in transport (what every backend
+    /// does) does not hang on an unpolled fetch.
+    #[cfg(feature = "reqwest")]
+    #[tokio::test(start_paused = true)]
+    async fn review_l29_the_builtin_transport_bounds_waiters() {
+        let transport = crate::ReqwestTransport::builder()
+            .require_roots(false)
+            .build()
+            .unwrap();
+        let cache: CredentialCache<String> = CredentialCache::new();
+        assert_eq!(cache.wait_bound(), None);
+        cache.bound_by(&transport);
+        assert_eq!(cache.wait_bound(), Some(Duration::from_secs(24)));
         let mut leader = Box::pin(cache.get(|| async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             Ok(Expiring::never_expires("slow".to_owned()))

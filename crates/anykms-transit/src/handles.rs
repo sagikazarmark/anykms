@@ -39,6 +39,20 @@ pub(crate) struct TypeCache {
     flights: SingleFlight<Arc<CacheKey>, Result<(TransitKeyType, bool)>>,
 }
 
+impl TypeCache {
+    /// Bounds how long followers wait for another caller's read (L29): the first of the
+    /// servers' transports that has a bound sets it.
+    pub(crate) fn bound_by(&self, transport: &dyn anykms_http::HttpTransport) {
+        self.flights.bound_by(transport);
+    }
+
+    /// The single-flight wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_bound(&self) -> Option<std::time::Duration> {
+        self.flights.max_wait()
+    }
+}
+
 /// Everything a handle needs to reach one key.
 #[derive(Clone)]
 pub(crate) struct KeyCtx {

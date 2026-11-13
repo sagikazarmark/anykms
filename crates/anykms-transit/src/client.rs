@@ -118,6 +118,11 @@ pub(crate) async fn send(
 }
 
 impl Server {
+    /// The transport this server's requests go through.
+    pub(crate) fn transport(&self) -> &dyn HttpTransport {
+        &*self.http
+    }
+
     pub(crate) fn new(alias: String, cfg: ServerConfig) -> Result<Self> {
         let base = cfg.validate()?;
         let http = match &cfg.http_transport {

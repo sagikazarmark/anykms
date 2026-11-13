@@ -283,10 +283,11 @@ impl AzureProviderBuilder {
             self.key_cache_ttl,
         );
         client.requests = self.request_counter;
+        let cache = Arc::new(DescribeCache::bounded_by(&*client.http));
         Ok(AzureProvider {
             client: Arc::new(client),
             policy: Arc::new(self.policy),
-            cache: Arc::default(),
+            cache,
         })
     }
 }
@@ -846,5 +847,26 @@ mod tests {
                 .authority_host(host)
                 .unwrap();
         }
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(test)]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// With the built-in transport, the key-bundle and token caches bound how long a caller
+    /// waits for another caller's request: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_caches() {
+        let p = AzureProvider::builder()
+            .credential(crate::StaticToken::new("t"))
+            .build()
+            .unwrap();
+        assert_eq!(p.cache.wait_bound(), Some(Duration::from_secs(24)));
+        let tokens = p.client.tokens.cache("https://vault.azure.net/.default");
+        assert_eq!(tokens.wait_bound(), Some(Duration::from_secs(24)));
     }
 }

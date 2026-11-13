@@ -89,10 +89,14 @@ impl TransitProviderBuilder {
             None if servers.len() == 1 => servers.keys().next().cloned(),
             None => None,
         };
+        let cache: Arc<TypeCache> = Arc::default();
+        for s in servers.values() {
+            cache.bound_by(s.transport());
+        }
         Ok(TransitProvider {
             servers,
             default,
-            cache: Arc::default(),
+            cache,
         })
     }
 }
@@ -458,5 +462,28 @@ impl Provider for TransitProvider {
         let k = self.aead_key(uri)?;
         let r = k.k.resource.clone();
         Ok(DescribeKey::new(BACKEND, Arc::new(k)).with_resource(r))
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// With the built-in transport, the key-type cache bounds how long a caller waits for
+    /// another caller's read: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_type_cache() {
+        let p = TransitProvider::builder()
+            .server(
+                "default",
+                ServerConfig::new("http://127.0.0.1:8200", crate::Flavor::Vault)
+                    .allow_loopback_http(),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(p.cache.wait_bound(), Some(Duration::from_secs(24)));
     }
 }

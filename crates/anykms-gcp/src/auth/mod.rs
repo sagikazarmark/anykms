@@ -20,7 +20,7 @@ mod file;
 #[cfg(feature = "google-cloud-auth")]
 mod gca;
 mod impersonated;
-mod metadata;
+pub(crate) mod metadata;
 mod oauth;
 #[cfg(feature = "service-account-key")]
 mod service_account;
@@ -659,7 +659,8 @@ impl Credentials {
                     delegates,
                     lifetime,
                     quota_project: None,
-                }))
+                })
+                .bounded_by(&*ctx.http))
             }
             Spec::Custom(c) => Arc::new(Cached::new(CustomFetch {
                 source: c,
@@ -846,6 +847,19 @@ impl<F: Fetch> Cached<F> {
             cache: CredentialCache::new().refresh_ahead(REFRESH_AHEAD),
             last: Mutex::new(None),
         }
+    }
+
+    /// Callers waiting for another caller's token fetch give up after `transport`'s bound
+    /// (L29). For fetchers that send requests.
+    pub(crate) fn bounded_by(self, transport: &dyn HttpTransport) -> Self {
+        self.cache.bound_by(transport);
+        self
+    }
+
+    /// The token cache's wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_bound(&self) -> Option<Duration> {
+        self.cache.wait_bound()
     }
 
     /// Fetches inside a token span (`anykms.gcp.token`, the shared schema of

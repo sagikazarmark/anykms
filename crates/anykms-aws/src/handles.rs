@@ -49,6 +49,21 @@ pub(crate) struct DescribeCache {
     flights: SingleFlight<(String, usize), Result<Described>>,
 }
 
+impl DescribeCache {
+    /// An empty cache whose followers give up waiting after `transport`'s bound (L29).
+    pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
+        let c = Self::default();
+        c.flights.bound_by(transport);
+        c
+    }
+
+    /// The single-flight wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_bound(&self) -> Option<Duration> {
+        self.flights.max_wait()
+    }
+}
+
 /// Public keys of RSA wrapping keys, shared per provider: key ARN → SPKI DER. A key ARN's
 /// material never changes for asymmetric keys, so entries never expire.
 pub(crate) type PublicKeyCache = Mutex<HashMap<String, Arc<[u8]>>>;
