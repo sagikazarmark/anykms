@@ -359,6 +359,94 @@ pub(crate) async fn rejected_before_io<F: Fixture>(
     Ok(())
 }
 
+/// Another key's valid signature (with that key's own version label, unchanged) does not verify
+/// with this key's backend verifier: a backend must bind verification to the key it opened.
+pub(crate) async fn other_keys_signature<F: Fixture>(
+    c: Ctx<F>,
+    alg: SignatureAlgorithm,
+) -> CaseResult {
+    let [key, other] = two(c.keys(TestKeyKind::Signing(alg), 2).await?);
+    let theirs = sign(&c, &other, alg, MSG)
+        .await
+        .ctx("sign with another key")?;
+    verify(&c, &other, alg, MSG, &theirs)
+        .await
+        .ctx("the other key verifies its own signature")?;
+    let e = expect_kind(
+        verify(&c, &key, alg, MSG, &theirs).await,
+        ErrorKind::VerificationFailed,
+        "another key's valid signature",
+    )?;
+    ensure!(
+        e.is_caller_error(),
+        "another key's valid signature: {e} is not a caller error"
+    );
+    Ok(())
+}
+
+/// The algorithms one key of `alg` may also be opened as on some backends (AWS, transit and
+/// Azure RSA keys sign with either padding and any hash): the other padding with the same hash,
+/// and the same padding with another hash. Empty where the key type fixes the algorithm.
+pub(crate) fn substitutes(alg: SignatureAlgorithm) -> Vec<SignatureAlgorithm> {
+    use SignatureAlgorithm::{
+        RsaPkcs1v15Sha256, RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256, RsaPssSha384,
+        RsaPssSha512,
+    };
+    match alg {
+        RsaPssSha256 => vec![RsaPkcs1v15Sha256, RsaPssSha512],
+        RsaPssSha384 => vec![RsaPkcs1v15Sha384, RsaPssSha256],
+        RsaPssSha512 => vec![RsaPkcs1v15Sha512, RsaPssSha256],
+        RsaPkcs1v15Sha256 => vec![RsaPssSha256, RsaPkcs1v15Sha512],
+        RsaPkcs1v15Sha384 => vec![RsaPssSha384, RsaPkcs1v15Sha256],
+        RsaPkcs1v15Sha512 => vec![RsaPssSha512, RsaPkcs1v15Sha256],
+        _ => Vec::new(),
+    }
+}
+
+/// A signature made with `alg`, relabeled as a sibling algorithm the same key could be opened as
+/// ([`substitutes`]) and verified by a verifier opened for that algorithm, is refused: a backend
+/// that leaves the padding or hash to a server default (or to the key's default) would accept a
+/// PSS signature as PKCS#1 v1.5 or the reverse. Refusing to open the key for the sibling
+/// (`KeyMismatch`) is as good as a verification failure.
+pub(crate) async fn algorithm_substitution<F: Fixture>(
+    c: Ctx<F>,
+    alg: SignatureAlgorithm,
+) -> CaseResult {
+    let key = c.key(TestKeyKind::Signing(alg)).await?;
+    let sig = sign(&c, &key, alg, MSG).await.ctx("sign")?;
+    for wrong in substitutes(alg) {
+        let relabeled =
+            Signature::from_parts(wrong, sig.key_version().cloned(), sig.as_bytes().to_vec());
+        let d = Digest::compute(wrong.hash().expect("digest algorithm"), MSG);
+        let r = match c.digest_verifier(&key.uri, wrong) {
+            Ok(v) => v.verify_digest(&d, &relabeled).await,
+            Err(e) => Err(e),
+        };
+        match r {
+            Ok(()) => {
+                return Err(format!(
+                    "a {alg} signature verified as {wrong} on the same key"
+                ));
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::VerificationFailed | ErrorKind::KeyMismatch
+                ) => {}
+            Err(e)
+                if e.kind() == ErrorKind::Unsupported && !c.caps.has(Feature::Signing(wrong)) => {}
+            Err(e) => {
+                return Err(format!(
+                    "{alg} signature verified as {wrong}: expected verification_failed or \
+                     key_mismatch, got {}: {e}",
+                    e.kind()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An algorithm of a different key family than `alg` (another curve for P-384 and P-521, ECDSA
 /// P-256 for everything else).
 fn other_alg(alg: SignatureAlgorithm) -> SignatureAlgorithm {

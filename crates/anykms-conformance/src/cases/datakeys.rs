@@ -113,6 +113,15 @@ pub(crate) async fn source_roundtrip<F: Fixture>(c: Ctx<F>) -> CaseResult {
         .await
         .ctx("unwrap the data key")?;
     ensure!(*back == *dk.plaintext(), "unwrapped data key differs");
+    // Every call draws a fresh key: a constant or repeating data key passes the checks above.
+    let again = src
+        .generate_data_key(DataKeySpec::Aes256, b"")
+        .await
+        .ctx("generate_data_key again")?;
+    ensure!(
+        *again.plaintext() != *dk.plaintext(),
+        "two data keys hold the same key"
+    );
     ensure!(
         src.supports_describe() == c.caps.has(Feature::Describe),
         "data-key source {src:?} disagrees with the declaration (describe {})",

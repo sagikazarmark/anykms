@@ -66,6 +66,20 @@ repository, workflow run and commit of every version published through Trusted P
    crate, so an API token can no longer publish it, and revoke the personal crates.io token used
    for 0.1.0 and 0.2.0.
 
+### Still open after 0.3.0
+
+0.3.0 was published through Trusted Publishing, but the setup above is not complete. Until these
+are done, a crates.io token on a maintainer's machine can still publish, and nobody has to approve
+a publish:
+
+- [ ] "Trusted Publishing only" is still off on `anykms`, `anykms-core`, `anykms-aws` and
+      `anykms-http` (check every crate: `curl -s https://crates.io/api/v1/crates/<crate>` shows
+      `"trustpub_only":true` once it is on).
+- [ ] Revoke the personal crates.io token used for 0.1.0 and 0.2.0 (crates.io → Account Settings
+      → API Tokens), and remove it from `~/.cargo/credentials.toml` and any `.env`.
+- [ ] Add a required reviewer to the `release` environment (step 1): it has a branch policy but
+      no reviewer, so a dispatched run publishes without an approval.
+
 ## Releasing
 
 1. **Merge everything into `main` and wait for its CI run to pass.** The README links point at

@@ -247,6 +247,32 @@ not only against mocks), the formats the backend defines itself, and the operati
 you owe your users (permissions, quotas, a runbook mapping each error to a cause and an action,
 as the built-in [operator guides](operations.md) do).
 
+Nor does it check, today:
+
+- **What a feature declared not applicable would have covered.** The suite has no mandatory
+  core: any feature can be declared `not_applicable` with free text, and every case gated on it
+  is then ignored, not failed. Declaring `RequestCount` not applicable removes every "rejected
+  before any request" check; leaving `secret_markers()` empty turns off the credential-leak
+  checks without any declaration. A run prints both lists at the end ("not applicable" and "not
+  checked", and `Report::not_applicable` and `Report::unchecked` from `run_async`): read them,
+  and show them in your CI.
+- **A hostile or broken server.** No case sends the backend a forged response: a wrong key name
+  or `kid` echo, a bad CRC, an oversized or truncated body, a signature or tag of the wrong length.
+  Test response validation with a scripted transport of your own.
+- **Transport policy.** TLS verification, redirects, plain HTTP, proxies, and whether a key URI's
+  authority can send credentials to a host of its choosing.
+- **Version pinning and open options.** No case calls `Provider::pin`, `Registry::pin`,
+  `KeyTypeCheck::TrustCaller` or other `OpenOptions`.
+- **Tamper depth.** Ciphertexts are tampered with one flipped byte and a truncation, signatures
+  in their last byte, tags by a prefix: no trailing bytes, off-by-one tag lengths, high-S or
+  non-canonical encodings.
+- **Rendering beyond `Error`.** The `Debug` output of handles, providers and configurations, and
+  log or trace output, are not checked for secrets.
+- **Uniformity beyond the kind.** Only the error kind of authentication failures is compared,
+  not the message or detail, so a padding or tag oracle in messages passes.
+- **The other RSA backend.** Natively the suite verifies RSA with `rsa-aws-lc-rs`; a backend's
+  `rsa-rustcrypto` path is not run by it.
+
 ## Formats the backend defines
 
 A backend that frames ciphertexts (a version prefix, a nonce and tag layout) or wrapped keys

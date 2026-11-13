@@ -67,8 +67,10 @@ jobs:
 
       # `cargo publish --dry-run`, not `cargo package`: it skips `publish = false` crates.
       - name: Bump the version and package every crate
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cargo release version "${{ needs.version.outputs.version }}" --execute --no-confirm
+          cargo release version "$VERSION" --execute --no-confirm
           cargo publish --dry-run --workspace --locked --allow-dirty
 
   commit:
@@ -99,11 +101,14 @@ jobs:
 
       - name: Bump and commit the version
         id: commit
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          cargo release version "${{ needs.version.outputs.version }}" --execute --no-confirm
+          cargo release version "$VERSION" --execute --no-confirm
 
           if ! git diff --quiet; then
-            git commit -am "chore: release ${{ needs.version.outputs.tag }}"
+            git commit -am "chore: release $TAG"
             git push origin HEAD:main
           fi
 
@@ -136,11 +141,12 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           args=()
 
           for crate in $(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.publish != []) | .name'); do
-            cargo info --registry crates-io "$crate@${{ needs.version.outputs.version }}" >/dev/null 2>&1 || args+=(-p "$crate")
+            cargo info --registry crates-io "$crate@$VERSION" >/dev/null 2>&1 || args+=(-p "$crate")
           done
 
           [[ ${#args[@]} -eq 0 ]] || cargo publish --locked --no-verify "${args[@]}"
@@ -160,9 +166,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PREVIOUS: ${{ needs.version.outputs.previous }}
+          TAG: ${{ needs.version.outputs.tag }}
+          TARGET: ${{ needs.commit.outputs.sha }}
+          LATEST: ${{ needs.version.outputs.make-latest }}
         run: |
-          gh release create "${{ needs.version.outputs.tag }}" \
-            --target "${{ needs.commit.outputs.sha }}" \
+          gh release create "$TAG" \
+            --target "$TARGET" \
             --generate-notes \
-            --latest="${{ needs.version.outputs.make-latest }}" \
+            --latest="$LATEST" \
             ${PREVIOUS:+--notes-start-tag "$PREVIOUS"}

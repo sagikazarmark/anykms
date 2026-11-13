@@ -286,6 +286,8 @@ features:
 # Check advisories, bans, licenses and sources.
 deny:
     cargo deny check
+    # The fuzz crate has a lockfile of its own, outside the workspace: its advisories too.
+    cargo deny --manifest-path fuzz/Cargo.toml check advisories
 
 # The fuzz crate is outside the workspace, so nothing else compiles it. A plain check (no
 # sanitizers) needs no nightly; it also covers the seed generator example.
@@ -308,4 +310,4 @@ fuzz target seconds="600":
     if [ -d "seeds/{{ target }}" ]; then corpora+=("$PWD/seeds/{{ target }}"); fi
     flags=(-max_total_time={{ seconds }} -rss_limit_mb=2048)
     if [ -f "dicts/{{ target }}.dict" ]; then flags+=("-dict=$PWD/dicts/{{ target }}.dict"); fi
-    cargo fuzz run -O "{{ target }}" "${corpora[@]}" -- "${flags[@]}"
+    cargo fuzz run -O -a "{{ target }}" "${corpora[@]}" -- "${flags[@]}"

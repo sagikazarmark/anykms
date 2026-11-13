@@ -279,6 +279,22 @@ impl FixtureCaps {
     pub fn has(&self, f: Feature) -> bool {
         self.support(f) == Support::Yes
     }
+
+    /// Every feature declared not applicable, with its reason, sorted by name: the coverage the
+    /// fixture removed by declaration, which a run reports so that a reader sees what was not
+    /// checked.
+    pub fn not_applicable_features(&self) -> Vec<(Feature, String)> {
+        let mut v: Vec<(Feature, String)> = self
+            .features
+            .iter()
+            .filter_map(|(f, s)| match s {
+                Support::NotApplicable(r) => Some((*f, r.clone())),
+                _ => None,
+            })
+            .collect();
+        v.sort_by_key(|(f, _)| format!("{f:?}"));
+        v
+    }
 }
 
 /// The kind of key a case needs.

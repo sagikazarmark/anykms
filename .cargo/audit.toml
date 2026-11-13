@@ -2,4 +2,10 @@
 [advisories]
 # Marvin attack (RSA private-key timing): rsa is used for public-key verification only. See the
 # reason in deny.toml.
-ignore = ["RUSTSEC-2023-0071"]
+ignore = [
+  "RUSTSEC-2023-0071",
+  # crypto-bigint 0.5.5, only via the dev-dependency jsonwebtoken (see deny.toml).
+  "RUSTSEC-2026-0387",
+  # pin-utils, unmaintained notice only, via anykms-aws `sdk-credentials` (see deny.toml).
+  "RUSTSEC-2026-0441",
+]

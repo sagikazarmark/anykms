@@ -34,6 +34,14 @@ caused), and opening a `hashivault://` key then fails with that reason. Only the
 repository are registered this way; a third-party backend ([Writing a backend](backend-guide.md))
 is added with `.provider(..)` before `build()`.
 
+Cargo features unify across the dependency graph, so another crate can compile a cloud backend
+into an application that never meant to use one, and a cloud default provider accepts a key in any
+account, project or vault unless an `ANYKMS_*_ALLOWED_*` variable restricts it. An application that
+takes key URIs from anywhere it does not fully trust names its backends with
+`.only(&["transit"])?` (or drops one with `.without("aws")?`); opening a key of a removed backend
+then fails with `Configuration` before any I/O, and `skipped()` lists it with
+`SkipCause::Excluded`.
+
 Code that wants to report the providers it could not register reads `skipped()` before
 building:
 
