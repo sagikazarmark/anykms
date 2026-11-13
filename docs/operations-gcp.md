@@ -40,7 +40,7 @@ Grant roles **on the key or the key ring, never the project**.
 | RSA KEKs | `roles/cloudkms.publicKeyViewer` (wrap is local, with the public key; unwrap's key-type check reads it too) plus `roles/cloudkms.cryptoKeyDecrypter` or `cryptoKeyEncrypterDecrypter` (unwrap), plus `cloudkms.cryptoKeyVersions.get` (see below). IAM limits readers only: **every holder of the public key** can write envelopes that decrypt as genuine, so they give confidentiality only and the AAD does not authenticate the writer. Use an `ENCRYPT_DECRYPT` KEK where writers must be limited, and do not keep an RSA KEK in an `EnvelopeKeyring` with a symmetric primary |
 | Signing | `roles/cloudkms.signerVerifier`. It includes `viewPublicKey`, which the key-type check and local verification need; `roles/cloudkms.signer` alone works only with `KeyTypeCheck::TrustCaller` and no verification. Plus `cloudkms.cryptoKeyVersions.get` (see below) |
 | MAC | `roles/cloudkms.signerVerifier` (`useToSign` for `macSign`, `useToVerify` for `macVerify`) |
-| Verify-only services, JWKS publishers | `roles/cloudkms.publicKeyViewer`, plus `cloudkms.cryptoKeyVersions.get` (see below) |
+| Verify-only services, JWKS publishers | `roles/cloudkms.publicKeyViewer`, plus `cloudkms.cryptoKeyVersions.get` (see below) and `cloudkms.cryptoKeyVersions.list` (the latest-version read that bounds forged versions, see [Disabling and destroying versions](#disabling-and-destroying-versions); verification works without it, but forged versions above the latest then each cost a lookup) |
 | Every public-key read (signing's key-type check, local verification, `PublicKeys`, RSA wrap and its key-type check) | `cloudkms.cryptoKeyVersions.get`, through `roles/cloudkms.viewer` on the key or a custom role. Before each `getPublicKey` the backend checks that the version is `ENABLED`, so the public key of a disabled version is never handed out (Cloud KMS may serve it). Without the permission public keys **fail closed** with `PermissionDenied`. Whether `publicKeyViewer` grants it is **not verified** (probe T1 does not check it), so grant it explicitly |
 | `describe()` and the AEAD/MAC key-type check | `cloudkms.cryptoKeys.get`, `cloudkms.cryptoKeyVersions.get` and `cloudkms.cryptoKeyVersions.list`, through `roles/cloudkms.viewer` on the key or a custom role (the operational roles carry no metadata permissions) |
 | Never for applications | `roles/cloudkms.admin`, `cloudkms.cryptoKeyVersions.destroy`, `roles/cloudkms.cryptoOperator` (too broad) |
@@ -216,11 +216,17 @@ A signature or `public_key_version` naming a version that does not exist (`Unkno
 verifying with it is `VerificationFailed`) or that is disabled or destroyed
 (`KeyVersionUnusable`) is remembered for the same TTL (up to 64 versions), and none of them
 make the handle re-run its key-type check. A version found missing also makes the provider read
-the key's latest version (one `cryptoKeyVersions.list`, at most once per key per TTL); until
-that read expires, every version above it is refused without a request. Forged versions above
-the latest therefore cost one lookup and one list per key per TTL in all, however many distinct
-versions arrive; forged versions below the latest (which exist, so only disabled or destroyed
-ones fail) cost one lookup each per TTL, of which only 64 are remembered. A version created
+the key's latest version, started at most once per key per TTL: a full `cryptoKeyVersions.list`
+(one request per 1,000 versions, at most 100). Once that read has succeeded, and until it
+expires, every version above the latest is refused without a request. Forged versions above the
+latest therefore cost, per key per TTL, one lookup each for those that arrive before the read
+completes (concurrent misses each send theirs), plus the list, however many distinct versions
+arrive after it. The read needs `cloudkms.cryptoKeyVersions.list`, which a role granted only for
+verifying may lack: grant it to the identity that verifies. Without it, or when the list fails
+for another reason, no version is refused this way until the read is tried again a TTL later,
+and each forged version costs a lookup, of which only 64 are remembered. Forged versions below
+the latest (which exist, so only disabled or destroyed ones fail) cost one lookup each per TTL,
+of which only 64 are remembered. A version created
 after the read is refused (`UnknownKeyVersion`) until the read expires, at most `public_key_ttl`
 (+10 %) after the rotation. A pending version (with its retry hint) is not remembered.
 `public_key_ttl(Duration::ZERO)` disables all three caches. Destroying a version loses its data after
