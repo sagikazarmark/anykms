@@ -18,6 +18,8 @@
 # `just live <package>` builds and runs in one go, for local use.
 set -euo pipefail
 
+# Called as `$(targets_for ...)`, its `exit` leaves only the subshell, and `set -e` does not see a
+# failed substitution in a `for` list: the package is checked first, by `check_package`.
 targets_for() {
   case "$1" in
     aws) echo "conformance_live" ;;
@@ -25,6 +27,11 @@ targets_for() {
     azure) echo "live conformance_azure" ;;
     *) echo "unknown package: $1" >&2; exit 2 ;;
   esac
+}
+
+# Exits the script for an unknown package (see `targets_for`).
+check_package() {
+  targets_for "$1" > /dev/null
 }
 
 # A test binary is named `<target>-<16 hex digit hash>`.
@@ -66,6 +73,7 @@ case "${1:-}" in
   build)
     package="$2"
     dir="$3"
+    check_package "$package"
     flags=()
     for t in $(targets_for "$package"); do flags+=(--test "$t"); done
     if [ -e "$dir" ]; then
@@ -94,6 +102,7 @@ case "${1:-}" in
   run)
     package="$2"
     dir="$3"
+    check_package "$package"
     shift 3
     check_dir "$package" "$dir"
     status=0
