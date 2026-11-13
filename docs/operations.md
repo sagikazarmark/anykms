@@ -185,7 +185,9 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
   version are settings of the HTTP transport, not of `ServerConfig`: build a
   `ReqwestTransport` (`anykms_transit::anykms_http::ReqwestTransport::builder()`) and pass it to
   `ServerConfig::http_transport`, or bring any `HttpTransport`. One transport may serve several
-  servers and providers. Without one, a default `ReqwestTransport` (system roots) is built.
+  servers and providers. Without one, a default `ReqwestTransport` (system roots) is built. The
+  system roots are the platform store, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is set: then only
+  the files they name are trusted. Set `ca_pem` (or `VAULT_CACERT`) to pin trust in code.
 - `ReqwestTransportBuilder::ca_pem`, and `VAULT_CACERT` / `VAULT_CAPATH` through `EnvConfig`
   (which builds the transport from them), **replace** the system roots. `VAULT_CAPATH` is a
   directory of PEM files (symlinks followed, subdirectories skipped); every file must hold a
@@ -340,7 +342,7 @@ settings on `RetryPolicy`.
 | `pool_idle_timeout` | 50 s | below common load-balancer idle timeouts |
 | `tcp_keepalive` | 30 s | |
 | `http2` | off | HTTP/2 multiplexes onto one node behind a load balancer; it is negotiated over TLS only (needs the `http2` feature), so plain-HTTP loopback servers always use HTTP/1.1 |
-| `proxy` | none | environment proxy variables are ignored; link-local and loopback hosts are never proxied |
+| `proxy` | none | `http://` or `https://` with a host (another scheme fails the build); carries HTTPS only (a `CONNECT` tunnel): plain-HTTP requests, such as the cloud metadata and credential endpoints, always connect directly, and link-local and loopback hosts are never proxied; environment proxy variables are ignored |
 | `RetryPolicy` attempts / backoff | 6 / 300 ms base, 5 s cap, equal jitter | the 5 retries wait 4.65–9.3 s in total, which spans a leader step-down (see "Failover" below) |
 | `RetryPolicy` deadline | 15 s | across attempts (see `RetryPolicy`) |
 

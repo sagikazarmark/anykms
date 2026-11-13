@@ -8,14 +8,21 @@ use std::hash::Hash;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use anykms_core::SleepFn;
 use tokio::sync::watch;
 
 /// `ttl` ±10 %, drawn uniformly per call, so entries cached together (at start-up, after a
 /// rotation) do not all expire, and refetch, at once. If the OS RNG fails, `ttl` itself.
+/// Saturates at `Duration::MAX` instead of panicking for a huge `ttl` ("cache forever"); adding
+/// the result to an `Instant` can still overflow, so callers use `Instant::checked_add`.
 pub fn jittered_ttl(ttl: Duration) -> Duration {
     let mut b = [0u8; 2];
     match getrandom::fill(&mut b) {
-        Ok(()) => ttl.mul_f64(0.9 + 0.2 * f64::from(u16::from_le_bytes(b)) / 65536.0),
+        Ok(()) => {
+            let factor = 0.9 + 0.2 * f64::from(u16::from_le_bytes(b)) / 65536.0;
+            // What `Duration::mul_f64` computes, without its overflow panic.
+            Duration::try_from_secs_f64(ttl.as_secs_f64() * factor).unwrap_or(Duration::MAX)
+        }
         Err(_) => ttl,
     }
 }
@@ -30,12 +37,34 @@ pub fn jittered_ttl(ttl: Duration) -> Duration {
 /// finishes, its followers wake up and one of them leads a new flight with its own fetch, so a
 /// cancelled caller never strands the others.
 ///
+/// A leader that is alive but **not being polled** is another matter: nothing is spawned, so its
+/// fetch progresses only while its caller polls it. A caller that leads a flight inside one item
+/// of a `buffer_unordered` stream and then awaits, from the loop body, an operation that follows
+/// the same flight, or that keeps a leading future pinned in an idle `select!` branch, strands
+/// its followers: the leader's own HTTP timeout cannot fire while it is not polled. With
+/// [`with_max_wait`](Self::with_max_wait), a follower that has waited that long runs its own
+/// fetch instead (not shared with anyone, and not ending the flight); without it, followers wait
+/// for as long as the leader lives.
+///
 /// [`run`](Self::run) is the whole pattern; [`join`](Self::join), [`try_lead`](Self::try_lead)
 /// and [`follow`](Self::follow) are its parts, for a cache that decides under its own lock
 /// whether to wait (the credential cache refreshes ahead of expiry without making the holders
 /// of a valid credential wait).
 pub struct SingleFlight<K, V> {
     flights: Mutex<Flights<K, V>>,
+    max_wait: Option<(Duration, SleepFn)>,
+}
+
+/// What a [`Follower::wait_bounded`] ended with.
+#[derive(Debug)]
+pub enum Waited<V> {
+    /// The leader's result.
+    Done(V),
+    /// The leader was cancelled before it finished: [`join`](SingleFlight::join) again.
+    Cancelled,
+    /// The [`with_max_wait`](SingleFlight::with_max_wait) bound passed first: fetch without the
+    /// flight.
+    TimedOut,
 }
 
 struct Flights<K, V> {
@@ -63,6 +92,23 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
                 running: HashMap::new(),
                 next_id: 0,
             }),
+            max_wait: None,
+        }
+    }
+
+    /// Bounds how long a follower waits for the leader (see the type's docs): after `max`
+    /// (measured with `sleep`, e.g. `tokio::time::sleep`), [`run`](Self::run) runs the
+    /// follower's own fetch. Pick a bound above the fetch's own timeout (a request timeout), so
+    /// a leader that is polled always finishes first.
+    pub fn with_max_wait(mut self, max: Duration, sleep: SleepFn) -> Self {
+        self.max_wait = Some((max, sleep));
+        self
+    }
+
+    fn follower(&self, rx: &watch::Receiver<Option<V>>) -> Follower<V> {
+        Follower {
+            rx: rx.clone(),
+            max_wait: self.max_wait.clone(),
         }
     }
 
@@ -84,7 +130,8 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     }
 
     /// The result of `fetch`, or of the flight already running for `key`. When that flight's
-    /// leader is cancelled, `fetch` runs instead (once).
+    /// leader is cancelled, `fetch` runs instead (once). It also runs (without the flight) when the
+    /// [`with_max_wait`](Self::with_max_wait) bound passes first.
     pub async fn run<F, Fut>(&self, key: &K, fetch: F) -> V
     where
         F: FnOnce() -> Fut,
@@ -97,11 +144,12 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
                     leader.finish(v.clone());
                     return v;
                 }
-                Flight::Follower(f) => {
-                    if let Some(v) = f.wait().await {
-                        return v;
-                    }
-                }
+                Flight::Follower(f) => match f.wait_bounded().await {
+                    Waited::Done(v) => return v,
+                    Waited::Cancelled => {}
+                    // The leader is alive but not making progress: fetch without it.
+                    Waited::TimedOut => return fetch().await,
+                },
             }
         }
     }
@@ -110,7 +158,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     pub fn join(&self, key: &K) -> Flight<'_, K, V> {
         let mut flights = self.lock();
         if let Some((_, rx)) = flights.running.get(key) {
-            return Flight::Follower(Follower { rx: rx.clone() });
+            return Flight::Follower(self.follower(rx));
         }
         Flight::Leader(self.lead(&mut flights, key))
     }
@@ -119,7 +167,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     pub fn follow(&self, key: &K) -> Option<Follower<V>> {
         let flights = self.lock();
         let (_, rx) = flights.running.get(key)?;
-        Some(Follower { rx: rx.clone() })
+        Some(self.follower(rx))
     }
 
     /// Leads a new flight for `key`, or `None` while one is running.
@@ -194,6 +242,7 @@ impl<K: Eq + Hash, V> Drop for Leader<'_, K, V> {
 /// A caller waiting for another caller's fetch.
 pub struct Follower<V> {
     rx: watch::Receiver<Option<V>>,
+    max_wait: Option<(Duration, SleepFn)>,
 }
 
 impl<V> fmt::Debug for Follower<V> {
@@ -208,6 +257,26 @@ impl<V: Clone> Follower<V> {
     pub async fn wait(mut self) -> Option<V> {
         let r = self.rx.wait_for(Option::is_some).await.ok()?;
         r.clone()
+    }
+
+    /// [`wait`](Self::wait), bounded by the group's [`with_max_wait`](SingleFlight::with_max_wait)
+    /// (unbounded without one).
+    pub async fn wait_bounded(mut self) -> Waited<V> {
+        let Some((max, sleep)) = self.max_wait.take() else {
+            return self.wait().await.map_or(Waited::Cancelled, Waited::Done);
+        };
+        let mut wait = std::pin::pin!(self.wait());
+        let mut timer = sleep(max);
+        std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(v) = wait.as_mut().poll(cx) {
+                return std::task::Poll::Ready(v.map_or(Waited::Cancelled, Waited::Done));
+            }
+            if timer.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(Waited::TimedOut);
+            }
+            std::task::Poll::Pending
+        })
+        .await
     }
 }
 
@@ -329,4 +398,57 @@ mod tests {
         drop(leader);
         assert!(group.try_lead(&"k").is_some());
     }
+}
+
+/// Regression tests for the security review (L28, L29).
+#[cfg(test)]
+mod review_tests {
+    use std::sync::Arc;
+    use std::task::Poll;
+
+    use super::*;
+
+    /// L28: "cache forever" (`Duration::MAX`) must not panic.
+    #[test]
+    fn review_l28_jitter_saturates_for_huge_ttls() {
+        for _ in 0..200 {
+            let t = jittered_ttl(Duration::MAX);
+            assert!(t >= Duration::MAX.mul_f64(0.9), "{t:?}");
+        }
+    }
+
+    type Group = SingleFlight<&'static str, Result<usize, String>>;
+
+    /// L29: a leader that is alive but never polled again (one `buffer_unordered` item awaited
+    /// from the loop body, a pinned `select!` branch) must not hang its followers forever: after
+    /// the bound, a follower fetches for itself.
+    #[tokio::test(start_paused = true)]
+    async fn review_l29_a_follower_does_not_wait_forever_on_an_unpolled_leader() {
+        let group: Arc<Group> = Arc::new(review_group());
+        let mut leader = Box::pin(group.run(&"k", || async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(1)
+        }));
+        // Poll the leader once (it starts its fetch and leads), then never again.
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let r = tokio::time::timeout(
+            Duration::from_secs(120),
+            group.run(&"k", || async { Ok(2) }),
+        )
+        .await;
+        assert_eq!(r, Ok(Ok(2)), "the follower hung on the unpolled leader");
+        drop(leader);
+    }
+}
+
+#[cfg(test)]
+fn review_group<K: Eq + Hash + Clone, V: Clone>() -> SingleFlight<K, V> {
+    SingleFlight::new().with_max_wait(
+        Duration::from_secs(30),
+        std::sync::Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+    )
 }

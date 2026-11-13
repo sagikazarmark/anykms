@@ -155,8 +155,8 @@ check Google's list of regional endpoints. Every request (Cloud KMS, the token e
 metadata server) goes through one HTTP transport (`GcpProviderBuilder::http_transport`, or a
 default `ReqwestTransport`), which owns TLS trust, the crypto provider, proxying and timeouts.
 Proxy variables (`HTTPS_PROXY`) are ignored unless a proxy is configured on the transport
-(`ReqwestTransportBuilder::proxy`); the metadata server, a link-local host, is always reached
-directly and with a 3 s per-request timeout. Redirects are never followed.
+(`ReqwestTransportBuilder::proxy`); the proxy carries HTTPS only, so the metadata server (plain
+HTTP) is always reached directly, with a 3 s per-request timeout. Redirects are never followed.
 
 ## Limits and quotas
 

@@ -34,7 +34,8 @@ impl SelfSignedJwt {
     ) -> Result<Self> {
         let der = anykms_http::pem::private_key_from_pem(crate::BACKEND, pem.0.as_bytes())
             .map_err(|_| config_err("cannot parse the service-account private key"))?;
-        let rustls_pki_types::PrivateKeyDer::Pkcs8(pkcs8) = der else {
+        // `der` is zeroizing: wiped on drop on every path, the PKCS#1 refusal included.
+        let rustls_pki_types::PrivateKeyDer::Pkcs8(pkcs8) = &*der else {
             return Err(config_err(
                 "the service-account private key must be PKCS#8 (BEGIN PRIVATE KEY)",
             ));

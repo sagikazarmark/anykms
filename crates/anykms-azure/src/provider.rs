@@ -201,8 +201,9 @@ impl AzureProviderBuilder {
     /// feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
     /// `ReqwestTransport` is built; without the `reqwest` feature, building fails with
     /// `Configuration`. The built-in credentials fetch their tokens through the same transport
-    /// ([`AzureCredential::bind_transport`]); IMDS requests carry a per-request timeout and are
-    /// never proxied by the built-in transport.
+    /// ([`AzureCredential::bind_transport`]); IMDS and other plain-HTTP identity endpoints carry a
+    /// per-request timeout and are never proxied by the built-in transport (its proxy carries
+    /// HTTPS only).
     pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
         self.http_transport = Some(Arc::new(transport));
         self

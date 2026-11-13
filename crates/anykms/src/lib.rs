@@ -223,8 +223,10 @@ pub fn with_default_providers() -> Result<DefaultProviders> {
 /// Like [`with_default_providers`], reading every variable from `lookup` instead of the process
 /// environment (`None` is unset). Each backend gets the lookup through its `from_env_with`, so
 /// variables a backend reads later (transit's `*_TOKEN`, GCP's Application Default Credentials
-/// variables) come from it too, and nothing falls back to the process environment. Files the
-/// variables name are still read from the file system.
+/// variables) come from it too. Files the variables name are still read from the file system.
+/// One exception: the default `ReqwestTransport` loads the system roots, and its TLS library
+/// reads `SSL_CERT_FILE` / `SSL_CERT_DIR` from the process environment (when set, only the files
+/// they name are trusted). Pass a backend a transport built with `ca_pem` to pin trust instead.
 ///
 /// ```no_run
 /// # fn demo() -> anykms::Result<()> {

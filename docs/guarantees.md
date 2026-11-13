@@ -22,9 +22,12 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   provider, proxying, timeouts and the HTTP version are properties of the transport
   (`ReqwestTransportBuilder`), not of the backends; the guarantees below hold for the built-in
   one, and a third-party transport is responsible for its own. `ReqwestTransport`: rustls (see
-  [Cargo features](features.md#cargo-features)); `ca_pem` replaces the system roots; there is no
-  way to skip verification; redirects are never followed; a configured proxy is bypassed for
-  link-local and loopback hosts (the cloud metadata servers). The backends keep the host policy
+  [Cargo features](features.md#cargo-features)); the system roots are the platform store, or only
+  the files `SSL_CERT_FILE` / `SSL_CERT_DIR` name when either is set (so whoever controls the
+  process environment controls trust: pin it with `ca_pem`); `ca_pem` replaces the system roots;
+  there is no way to skip verification; redirects are never followed; a configured proxy carries
+  only HTTPS, as an end-to-end `CONNECT` tunnel, and is bypassed for link-local and loopback
+  hosts: plain-HTTP requests (the cloud metadata and credential endpoints) never go through it. The backends keep the host policy
   for key endpoints: plain HTTP only for literal loopback IPs, and only when opted in. The one
   plain-HTTP exception needs no opt-in: the built-in credential sources talk to the cloud
   metadata servers over `http://` on their link-local addresses (`169.254.169.254`,

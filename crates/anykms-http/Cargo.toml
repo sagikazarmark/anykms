@@ -67,6 +67,10 @@ tracing = { workspace = true, optional = true }
 # so paused test time moves it); `ReqwestTransport`'s runtime check adds `rt` (`Handle::try_current`).
 tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+# `O_NONBLOCK` for `zbuf::read_file` (a FIFO must not block the opening thread).
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # `ServiceBuilder` layers for the `TowerTransport` tests.

@@ -59,11 +59,29 @@ pub fn json_body<T: serde::Serialize + ?Sized>(
 }
 
 /// Reads a small secret file (such as a TLS private key or a credentials file) into a zeroizing
-/// buffer, failing with `InvalidData` if it is larger than `limit`.
+/// buffer, failing with `InvalidData` if it is larger than `limit`, and with `InvalidInput`
+/// ("not a regular file") for a FIFO, device, socket or directory: those could block the
+/// (async runtime) thread or never end. On Unix the file is opened non-blocking, so opening a
+/// FIFO without a writer returns at once (reads of a regular file ignore the flag); the type is
+/// checked on the opened file, not the path, so a swap in between cannot slip past it.
 pub fn read_file(path: &std::path::Path, limit: usize) -> io::Result<Zeroizing<Vec<u8>>> {
     use std::io::Read as _;
-    let mut file = std::fs::File::open(path)?;
-    let hint = file.metadata().map_or(0, |m| m.len());
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = opts.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let hint = meta.len();
     let mut buf = Zeroizing::new(Vec::with_capacity(
         usize::try_from(hint).unwrap_or(limit).min(limit),
     ));
@@ -154,5 +172,54 @@ mod tests {
         let e = read_file(&p, 9).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Regression tests for the security review (L31): config-named files must not block a runtime
+/// worker or be read without the regular-file check `FileToken` has.
+#[cfg(all(test, unix))]
+mod review_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn review_l31_read_file_refuses_a_fifo_without_blocking() {
+        let dir = std::env::temp_dir().join(format!("anykms-http-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("f");
+        let _ = std::fs::remove_file(&fifo);
+        let ok = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let (tx, rx) = mpsc::channel();
+        let p = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_file(&p, 64).map(|_| ()));
+        });
+        let r = rx.recv_timeout(Duration::from_secs(2));
+        if r.is_err() {
+            // Unblock the reader thread (open for writing), then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            std::fs::remove_dir_all(&dir).unwrap();
+            panic!("read_file blocked on a FIFO");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        let e = r.unwrap().unwrap_err();
+        assert_eq!(
+            token_file_error_kind(&e),
+            anykms_core::ErrorKind::Configuration,
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("not a regular file"), "{e}");
+    }
+
+    #[test]
+    fn review_l31_read_file_refuses_devices() {
+        let e = read_file(std::path::Path::new("/dev/zero"), 64).unwrap_err();
+        assert!(e.to_string().contains("not a regular file"), "{e}");
     }
 }

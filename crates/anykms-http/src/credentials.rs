@@ -6,7 +6,9 @@
 //! - **Lazy and single-flight.** Nothing is fetched before the first [`get`], and one fetch runs
 //!   at a time ([`SingleFlight`]). Callers that find no usable credential while it runs wait for
 //!   it and all get its result: the credential, **or the error**. If the fetching caller is
-//!   cancelled, one of the waiting callers fetches instead.
+//!   cancelled, one of the waiting callers fetches instead. If it is alive but not being
+//!   polled, they wait for as long as it lives, unless [`max_wait`](CredentialCache::max_wait)
+//!   bounds the wait (then a waiting caller fetches for itself).
 //! - **Refresh ahead, without waiting.** A credential is refreshed `refresh_ahead` before it
 //!   expires (at half its lifetime for short-lived ones), while it is still usable. The first
 //!   caller to find it due fetches; every other caller keeps getting the current credential
@@ -40,7 +42,7 @@ use std::time::{Duration, SystemTime};
 use anykms_core::time::{Instant, system_now};
 use anykms_core::{Error, Result};
 
-use crate::cache::{Flight, SingleFlight};
+use crate::cache::{Flight, SingleFlight, Waited};
 
 /// Now, on tokio's clock, which paused test time moves; on `wasm32-unknown-unknown` (where
 /// tokio's clock, like `std`'s, panics) the `anykms_core::time` clock: the JS host's with the
@@ -246,6 +248,16 @@ impl<T: Clone + Send> CredentialCache<T> {
         self
     }
 
+    /// Bounds how long a caller waits for another caller's fetch: after `max` (measured with
+    /// `sleep`, e.g. `tokio::time::sleep`) it fetches for itself. Without it, a fetching caller
+    /// that is alive but not being polled (see [`SingleFlight`]) strands every caller that needs a
+    /// credential. Pick a bound above the fetch's own timeout.
+    pub fn max_wait(mut self, max: Duration, sleep: anykms_core::SleepFn) -> Self {
+        let flight = std::mem::take(&mut self.flight);
+        self.flight = flight.with_max_wait(max, sleep);
+        self
+    }
+
     /// The least time between two refreshes forced by [`invalidate`](Self::invalidate), so a
     /// server that rejects every credential does not turn each request into a fetch.
     pub fn forced_refresh_interval(mut self, d: Duration) -> Self {
@@ -323,11 +335,12 @@ impl<T: Clone + Send> CredentialCache<T> {
                     return result;
                 }
                 // The fetching caller was cancelled: decide again (and maybe fetch).
-                Flight::Follower(f) => {
-                    if let Some(result) = f.wait().await {
-                        return result;
-                    }
-                }
+                Flight::Follower(f) => match f.wait_bounded().await {
+                    Waited::Done(result) => return result,
+                    Waited::Cancelled => {}
+                    // The fetching caller is alive but not being polled: fetch without it.
+                    Waited::TimedOut => return self.settle(fetch().await),
+                },
             }
         }
     }
@@ -744,5 +757,45 @@ mod tests {
                 .unwrap()
                 <= Instant::now()
         );
+    }
+}
+
+/// Regression test for the security review (L29, credential path).
+#[cfg(test)]
+mod review_tests {
+    use std::task::Poll;
+
+    use super::*;
+
+    /// A credential fetch whose caller is alive but never polled again must not hang every other
+    /// caller that needs a credential: after the bound, a waiter fetches for itself.
+    #[tokio::test(start_paused = true)]
+    async fn review_l29_a_waiter_does_not_wait_forever_on_an_unpolled_fetch() {
+        let cache: CredentialCache<String> = review_cache();
+        let mut leader = Box::pin(cache.get(|| async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(Expiring::never_expires("slow".to_owned()))
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let r = tokio::time::timeout(
+            Duration::from_secs(120),
+            cache.get(|| async { Ok(Expiring::never_expires("own".to_owned())) }),
+        )
+        .await
+        .expect("the waiter hung on the unpolled fetch")
+        .unwrap();
+        assert_eq!(r.value(), "own");
+        drop(leader);
+    }
+
+    fn review_cache() -> CredentialCache<String> {
+        CredentialCache::new().max_wait(
+            Duration::from_secs(30),
+            std::sync::Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        )
     }
 }
