@@ -139,7 +139,7 @@ let client = env
 let service = ServiceBuilder::new()
     .concurrency_limit(4)
     .service(client.into_service());
-// Above the client's timeouts (twice connect plus request: 24 s with the defaults).
+// How long a stalled request may sit unpolled before a follower sends its own (24 s, as the client).
 let transport = TowerTransport::new(service)
     .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
 let server = env.load()?.http_transport(transport);

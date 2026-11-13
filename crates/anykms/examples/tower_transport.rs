@@ -62,11 +62,12 @@ async fn main() -> anykms::Result<()> {
                 .build()?
                 .into_service(),
         );
-    // `TowerTransport` cannot see the client's timeouts through the stack, so it does not bound how
-    // long a backend's single-flight followers wait for another caller's credential or metadata
-    // request; the built-in transport does (twice its connect plus request timeout: 24 s with the
-    // defaults). Without a bound, a caller that stops polling its request mid-flight leaves later
-    // callers waiting for as long as that future lives. Set one above the request timeout.
+    // `TowerTransport` has no timer of its own, so it does not bound how long a backend's
+    // single-flight followers wait on another caller's credential or metadata request that has
+    // stalled; the built-in transport does (24 s with the defaults). Without a bound, a caller that
+    // stops polling its request mid-flight leaves later callers waiting for as long as that future
+    // lives. With one, a follower sends its own request once the stalled one has been woken and left
+    // unpolled that long; a request that is being polled is waited for however long it takes.
     let transport = TowerTransport::new(service)
         .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
     let server = env.load()?.http_transport(transport);
