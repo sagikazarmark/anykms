@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::hash::Hash;
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use anykms_core::SleepFn;
@@ -45,14 +45,19 @@ pub fn jittered_ttl(ttl: Duration) -> Duration {
 /// the same flight, or that keeps a leading future pinned in an idle `select!` branch, strands
 /// its followers: the leader's own HTTP timeout cannot fire while it is not polled. With
 /// [`with_max_wait`](Self::with_max_wait), or the transport's bound through
-/// [`bound_by`](Self::bound_by) (what the built-in backends do), a follower that has waited that
-/// long runs its own fetch instead (not shared with anyone, and not ending the flight); without
-/// one, followers wait for as long as the leader lives.
+/// [`bound_by`](Self::bound_by) (what the built-in backends do), the first follower that has
+/// waited that long [takes the flight over](Self::take_over): it leads a replacement flight with
+/// its own fetch, and the stalled flight's other followers move to it (one replacement fetch,
+/// not one per follower). The stalled leader is superseded: if it resumes, it still gets its own
+/// fetch's result, but publishes nothing and does not end the replacement flight. What its fetch
+/// stores is up to the fetch: a cache whose entries must not go back in time checks
+/// [`Leader::id`] (later flights have greater ids) before it commits, as the credential cache
+/// does. Without a bound, followers wait for as long as the leader lives.
 ///
-/// [`run`](Self::run) is the whole pattern; [`join`](Self::join), [`try_lead`](Self::try_lead)
-/// and [`follow`](Self::follow) are its parts, for a cache that decides under its own lock
-/// whether to wait (the credential cache refreshes ahead of expiry without making the holders
-/// of a valid credential wait).
+/// [`run`](Self::run) is the whole pattern; [`join`](Self::join), [`try_lead`](Self::try_lead),
+/// [`follow`](Self::follow) and [`take_over`](Self::take_over) are its parts, for a cache that
+/// decides under its own lock whether to wait (the credential cache refreshes ahead of expiry
+/// without making the holders of a valid credential wait).
 pub struct SingleFlight<K, V> {
     flights: Mutex<Flights<K, V>>,
     /// Set once, by [`with_max_wait`](Self::with_max_wait) or [`bound_by`](Self::bound_by).
@@ -64,15 +69,36 @@ pub struct SingleFlight<K, V> {
 pub enum Waited<V> {
     /// The leader's result.
     Done(V),
-    /// The leader was cancelled before it finished: [`join`](SingleFlight::join) again.
+    /// The leader was cancelled before it finished, or another follower took the flight over:
+    /// [`join`](SingleFlight::join) again.
     Cancelled,
-    /// The [`with_max_wait`](SingleFlight::with_max_wait) bound passed first: fetch without the
-    /// flight.
+    /// The [`with_max_wait`](SingleFlight::with_max_wait) bound passed first:
+    /// [`take_over`](SingleFlight::take_over) the flight (its [`id`](Follower::id)).
     TimedOut,
 }
 
+/// Identifies one flight of a [`SingleFlight`]; a flight started later has a greater id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlightId(u64);
+
+/// What a flight's followers see.
+enum Slot<V> {
+    Pending,
+    Done(V),
+    /// Another follower took the flight over: follow the replacement.
+    Moved,
+}
+
+struct Running<V> {
+    id: u64,
+    /// Shared with the leader: [`SingleFlight::take_over`] tells the followers of a stalled
+    /// flight to move. Dropped from here when the flight lands or is taken over, so once the
+    /// leader is gone too the channel closes (a cancelled leader).
+    tx: Arc<watch::Sender<Slot<V>>>,
+}
+
 struct Flights<K, V> {
-    running: HashMap<K, (u64, watch::Receiver<Option<V>>)>,
+    running: HashMap<K, Running<V>>,
     next_id: u64,
 }
 
@@ -101,9 +127,9 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     }
 
     /// Bounds how long a follower waits for the leader (see the type's docs): after `max`
-    /// (measured with `sleep`, e.g. `tokio::time::sleep`), [`run`](Self::run) runs the
-    /// follower's own fetch. Pick a bound above the fetch's own timeout (a request timeout), so
-    /// a leader that is polled always finishes first.
+    /// (measured with `sleep`, e.g. `tokio::time::sleep`), [`run`](Self::run) takes the flight
+    /// over with the follower's own fetch. Pick a bound above the fetch's own timeout (a request
+    /// timeout), so a leader that is polled always finishes first.
     pub fn with_max_wait(mut self, max: Duration, sleep: SleepFn) -> Self {
         self.max_wait = OnceLock::from((max, sleep));
         self
@@ -125,9 +151,10 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
         self.max_wait.get().map(|(d, _)| *d)
     }
 
-    fn follower(&self, rx: &watch::Receiver<Option<V>>) -> Follower<V> {
+    fn follower(&self, running: &Running<V>) -> Follower<V> {
         Follower {
-            rx: rx.clone(),
+            id: running.id,
+            rx: running.tx.subscribe(),
             max_wait: self.max_wait.get().cloned(),
         }
     }
@@ -137,10 +164,12 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     }
 
     fn lead(&self, flights: &mut Flights<K, V>, key: &K) -> Leader<'_, K, V> {
-        let (tx, rx) = watch::channel(None);
+        let tx = Arc::new(watch::channel(Slot::Pending).0);
         let id = flights.next_id;
         flights.next_id = flights.next_id.wrapping_add(1);
-        flights.running.insert(key.clone(), (id, rx));
+        flights
+            .running
+            .insert(key.clone(), Running { id, tx: tx.clone() });
         Leader {
             group: self,
             key: key.clone(),
@@ -150,26 +179,35 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     }
 
     /// The result of `fetch`, or of the flight already running for `key`. When that flight's
-    /// leader is cancelled, `fetch` runs instead (once). It also runs (without the flight) when the
-    /// [`with_max_wait`](Self::with_max_wait) bound passes first.
+    /// leader is cancelled, `fetch` runs instead (once). When the
+    /// [`with_max_wait`](Self::with_max_wait) bound passes first, the first follower to give up
+    /// runs `fetch` in a replacement flight that the others follow.
     pub async fn run<F, Fut>(&self, key: &K, fetch: F) -> V
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = V>,
     {
+        let mut stalled = None;
         loop {
-            match self.join(key) {
+            let flight = match stalled.take() {
+                Some(id) => self.take_over(key, id),
+                None => self.join(key),
+            };
+            match flight {
                 Flight::Leader(leader) => {
                     let v = fetch().await;
                     leader.finish(v.clone());
                     return v;
                 }
-                Flight::Follower(f) => match f.wait_bounded().await {
-                    Waited::Done(v) => return v,
-                    Waited::Cancelled => {}
-                    // The leader is alive but not making progress: fetch without it.
-                    Waited::TimedOut => return fetch().await,
-                },
+                Flight::Follower(f) => {
+                    let id = f.id();
+                    match f.wait_bounded().await {
+                        Waited::Done(v) => return v,
+                        Waited::Cancelled => {}
+                        // The leader is alive but not making progress: replace its flight.
+                        Waited::TimedOut => stalled = Some(id),
+                    }
+                }
             }
         }
     }
@@ -177,17 +215,36 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
     /// Follows the flight running for `key`, or leads a new one.
     pub fn join(&self, key: &K) -> Flight<'_, K, V> {
         let mut flights = self.lock();
-        if let Some((_, rx)) = flights.running.get(key) {
-            return Flight::Follower(self.follower(rx));
+        if let Some(running) = flights.running.get(key) {
+            return Flight::Follower(self.follower(running));
         }
         Flight::Leader(self.lead(&mut flights, key))
+    }
+
+    /// For a follower whose wait for flight `stalled` [timed out](Waited::TimedOut): if that
+    /// flight is still the one running for `key`, leads a replacement and moves the stalled
+    /// flight's other followers to it (their wait ends with [`Waited::Cancelled`], and they
+    /// join the replacement). Otherwise, as [`join`](Self::join): another follower took over
+    /// first, or the flight landed.
+    pub fn take_over(&self, key: &K, stalled: FlightId) -> Flight<'_, K, V> {
+        let mut flights = self.lock();
+        match flights.running.get(key) {
+            Some(running) if running.id == stalled.0 => {
+                if let Some(old) = flights.running.remove(key) {
+                    old.tx.send_replace(Slot::Moved);
+                }
+                Flight::Leader(self.lead(&mut flights, key))
+            }
+            Some(running) => Flight::Follower(self.follower(running)),
+            None => Flight::Leader(self.lead(&mut flights, key)),
+        }
     }
 
     /// Follows the flight running for `key`, or `None` if there is none.
     pub fn follow(&self, key: &K) -> Option<Follower<V>> {
         let flights = self.lock();
-        let (_, rx) = flights.running.get(key)?;
-        Some(self.follower(rx))
+        let running = flights.running.get(key)?;
+        Some(self.follower(running))
     }
 
     /// Leads a new flight for `key`, or `None` while one is running.
@@ -215,7 +272,7 @@ pub struct Leader<'a, K: Eq + Hash, V> {
     group: &'a SingleFlight<K, V>,
     key: K,
     id: u64,
-    tx: watch::Sender<Option<V>>,
+    tx: Arc<watch::Sender<Slot<V>>>,
 }
 
 impl<K: Eq + Hash, V> fmt::Debug for Leader<'_, K, V> {
@@ -225,26 +282,37 @@ impl<K: Eq + Hash, V> fmt::Debug for Leader<'_, K, V> {
 }
 
 impl<K: Eq + Hash, V> Leader<'_, K, V> {
-    fn land(&self, flights: &mut Flights<K, V>) {
-        if flights
+    /// This flight's id: greater than that of every flight started before it, a flight that
+    /// [took it over](SingleFlight::take_over) included.
+    pub fn id(&self) -> FlightId {
+        FlightId(self.id)
+    }
+
+    /// Ends the flight if it is still the one running for its key; `false` if it was taken
+    /// over.
+    fn land(&self, flights: &mut Flights<K, V>) -> bool {
+        let current = flights
             .running
             .get(&self.key)
-            .is_some_and(|(id, _)| *id == self.id)
-        {
+            .is_some_and(|r| r.id == self.id);
+        if current {
             flights.running.remove(&self.key);
         }
+        current
     }
 
     /// Ends the flight and hands `value` to its followers. A caller asking from now on starts a
-    /// new flight.
+    /// new flight. A flight that was [taken over](SingleFlight::take_over) has no followers
+    /// left: nothing is handed out, and the replacement flight goes on.
     pub fn finish(self, value: V) {
         let mut flights = self
             .group
             .flights
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        self.land(&mut flights);
-        self.tx.send_replace(Some(value));
+        if self.land(&mut flights) {
+            self.tx.send_replace(Slot::Done(value));
+        }
     }
 }
 
@@ -261,7 +329,8 @@ impl<K: Eq + Hash, V> Drop for Leader<'_, K, V> {
 
 /// A caller waiting for another caller's fetch.
 pub struct Follower<V> {
-    rx: watch::Receiver<Option<V>>,
+    id: u64,
+    rx: watch::Receiver<Slot<V>>,
     max_wait: Option<(Duration, SleepFn)>,
 }
 
@@ -272,11 +341,24 @@ impl<V> fmt::Debug for Follower<V> {
 }
 
 impl<V: Clone> Follower<V> {
-    /// The leader's result, or `None` if the leader was cancelled before it finished (then
-    /// [`join`](SingleFlight::join) again).
+    /// The followed flight's id, for [`SingleFlight::take_over`].
+    pub fn id(&self) -> FlightId {
+        FlightId(self.id)
+    }
+
+    /// The leader's result, or `None` if the leader was cancelled before it finished or the
+    /// flight was [taken over](SingleFlight::take_over) (then [`join`](SingleFlight::join)
+    /// again).
     pub async fn wait(mut self) -> Option<V> {
-        let r = self.rx.wait_for(Option::is_some).await.ok()?;
-        r.clone()
+        let r = self
+            .rx
+            .wait_for(|s| !matches!(s, Slot::Pending))
+            .await
+            .ok()?;
+        match &*r {
+            Slot::Done(v) => Some(v.clone()),
+            Slot::Pending | Slot::Moved => None,
+        }
     }
 
     /// [`wait`](Self::wait), bounded by the group's [`with_max_wait`](SingleFlight::with_max_wait)
@@ -467,7 +549,11 @@ mod review_tests {
     /// L29, by default: a group bound by the built-in transport (what every backend does with
     /// its caches) gets twice the transport's connect plus request timeout, and a follower of an
     /// unpolled leader completes after it.
-    #[cfg(feature = "reqwest")]
+    // `reqwest` alone enables no crypto provider: building the transport needs one.
+    #[cfg(all(
+        feature = "reqwest",
+        any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")
+    ))]
     #[tokio::test(start_paused = true)]
     async fn review_l29_the_builtin_transport_bounds_followers() {
         let transport = crate::ReqwestTransport::builder()
@@ -495,6 +581,99 @@ mod review_tests {
         .await;
         assert_eq!(r, Ok(Ok(2)), "the follower hung on the unpolled leader");
         drop(leader);
+    }
+
+    /// Followers of a stalled (alive, unpolled) leader, joined at different times, give up
+    /// together and share one replacement flight: no burst of one fetch per follower, and the
+    /// late joiners do not wait out a bound of their own.
+    #[tokio::test(start_paused = true)]
+    async fn review_followers_of_a_stalled_leader_share_one_replacement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let group: Arc<Group> = Arc::new(review_group());
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let mut stalled = Box::pin(group.run(&"k", std::future::pending));
+        std::future::poll_fn(|cx| {
+            assert!(stalled.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let started = tokio::time::Instant::now();
+        let followers: Vec<_> = (0..8u64)
+            .map(|i| {
+                let (group, fetches) = (group.clone(), fetches.clone());
+                tokio::spawn(async move {
+                    // Join at 0, 2 … 14 s.
+                    tokio::time::sleep(Duration::from_secs(2 * i)).await;
+                    group
+                        .run(&"k", || async {
+                            let n = fetches.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            Ok(10 + n)
+                        })
+                        .await
+                })
+            })
+            .collect();
+        let mut results = Vec::new();
+        for f in followers {
+            results.push(f.await.unwrap());
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1, "{results:?}");
+        assert!(results.iter().all(|r| *r == Ok(10)), "{results:?}");
+        // The first follower's bound (30 s) plus the replacement fetch (1 s).
+        assert_eq!(started.elapsed(), Duration::from_secs(31));
+        // The replacement landed; the stalled leader, still alive, holds no flight.
+        assert!(group.lock().running.is_empty());
+        drop(stalled);
+    }
+
+    /// A stalled leader that resumes after a follower took its flight over gets its own result,
+    /// but hands it to nobody and does not end the replacement flight: the replacement's
+    /// followers get the replacement's result.
+    #[tokio::test(start_paused = true)]
+    async fn review_a_resumed_stalled_leader_does_not_end_its_replacement() {
+        let group: Arc<Group> = Arc::new(review_group());
+        let (release_old, gate_old) = tokio::sync::oneshot::channel::<()>();
+        let mut stalled = Box::pin(group.run(&"k", || async move {
+            gate_old.await.unwrap();
+            Ok(1)
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(stalled.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let (release_new, gate_new) = tokio::sync::oneshot::channel::<()>();
+        let replacing = {
+            let group = group.clone();
+            tokio::spawn(async move {
+                group
+                    .run(&"k", || async move {
+                        gate_new.await.unwrap();
+                        Ok(2)
+                    })
+                    .await
+            })
+        };
+        // Past the bound (30 s): the follower has taken the flight over.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        let late = {
+            let group = group.clone();
+            tokio::spawn(async move { group.run(&"k", || async { Ok(3) }).await })
+        };
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        // The stalled leader resumes and finishes.
+        release_old.send(()).unwrap();
+        assert_eq!(stalled.await, Ok(1));
+        assert!(
+            !group.lock().running.is_empty(),
+            "the stalled leader ended the flight that replaced it"
+        );
+        release_new.send(()).unwrap();
+        assert_eq!(replacing.await.unwrap(), Ok(2));
+        assert_eq!(late.await.unwrap(), Ok(2));
+        assert!(group.lock().running.is_empty());
     }
 
     /// A transport without a timer leaves the group unbounded, and the first bound wins.
