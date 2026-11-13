@@ -117,19 +117,22 @@ async fn interactive_policy() -> anyhow::Result<()> {
 async fn env_config() -> anyhow::Result<()> {
     // snippet: docs/guide.md
     use anykms::transit::anykms_http::ReqwestTransport;
-    use anykms::transit::{EnvConfig, TransitProvider};
+    use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
 
-    let server = EnvConfig::vault()
-        .no_home_token() // never fall back to ~/.vault-token
-        // .no_token()   // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
+    let env = EnvConfig::vault()
+        // .no_token()    // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
+        .no_home_token(); // never fall back to ~/.vault-token
+    // TLS, timeouts and proxying live on the transport, and the one passed to `http_transport`
+    // replaces the one `load` built: start it from the TLS variables (VAULT_CACERT & co.) to keep them.
+    let transport = env
+        .tls()?
+        .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+        .request_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let server = env
         .load()?
         .allowed_namespaces(["team-a"]) // key URIs may select it with ?namespace=team-a
-        // TLS, timeouts and proxying live on the transport (replaces VAULT_CACERT & co. here).
-        .http_transport(
-            ReqwestTransport::builder()
-                .request_timeout(std::time::Duration::from_secs(5))
-                .build()?,
-        );
+        .http_transport(transport);
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .layer(anykms::retry_layer())
@@ -144,16 +147,23 @@ async fn tower_stack() -> anyhow::Result<()> {
     use std::time::Duration;
 
     use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
-    use anykms::transit::{EnvConfig, TransitProvider};
+    use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
     use tower::ServiceBuilder;
 
+    let env = EnvConfig::vault();
+    // TLS, no redirects, timeouts: the client's. Built from the TLS variables (VAULT_CACERT & co.),
+    // which the transport passed to `http_transport` would otherwise drop.
+    let client = env
+        .tls()?
+        .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+        .build()?;
     let service = ServiceBuilder::new()
         .concurrency_limit(4)
-        .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
+        .service(client.into_service());
     // Above the client's timeouts (twice connect plus request: 24 s with the defaults).
     let transport = TowerTransport::new(service)
         .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
-    let server = EnvConfig::vault().load()?.http_transport(transport);
+    let server = env.load()?.http_transport(transport);
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .build()?;
