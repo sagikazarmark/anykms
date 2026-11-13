@@ -4,15 +4,17 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
 [operator guides](operations.md) cover the server side.
 
 - **Zeroization is defense in depth, not a guarantee.** anykms zeroizes the buffers it owns:
-  request JSON, response bodies, decoded plaintexts, data keys, tokens and the mTLS key PEM
-  (`Zeroizing`, grown without leaving unwiped copies). Requests reach the `HttpTransport` with
-  their body in a zeroizing buffer and responses come back in one; whether the bytes are wiped
-  beyond that is the transport's business. The built-in `ReqwestTransport` cannot zeroize the
-  copies reqwest/hyper/rustls make (including the request body reqwest sends and the token's
-  `X-Vault-Token` header value). anykms also cannot zeroize the token in the process environment
-  (`VAULT_TOKEN`), the parsed mTLS key inside the crypto provider (ring does not wipe it; aws-lc
-  does), kernel socket buffers, or the server. Nor can it wipe the stack temporaries of the
-  crypto crates it calls: deriving an envelope's keys leaves copies of key-derived blocks (one
+  request JSON, response bodies, decoded plaintexts, data keys, tokens, and the TLS PEMs read from
+  the environment: CA bundle, client certificate and mTLS key (`Zeroizing`, grown without leaving
+  unwiped copies). Requests reach the `HttpTransport` with their body in a zeroizing buffer and
+  responses come back in one; whether the bytes are wiped beyond that is the transport's business.
+  The built-in `ReqwestTransport` cannot zeroize the copies reqwest/hyper/rustls make (including
+  the request body reqwest sends and the token's `X-Vault-Token` header value). anykms also cannot
+  zeroize the token in the process environment (`VAULT_TOKEN`), the parsed mTLS key inside the
+  crypto provider (ring does not wipe it; aws-lc does), the PEM sections rustls-pki-types decodes
+  while it looks for certificates (a private key in a CA or certificate file is decoded, then
+  dropped unwiped), kernel socket buffers, or the server. Nor can it wipe the stack temporaries of
+  the crypto crates it calls: deriving an envelope's keys leaves copies of key-derived blocks (one
   equal to the encryption key) and of HMAC's padded key on the stack inside `hkdf` and `hmac`,
   until the stack is reused; how long that is depends on the optimizer.
 - **Transport.** Every HTTP backend moves bytes through one `anykms_http::HttpTransport`,
