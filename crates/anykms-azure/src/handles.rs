@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,29 +53,84 @@ pub(crate) enum Origin {
 /// (host, lowercase name, version).
 pub(crate) type CacheKey = (String, String, Option<String>);
 
-/// A key bundle and when the read that returned it was sent.
-type Bundled = (Instant, Arc<KeyBundle>);
-
-/// Key bundles read for the key-type check, shared per provider: key → (expiry, (sent,
-/// bundle)).
+/// Key bundles read for the key-type check, shared per provider: key → (expiry, bundle, store
+/// mark).
 ///
-/// A read stores its bundle only if no read sent later stored meanwhile and no entry was
-/// dropped since it started ([`generation`](Self::generation)), and a read that a stalled
-/// flight's replacement superseded stores nothing: an older bundle never replaces a newer one,
-/// nor comes back after the key was found missing or changed.
+/// A read stores its bundle only if no entry was dropped since it started
+/// ([`KeyCtx::forget`]), and a read that a stalled flight's replacement superseded stores
+/// nothing: a bundle never comes back after the key was found missing or changed.
+///
+/// # Conflicting reads
+///
+/// No instant taken on this side orders two reads of a key that overlapped: a transport may
+/// hold a request for any time after it is handed over (a tower `poll_ready`, a connection
+/// pool), so the read sent first may reach the vault last. Only reads that did not overlap are
+/// ordered: one that started after another's bundle was stored saw the vault after it. A store
+/// therefore takes the next value of a counter ([`mark`](Self::mark)) as its own mark, and a
+/// read that started before that mark and returns a different key ([`same_key`]) is a conflict:
+/// it neither replaces the cached bundle nor keeps it, but drops it, so the next request reads
+/// the key again (and reads still in flight from before the conflict store nothing). The same
+/// key from an overlapping read just stores again.
 #[derive(Default)]
 pub(crate) struct DescribeCache {
-    entries: Mutex<HashMap<CacheKey, (Instant, Bundled)>>,
-    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget`]).
-    generation: AtomicU64,
+    entries: Mutex<Entries>,
     /// One key read at a time for concurrent misses (R-34).
-    flights: SingleFlight<CacheKey, Result<Bundled>>,
+    flights: SingleFlight<CacheKey, Result<Arc<KeyBundle>>>,
+}
+
+#[derive(Default)]
+struct Entries {
+    by_key: HashMap<CacheKey, Entry>,
+    /// Bumped by every store and every drop, under this lock: the mark a read starts at.
+    mark: u64,
+    /// The mark of the latest drop: a read that started before it stores nothing.
+    dropped: u64,
+}
+
+/// One cached bundle.
+struct Entry {
+    expires: Instant,
+    bundle: Arc<KeyBundle>,
+    /// The mark the bundle was stored at.
+    stored: u64,
+}
+
+impl Entries {
+    /// Drops `key`'s bundle; a read that started before cannot store its own.
+    fn drop_key(&mut self, key: &CacheKey) {
+        self.mark += 1;
+        self.dropped = self.mark;
+        self.by_key.remove(key);
+    }
+}
+
+/// Whether two bundles describe the same key as far as a handle relies on it: version (`kid`),
+/// type, curve, RSA size, operations, state and public key. Other metadata (`updated`, tags,
+/// the version list a describe adds) may differ.
+fn same_key(a: &KeyBundle, b: &KeyBundle) -> bool {
+    let (x, y) = (&a.info, &b.info);
+    x.key_id == y.key_id
+        && x.version == y.version
+        && x.key_type == y.key_type
+        && x.curve == y.curve
+        && x.rsa_bits == y.rsa_bits
+        && x.key_ops == y.key_ops
+        && x.enabled == y.enabled
+        && x.not_before == y.not_before
+        && x.expires == y.expires
+        && a.public == b.public
 }
 
 impl DescribeCache {
-    /// The generation a read about to be sent stores under (see [`KeyCtx::store`]).
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The mark a read about to be sent stores under (see [`KeyCtx::store`]).
+    fn mark(&self) -> u64 {
+        self.lock().mark
     }
 
     /// An empty cache whose followers replace a stalled leader after `transport`'s bound (L29).
@@ -229,24 +283,17 @@ impl KeyCtx {
 
     /// Drops the cached bundle; a read that started before cannot store its own.
     fn forget(&self) {
-        let mut cache = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.cache.generation.fetch_add(1, Ordering::SeqCst);
-        cache.remove(&self.cache_key());
+        self.cache.lock().drop_key(&self.cache_key());
     }
 
-    fn cached(&self) -> Option<Bundled> {
+    fn cached(&self) -> Option<Arc<KeyBundle>> {
         let now = Instant::now();
         self.cache
-            .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_key
             .get(&self.cache_key())
-            .filter(|(exp, _)| now < *exp)
-            .map(|(_, b)| b.clone())
+            .filter(|e| now < e.expires)
+            .map(|e| e.bundle.clone())
     }
 
     fn url(&self, version: Option<&str>, action: Option<&str>) -> Result<anykms_http::url::Url> {
@@ -332,10 +379,10 @@ impl KeyCtx {
     /// Concurrent misses for the key share one read and its result, a failure included (R-34);
     /// the bundle is cached as the flight lands, unless a replacement superseded that flight.
     pub(crate) async fn bundle(&self, op: Operation) -> Result<Arc<KeyBundle>> {
-        if let Some((_, b)) = self.cached() {
+        if let Some(b) = self.cached() {
             return Ok(b);
         }
-        let generation = self.cache.generation();
+        let started = self.cache.mark();
         self.cache
             .flights
             .run_and_commit(
@@ -345,42 +392,52 @@ impl KeyCtx {
                     if let Some(b) = self.cached() {
                         return Ok(b);
                     }
-                    let sent = Instant::now();
                     let b = self
                         .get_bundle(Origin::Handle, self.uri.version(), op)
                         .await?;
-                    Ok((sent, Arc::new(b)))
+                    Ok(Arc::new(b))
                 },
                 |r| {
                     if let Ok(b) = r {
-                        self.store(generation, b);
+                        self.store(started, b);
                     }
                 },
             )
             .await
-            .map(|(_, b)| b)
             // The flight may have been another operation's.
             .map_err(|e| e.with_operation(op))
     }
 
-    /// Caches a read's bundle as the bundle of the URI's version (or the current one), see
-    /// [`DescribeCache`]: not if an entry was dropped since `generation` was current, nor over a
-    /// bundle from a read sent later.
-    fn store(&self, generation: u64, b: &Bundled) {
+    /// Caches the bundle a read that started at mark `started` returned, as the bundle of the
+    /// URI's version (or the current one), see [`DescribeCache`]: not if an entry was dropped
+    /// since. A different key stored since by an overlapping read is a conflict, which drops
+    /// the entry instead.
+    fn store(&self, started: u64, b: &Arc<KeyBundle>) {
         let key = self.cache_key();
-        let mut cache = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.cache.generation() != generation
-            || cache.get(&key).is_some_and(|(_, (sent, _))| *sent >= b.0)
-        {
+        let mut cache = self.cache.lock();
+        if started < cache.dropped {
             return;
         }
         let now = Instant::now();
-        cache.retain(|_, (exp, _)| now < *exp);
-        cache.insert(key, (expiry(now, self.client.cache_ttl), b.clone()));
+        cache.by_key.retain(|_, e| now < e.expires);
+        let conflict = cache
+            .by_key
+            .get(&key)
+            .is_some_and(|e| started < e.stored && !same_key(&e.bundle, b));
+        if conflict {
+            cache.drop_key(&key);
+            return;
+        }
+        cache.mark += 1;
+        let stored = cache.mark;
+        cache.by_key.insert(
+            key,
+            Entry {
+                expires: expiry(now, self.client.cache_ttl),
+                bundle: b.clone(),
+                stored,
+            },
+        );
     }
 
     /// The `Preflight` of every handle: a fresh read of the key (the metadata `describe`
@@ -393,15 +450,14 @@ impl KeyCtx {
     ) -> Result<KeyInfo> {
         self.scoped(async {
             let op = Operation::Describe;
-            let generation = self.cache.generation();
-            let sent = Instant::now();
+            let started = self.cache.mark();
             let (b, info) = self.azure_info_with_bundle().await?;
             if let Err(e) = check(&b) {
                 self.forget();
                 return Err(e.with_operation(op));
             }
             let usable = check_usable(&b.info, op);
-            self.store(generation, &(sent, Arc::new(b)));
+            self.store(started, &Arc::new(b));
             usable?;
             Ok(info.to_key_info())
         })
