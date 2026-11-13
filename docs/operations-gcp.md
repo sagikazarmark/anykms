@@ -72,7 +72,8 @@ it. An empty allowlist (an empty list in code, or the variable set to an empty v
 3. the metadata server (GCE, GKE Workload Identity, Cloud Run, Cloud Functions) at
    `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 3 s request timeout (within it, the
    built-in transport's 2 s connect timeout). `GCE_METADATA_HOST` is plain HTTP, so it must name a
-   loopback or link-local IP, `localhost` or `metadata.google.internal`; any other host (a
+   loopback or link-local IP, `localhost`, `metadata.google.internal` or `fd20:ce::254` (the
+   metadata server on IPv6-only VMs, exactly that address); any other host (a
    metadata proxy elsewhere on the network) is `Configuration` unless the provider opts in with
    `GcpProviderBuilder::allow_remote_http_credentials()`. The same rule applies to an
    `external_account` `credential_source.url` that uses `http://`.

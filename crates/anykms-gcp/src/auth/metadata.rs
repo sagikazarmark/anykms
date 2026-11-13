@@ -3,7 +3,7 @@
 //! `GET http://<host>/computeMetadata/v1/instance/service-accounts/default/token` with
 //! `Metadata-Flavor: Google`; the response must carry `Metadata-Flavor: Google` too. Plain HTTP
 //! only to `169.254.169.254`, the `GCE_METADATA_HOST` override (a loopback or link-local IP,
-//! `localhost` or `metadata.google.internal`, unless
+//! `localhost`, `metadata.google.internal` or `fd20:ce::254`, unless
 //! [`allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials))
 //! or the [`AuthEndpoints::custom`](super::AuthEndpoints::custom) origin; never a redirect.
 

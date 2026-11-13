@@ -189,7 +189,8 @@ impl GcpProviderBuilder {
 
     /// Allows plain `http://` credential endpoints on any host: a `GCE_METADATA_HOST` or an
     /// `external_account` `credential_source.url` that is not a loopback or link-local IP,
-    /// `localhost` or `metadata.google.internal` (for example a metadata proxy on another host).
+    /// `localhost`, `metadata.google.internal` or Google's IPv6 metadata address `fd20:ce::254`
+    /// (for example a metadata proxy on another host).
     /// Without it such an endpoint is a `Configuration` error before any request, because the
     /// token it returns (and any header the credential file adds) would cross the network in
     /// clear text. There is deliberately no environment variable for this: whoever sets

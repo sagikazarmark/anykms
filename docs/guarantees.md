@@ -40,8 +40,9 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
     loopback, `localhost` or a link-local address unless the code opts in
     (`ImdsCredentials::allow_http_to_any_host`).
   - GCP: `GCE_METADATA_HOST` and an `external_account` file's `credential_source.url` may be
-    `http://` only to loopback, `localhost`, a link-local address or `metadata.google.internal`
-    unless the code opts in (`GcpProviderBuilder::allow_remote_http_credentials`).
+    `http://` only to loopback, `localhost`, a link-local address, `metadata.google.internal` or
+    `fd20:ce::254` (the metadata server on IPv6-only VMs; no other unique local address) unless
+    the code opts in (`GcpProviderBuilder::allow_remote_http_credentials`).
   - Azure: `IDENTITY_ENDPOINT` (App Service, Functions, Container Apps) may be `http://` only to
     `localhost`, loopback, link-local or private (RFC 1918, `fc00::/7`) addresses, because App
     Service on Linux hands out private addresses; any other host needs `https://`.

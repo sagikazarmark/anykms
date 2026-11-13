@@ -320,9 +320,16 @@ impl UrlField {
     }
 }
 
+/// Google's metadata server address on IPv6-only VMs, `fd20:ce::254`
+/// (<https://cloud.google.com/compute/docs/instances/access-instance-metadata#ipv6-only-vms>).
+/// Not link-local (it is in the unique local range `fc00::/7`, of which nothing else is allowed).
+const METADATA_IPV6: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254);
+
 /// Whether a plain-`http://` credential endpoint at `u` stays on this machine or its link: a
-/// loopback or link-local IP (IPv4, IPv6, or IPv4-mapped IPv6), `localhost`, or
-/// `metadata.google.internal`. Anything else needs
+/// loopback or link-local IP (IPv4, IPv6, or IPv4-mapped IPv6), `localhost`,
+/// `metadata.google.internal`, or Google's IPv6 metadata address `fd20:ce::254` (exactly).
+/// Anything else needs
 /// [`GcpProviderBuilder::allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials).
 pub(crate) fn local_http_host(u: &Url) -> bool {
     use anykms_http::url::Host;
@@ -333,6 +340,7 @@ pub(crate) fn local_http_host(u: &Url) -> bool {
             ip.is_loopback()
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
                 || ip.to_ipv4_mapped().is_some_and(v4)
+                || ip == METADATA_IPV6
         }
         Some(Host::Domain(d)) => {
             d.eq_ignore_ascii_case("localhost")
@@ -347,9 +355,10 @@ pub(crate) fn local_http_host(u: &Url) -> bool {
 pub(crate) fn check_plain_http(u: &Url, ctx: &AuthCtx, what: &str) -> Result<()> {
     if u.scheme() == "http" && !ctx.allow_remote_http && !local_http_host(u) {
         return Err(config_err(format!(
-            "{what} is plain http:// to a host that is not loopback, link-local or \
-             metadata.google.internal: the token would cross the network in clear text; use \
-             https://, or opt in with GcpProviderBuilder::allow_remote_http_credentials()"
+            "{what} is plain http:// to a host that is not loopback, link-local, \
+             metadata.google.internal or fd20:ce::254: the token would cross the network in \
+             clear text; use https://, or opt in with \
+             GcpProviderBuilder::allow_remote_http_credentials()"
         )));
     }
     Ok(())
@@ -427,7 +436,8 @@ impl EnvVars {
 /// 3. the metadata server (GCE, GKE Workload Identity, Cloud Run, Cloud Functions), at
 ///    `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 3 s request timeout (the
 ///    built-in transport connects within 2 s). A `GCE_METADATA_HOST` that is malformed, or plain
-///    HTTP to a host other than loopback, link-local or `metadata.google.internal` without
+///    HTTP to a host other than loopback, link-local, `metadata.google.internal` or
+///    `fd20:ce::254` without
 ///    [`allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials),
 ///    is `Configuration`.
 ///
@@ -1014,6 +1024,8 @@ mod tests {
             "http://[fe80::1]/",
             "http://[fe80::a9fe:a9fe]/",
             "http://[::ffff:169.254.169.254]/",
+            "http://[fd20:ce::254]/",
+            "http://[FD20:CE:0::254]:80/",
             "http://localhost:8080/",
             "http://LOCALHOST/",
             "http://metadata.google.internal/",
@@ -1031,6 +1043,10 @@ mod tests {
             "http://172.16.0.4/",
             "http://8.8.8.8/",
             "http://[fd00:ec2::254]/",
+            "http://[fd20:ce::253]/",
+            "http://[fd20:ce::255]/",
+            "http://[fd20:ce::1:254]/",
+            "http://[fd20:cf::254]/",
             "http://[::ffff:10.0.0.1]/",
         ] {
             assert!(!local(remote), "{remote}");
