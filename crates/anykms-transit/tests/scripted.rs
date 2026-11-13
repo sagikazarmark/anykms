@@ -313,6 +313,8 @@ impl HttpTransport for StallFirstLogin {
         };
         Box::pin(async move {
             if stall {
+                // Woken at 1 s (as by the request timeout's timer), then held until `release`.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 self.release.notified().await;
             }
             let mut r = anykms_transit::anykms_http::http::Response::new(zeroize::Zeroizing::new(
@@ -460,6 +462,8 @@ impl HttpTransport for StallFirstKeyRead {
         };
         Box::pin(async move {
             if read == Some(0) {
+                // Woken at 1 s (as by the request timeout's timer), then held until `release`.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 self.release.notified().await;
             }
             let mut r = anykms_transit::anykms_http::http::Response::new(zeroize::Zeroizing::new(
