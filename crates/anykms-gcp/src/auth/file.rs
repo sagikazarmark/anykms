@@ -105,15 +105,17 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
                 None => ctx.endpoints.oauth2_token.clone(),
             };
             Ok(Built {
-                source: Arc::new(Cached::new(AuthorizedUser {
-                    http: ctx.http.clone(),
-                    token_url,
-                    client_id: require(f.client_id, &kind, "client_id")?,
-                    client_secret: require(f.client_secret, &kind, "client_secret")?,
-                    refresh_token: require(f.refresh_token, &kind, "refresh_token")?,
-                    quota_project: quota,
-                })
-                .bounded_by(&*ctx.http)),
+                source: Arc::new(
+                    Cached::new(AuthorizedUser {
+                        http: ctx.http.clone(),
+                        token_url,
+                        client_id: require(f.client_id, &kind, "client_id")?,
+                        client_secret: require(f.client_secret, &kind, "client_secret")?,
+                        refresh_token: require(f.refresh_token, &kind, "refresh_token")?,
+                        quota_project: quota,
+                    })
+                    .bounded_by(&*ctx.http),
+                ),
                 kind: "authorized_user",
             })
         }
@@ -136,15 +138,17 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
             let src = require(f.source_credentials, &kind, "source_credentials")?;
             let source = build(*src, ctx, depth + 1)?.source;
             Ok(Built {
-                source: Arc::new(Cached::new(impersonated::Impersonate {
-                    http: ctx.http.clone(),
-                    source,
-                    url,
-                    delegates: f.delegates.unwrap_or_default(),
-                    lifetime: Duration::from_secs(3600),
-                    quota_project: quota,
-                })
-                .bounded_by(&*ctx.http)),
+                source: Arc::new(
+                    Cached::new(impersonated::Impersonate {
+                        http: ctx.http.clone(),
+                        source,
+                        url,
+                        delegates: f.delegates.unwrap_or_default(),
+                        lifetime: Duration::from_secs(3600),
+                        quota_project: quota,
+                    })
+                    .bounded_by(&*ctx.http),
+                ),
                 kind: "impersonated_service_account",
             })
         }

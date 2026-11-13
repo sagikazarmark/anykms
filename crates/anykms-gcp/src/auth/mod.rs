@@ -652,15 +652,17 @@ impl Credentials {
             } => {
                 let source = source.into_source(ctx)?;
                 let url = impersonated::generate_url(&ctx.endpoints, &target)?;
-                Arc::new(Cached::new(impersonated::Impersonate {
-                    http: ctx.http.clone(),
-                    source,
-                    url,
-                    delegates,
-                    lifetime,
-                    quota_project: None,
-                })
-                .bounded_by(&*ctx.http))
+                Arc::new(
+                    Cached::new(impersonated::Impersonate {
+                        http: ctx.http.clone(),
+                        source,
+                        url,
+                        delegates,
+                        lifetime,
+                        quota_project: None,
+                    })
+                    .bounded_by(&*ctx.http),
+                )
             }
             Spec::Custom(c) => Arc::new(Cached::new(CustomFetch {
                 source: c,

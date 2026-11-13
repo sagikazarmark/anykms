@@ -47,7 +47,7 @@ impl TypeCache {
     }
 
     /// The single-flight wait bound (tests).
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
     pub(crate) fn wait_bound(&self) -> Option<std::time::Duration> {
         self.flights.max_wait()
     }

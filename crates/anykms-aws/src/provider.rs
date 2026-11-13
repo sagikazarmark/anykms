@@ -502,6 +502,9 @@ mod review_l29_tests {
             .build()
             .unwrap();
         assert_eq!(p.inner.cache.wait_bound(), Some(Duration::from_secs(24)));
-        assert_eq!(p.inner.kms.creds_wait_bound(), Some(Duration::from_secs(24)));
+        assert_eq!(
+            p.inner.kms.creds_wait_bound(),
+            Some(Duration::from_secs(24))
+        );
     }
 }

@@ -567,10 +567,7 @@ impl KeyCtx {
                 return;
             }
             latest.retain(|_, (expires, _)| now < *expires);
-            latest.insert(
-                key.clone(),
-                (now + anykms_http::cache::jittered_ttl(ttl), None),
-            );
+            latest.insert(key.clone(), (expiry(now, ttl), None));
         }
         let Ok(versions) = self.list_versions(op).await else {
             return;
