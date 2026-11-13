@@ -464,14 +464,16 @@ failing one is obvious:
 
 ```text
 transit decrypt [hashivault://default/transit/keys/app-kek]: not_found: key not found (http 400) (server: "encryption key not found")
-transit open [hashivault://prod/transit/keys/app-kek]: configuration: unknown server alias
+transit open [hashivault://<redacted>/transit/keys/app-kek]: configuration: unknown server alias
 ```
 
 The resource is `<scheme>://<server alias>/<mount>/keys/<name>`, with ` (namespace <ns>)` when a
-namespace applies; it never holds a query string or token. File-related configuration errors
-name the path and the reason (`cannot read the CA certificate file /etc/vault/ca.pem
-(VAULT_CACERT): No such file or directory`). Vault and OpenBao return no request id on error
-responses (neither in the body nor in a header), so transit errors carry none.
+namespace applies; it never holds a query string or token. An authority that is not a configured
+server alias shows as `<redacted>` (it may be a pasted token, even one that looks like an
+alias). File-related configuration errors name the path and the reason (`cannot read the CA
+certificate file /etc/vault/ca.pem (VAULT_CACERT): No such file or directory`). Vault and OpenBao
+return no request id on error responses (neither in the body nor in a header), so transit errors
+carry none.
 
 | ErrorKind | Class | Likely cause | Action |
 |---|---|---|---|

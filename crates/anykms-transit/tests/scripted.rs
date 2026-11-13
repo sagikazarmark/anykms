@@ -252,3 +252,162 @@ fn default_transport_needs_the_reqwest_feature() {
         assert!(e.to_string().contains(".http_transport(..)"), "{e}");
     }
 }
+
+/// What `ReqwestTransport` reports by default: twice its 2 s connect plus 10 s request timeout.
+const FOLLOWER_WAIT: std::time::Duration = std::time::Duration::from_secs(24);
+
+/// A transport whose first login does not answer until `release` is notified, answering by path
+/// otherwise: logins hand out `tokens` in order, `keys/k` reads the key, `encrypt/k` encrypts.
+/// It records each request's path and token, and bounds followers like `ReqwestTransport`.
+#[derive(Debug, Default)]
+struct StallFirstLogin {
+    tokens: std::sync::Mutex<std::collections::VecDeque<&'static str>>,
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+    stalled: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+impl StallFirstLogin {
+    fn new(tokens: &[&'static str]) -> std::sync::Arc<Self> {
+        let t = Self::default();
+        t.tokens.lock().unwrap().extend(tokens);
+        std::sync::Arc::new(t)
+    }
+
+    /// `(path, token)` of every request so far (`-` for none).
+    fn seen(&self) -> Vec<(String, String)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl HttpTransport for StallFirstLogin {
+    fn send(
+        &self,
+        req: anykms_transit::anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<
+        '_,
+        Result<anykms_transit::anykms_http::transport::Response, SendError>,
+    > {
+        let path = req.uri().path().to_owned();
+        let token = req
+            .headers()
+            .get("X-Vault-Token")
+            .map_or("-".to_owned(), |v| v.to_str().unwrap().to_owned());
+        self.seen.lock().unwrap().push((path.clone(), token));
+        let login = path.ends_with("/login");
+        let stall = login && !self.stalled.swap(true, std::sync::atomic::Ordering::SeqCst);
+        // Decided at send time, so a stalled login keeps the token it was sent for.
+        let body = if login {
+            let t = self
+                .tokens
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a login token");
+            format!(r#"{{"auth": {{"client_token": "{t}", "lease_duration": 3600}}}}"#)
+        } else if path.ends_with("/keys/k") {
+            KEY_INFO.to_owned()
+        } else {
+            r#"{"data": {"ciphertext": "vault:v1:AAAA"}}"#.to_owned()
+        };
+        Box::pin(async move {
+            if stall {
+                self.release.notified().await;
+            }
+            let mut r = anykms_transit::anykms_http::http::Response::new(zeroize::Zeroizing::new(
+                body.into_bytes(),
+            ));
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            Ok(r)
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(std::time::Duration, anykms_core::SleepFn)> {
+        Some((
+            FOLLOWER_WAIT,
+            std::sync::Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
+    }
+}
+
+fn login_provider(t: &std::sync::Arc<StallFirstLogin>, test: &str) -> (TransitProvider, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("anykms-scripted-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let jwt = dir.join("jwt");
+    std::fs::write(&jwt, "eyJhbGciOiJFUzI1NiJ9.LOGINTESTJWT.c2ln\n").unwrap();
+    let p = TransitProvider::builder()
+        .server(
+            "default",
+            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
+                .login(Login::jwt("ci", &jwt))
+                .http_transport(t.clone()),
+        )
+        .build()
+        .unwrap();
+    (p, dir)
+}
+
+/// Polls `f` once.
+async fn poll_once<F: std::future::Future + Unpin>(f: &mut F) -> std::task::Poll<F::Output> {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(std::pin::Pin::new(&mut *f).poll(cx))).await
+}
+
+/// A request whose login is in flight but that its caller stopped polling (a future kept in an
+/// idle `select!` branch) holds the login lock. Later requests wait for it at most the
+/// transport's follower bound, then log in themselves.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_login_does_not_block_other_requests() {
+    let t = StallFirstLogin::new(&["s.stalled", "s.fresh"]);
+    let (p, dir) = login_provider(&t, "stalled-login");
+    let key = p.aead_key(uri()).unwrap();
+    let mut stalled = Box::pin(key.encrypt(b"x", b""));
+    assert!(poll_once(&mut stalled).await.is_pending());
+    assert_eq!(t.seen().len(), 1, "the first request is logging in");
+
+    let started = tokio::time::Instant::now();
+    let ct = tokio::time::timeout(std::time::Duration::from_secs(600), key.encrypt(b"y", b""))
+        .await
+        .expect("a request is blocked behind a login nobody polls")
+        .unwrap();
+    assert_eq!(ct.as_bytes(), b"vault:v1:AAAA");
+    assert!(
+        started.elapsed() >= FOLLOWER_WAIT,
+        "{:?}",
+        started.elapsed()
+    );
+    let seen = t.seen();
+    assert_eq!(seen[1].0, "/v1/auth/jwt/login", "{seen:?}");
+    assert!(seen[2..].iter().all(|(_, t)| t == "s.fresh"), "{seen:?}");
+    drop(stalled);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The stalled login of the test above, resumed after a newer login stored its token: its own
+/// request goes ahead with the token it got, but it does not replace the newer one.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_login_that_resumes_keeps_the_newer_token() {
+    let t = StallFirstLogin::new(&["s.stalled", "s.fresh"]);
+    let (p, dir) = login_provider(&t, "stalled-resume");
+    let key = p.aead_key(uri()).unwrap();
+    let mut stalled = Box::pin(key.encrypt(b"x", b""));
+    assert!(poll_once(&mut stalled).await.is_pending());
+    tokio::time::timeout(std::time::Duration::from_secs(600), key.encrypt(b"y", b""))
+        .await
+        .expect("a request is blocked behind a login nobody polls")
+        .unwrap();
+
+    t.release.notify_one();
+    stalled.await.unwrap();
+    let before = t.seen().len();
+    key.encrypt(b"z", b"").await.unwrap();
+    let seen = t.seen();
+    assert_eq!(seen.len(), before + 1, "no further login: {seen:?}");
+    assert_eq!(
+        seen.last().unwrap(),
+        &("/v1/transit/encrypt/k".to_owned(), "s.fresh".to_owned()),
+        "{seen:?}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

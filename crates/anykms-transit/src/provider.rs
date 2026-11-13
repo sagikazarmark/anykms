@@ -17,7 +17,7 @@ use crate::handles::{
     KeyCtx, TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey, TypeCache,
     mac_path, transit_hash,
 };
-use crate::uri::{SCHEMES, TransitKeyRef, label};
+use crate::uri::{SCHEMES, TransitKeyRef, label, shown_alias};
 
 /// Opens `hashivault://` and `openbao://` keys on configured Vault and OpenBao servers.
 #[derive(Clone)]
@@ -142,13 +142,15 @@ impl TransitProvider {
     }
 
     /// Resolves a URI to a key context. Errors carry the key's resource: when the URI does not
-    /// parse, the URI without its query string and with an authority that is not a valid alias
-    /// redacted ([`label`]: it may hold a pasted token); the key as written in it after that.
+    /// parse, the URI without its query string ([`uri_label`](Self::uri_label)); the key as
+    /// written in it after that. Either way an authority that is not a configured server alias is
+    /// redacted: it may hold a pasted token, even one that fits the alias grammar.
     fn resolve(&self, uri: impl IntoKeyUri, check: KeyTypeCheck) -> Result<KeyCtx> {
         let uri = uri.into_key_uri()?;
-        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(label(&uri)))?;
+        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         // No error below names a resource yet.
-        let written = KeyCtx::resource(uri.scheme(), &r.alias, &r.mount, &r.name, None);
+        let alias = shown_alias(&r.alias, |a| self.servers.contains_key(a));
+        let written = KeyCtx::resource(uri.scheme(), alias, &r.mount, &r.name, None);
         self.resolve_inner(uri.scheme(), r, check)
             .map_err(|e| e.with_resource(&*written))
     }
@@ -258,10 +260,10 @@ impl TransitProvider {
                 Operation::Open,
                 "Ed25519 signs messages; use ed25519_key",
             )
-            .with_resource(label(&uri)));
+            .with_resource(self.uri_label(&uri)));
         }
         if let Some(h) = alg.hash() {
-            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(label(&uri)))?;
+            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         }
         Ok(TransitDigestKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
@@ -279,19 +281,30 @@ impl TransitProvider {
     /// Opens an HMAC key for `alg`.
     pub fn mac_key(&self, uri: impl IntoKeyUri, alg: MacAlgorithm) -> Result<TransitMacKey> {
         let uri = uri.into_key_uri()?;
-        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(label(&uri)))?;
+        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         Ok(TransitMacKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
             alg,
         })
     }
-}
 
-/// [`SignatureAlgorithm::require_shape`], naming the key ([`label`]: `uri` without its query
-/// string, an invalid authority redacted) on failure.
-fn require_shape(uri: &KeyUri, alg: SignatureAlgorithm, shape: SigningShape) -> Result<()> {
-    alg.require_shape(shape, BACKEND)
-        .map_err(|e| e.with_resource(label(uri)))
+    /// `uri` as errors name it before it has resolved ([`label`]): without its query string, an
+    /// authority that is not a configured server alias redacted.
+    fn uri_label(&self, uri: &KeyUri) -> String {
+        label(uri, |a| self.servers.contains_key(a))
+    }
+
+    /// [`SignatureAlgorithm::require_shape`], naming the key ([`uri_label`](Self::uri_label)) on
+    /// failure.
+    fn require_shape(
+        &self,
+        uri: &KeyUri,
+        alg: SignatureAlgorithm,
+        shape: SigningShape,
+    ) -> Result<()> {
+        alg.require_shape(shape, BACKEND)
+            .map_err(|e| e.with_resource(self.uri_label(uri)))
+    }
 }
 
 impl Provider for TransitProvider {
@@ -348,7 +361,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<DigestSignerKey> {
-        require_shape(uri, alg, SigningShape::Digest)?;
+        self.require_shape(uri, alg, SigningShape::Digest)?;
         let k = self.digest_signing_key(uri, alg)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -366,7 +379,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<DigestVerifierKey> {
-        require_shape(uri, alg, SigningShape::Digest)?;
+        self.require_shape(uri, alg, SigningShape::Digest)?;
         let k = self.digest_signing_key(uri, alg)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -384,7 +397,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<MessageSignerKey> {
-        require_shape(uri, alg, SigningShape::Message)?;
+        self.require_shape(uri, alg, SigningShape::Message)?;
         let k = self.ed25519_key(uri)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -402,7 +415,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<MessageVerifierKey> {
-        require_shape(uri, alg, SigningShape::Message)?;
+        self.require_shape(uri, alg, SigningShape::Message)?;
         let k = self.ed25519_key(uri)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();

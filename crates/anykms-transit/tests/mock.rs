@@ -1395,13 +1395,14 @@ async fn errors_name_the_key_and_never_secrets() {
         .unwrap_err();
     check(&e, "openbao://default/transit/keys/v (namespace team-a)");
 
-    // Open errors name the key as written; URI syntax errors are ParseUri.
+    // Open errors name the key as written, an alias that is not configured redacted (it may be a
+    // pasted token); URI syntax errors are ParseUri.
     let unknown: KeyUri = "hashivault://nope/transit/keys/k?namespace=team-a"
         .parse()
         .unwrap();
     check(
         &p.aead_key(&unknown).unwrap_err(),
-        "hashivault://nope/transit/keys/k",
+        "hashivault://<redacted>/transit/keys/k",
     );
     let bad: KeyUri = "hashivault:///transit/keys/k?x=1".parse().unwrap();
     let e = p.aead_key(&bad).unwrap_err();
@@ -1925,6 +1926,71 @@ async fn tokens_in_a_rejected_uri_authority_are_not_echoed() {
             .unwrap();
         let e = r.aead(s).unwrap_err();
         assert!(!format!("{e} {e:?}").contains("SECRETTOKEN"), "{s}: {e}");
+    }
+}
+
+/// A token that fits the alias grammar (`SECRET_TOKEN`) is not a configured alias, so it is
+/// never echoed either: not by the lookup error of a well-formed URI, not by the parse error of
+/// a malformed one, not by the typed openers' pre-resolve checks. Configured aliases still are.
+#[tokio::test]
+async fn alias_shaped_tokens_in_the_uri_authority_are_not_echoed() {
+    let server = MockServer::start().await;
+    let p = provider(&server, Flavor::Vault);
+    let r = anykms_core::Registry::builder()
+        .provider(p.clone())
+        .build()
+        .unwrap();
+    let ecdsa = SignatureAlgorithm::EcdsaP256Sha256;
+    for (s, want) in [
+        // Parses; the alias lookup fails.
+        (
+            "hashivault://SECRET_TOKEN/transit/keys/x",
+            "hashivault://<redacted>/transit/keys/x",
+        ),
+        (
+            "openbao://hvs_SECRET_TOKEN/transit/keys/x?namespace=a",
+            "openbao://<redacted>/transit/keys/x",
+        ),
+        // Does not parse.
+        (
+            "hashivault://SECRET_TOKEN/transit/keys/",
+            "hashivault://<redacted>/transit/keys/",
+        ),
+        (
+            "hashivault://SECRET_TOKEN/transit/keys/x?foo=bar",
+            "hashivault://<redacted>/transit/keys/x",
+        ),
+        ("hashivault://SECRET_TOKEN", "hashivault://<redacted>"),
+    ] {
+        let errors = [
+            p.aead_key(s).unwrap_err(),
+            r.aead(s).unwrap_err(),
+            // Refused before the URI is resolved: Ed25519 is not a digest signer.
+            p.digest_signing_key(s, SignatureAlgorithm::Ed25519)
+                .unwrap_err(),
+            r.message_signer(s, ecdsa).unwrap_err(),
+            p.mac_key(s, MacAlgorithm::HmacSha256).unwrap_err(),
+        ];
+        for e in errors {
+            assert_eq!(e.resource(), Some(want), "{s}: {e}");
+            let shown = format!("{e}\n{e:?}");
+            assert!(!shown.contains("SECRET_TOKEN"), "{s}: {shown}");
+        }
+    }
+    // A configured alias is echoed, on parse and resolve errors alike.
+    for (s, want) in [
+        (
+            "hashivault://default/transit/keys/",
+            "hashivault://default/transit/keys/",
+        ),
+        (
+            "hashivault://default/transit/keys/x?namespace=other",
+            "hashivault://default/transit/keys/x",
+        ),
+    ] {
+        let e = p.aead_key(s).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Configuration, "{s}: {e}");
+        assert_eq!(e.resource(), Some(want), "{s}: {e}");
     }
 }
 

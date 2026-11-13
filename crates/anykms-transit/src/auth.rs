@@ -65,6 +65,11 @@ impl Method {
 /// (`lease_duration` 0) are never refreshed. Concurrent requests share one login or renewal; when
 /// a login fails with no usable token, requests get that error for the next 5 s instead of each
 /// logging in again. A 403-triggered login the caller cancels is retried by the next request.
+/// A request waits for another's login or renewal at most the transport's
+/// [`follower_wait`](anykms_http::HttpTransport::follower_wait) bound (twice the connect plus
+/// request timeout with the built-in transport), then runs its own: a caller that keeps a
+/// request future alive without polling it cannot stall the others. A login or renewal that
+/// finishes after a newer token was stored that way does not replace it.
 ///
 /// The JWT file is re-read (a small blocking read) at every login, so a rotated token is picked
 /// up. Unlike [`FileToken`](crate::FileToken), its permissions are not checked: Kubernetes
@@ -186,9 +191,17 @@ pub(crate) struct LoginSource {
     namespace: Option<String>,
     #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
     alias: String,
-    state: tokio::sync::Mutex<State>,
-    /// The token a 403 rejected, set by [`TokenSource::invalidate`] without waiting for `state`
-    /// (held by every `token()` call) and acted on by the next `token()`.
+    /// Locked only between awaits: decisions and their outcomes.
+    state: std::sync::Mutex<State>,
+    /// Held across a login or renewal, so concurrent requests share one.
+    flight: tokio::sync::Mutex<()>,
+    /// How long a request waits for `flight` before running its own login or renewal: the
+    /// transport's [`follower_wait`](HttpTransport::follower_wait). A holder that is alive but
+    /// not polled would otherwise block every later request (its own request timeout cannot fire
+    /// while it is not polled). `None`: as long as the holder lives.
+    max_wait: Option<(Duration, anykms_core::SleepFn)>,
+    /// The token a 403 rejected, set by [`TokenSource::invalidate`] and acted on by the next
+    /// `token()`.
     rejected: std::sync::Mutex<Option<Token>>,
 }
 
@@ -212,6 +225,67 @@ struct State {
     /// The error of the last failed login when no usable token was left, returned to requests
     /// until `retry_at` instead of each logging in again in turn.
     last_error: Option<Error>,
+    /// Bumped whenever `lease` is replaced. A login or renewal stores its outcome only if this
+    /// has not moved since it was decided: one that stalled while a request that stopped
+    /// waiting for it stored a newer token must not replace that token when it resumes.
+    generation: u64,
+}
+
+impl State {
+    fn store(&mut self, lease: Lease) {
+        self.lease = Some(lease);
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// What `token()` does next, given a 403 report (`rejected`).
+    fn plan(&self, now: Instant, rejected: Option<&Token>) -> Step {
+        let forced = rejected.is_some_and(|r| {
+            self.lease
+                .as_ref()
+                .is_some_and(|l| l.token.expose() == r.expose())
+        }) && self
+            .last_forced
+            .is_none_or(|t| now.duration_since(t) >= FORCED_LOGIN_INTERVAL);
+        if !forced && self.lease.as_ref().is_none_or(|l| l.expired(now)) {
+            // No usable token and a login just failed: share that failure for the backoff.
+            if let (Some(t), Some(e)) = (self.retry_at, self.last_error.as_ref())
+                && now < t
+            {
+                return Step::Done(Err(e.clone()));
+            }
+        }
+        let mut renew = None;
+        if let Some(l) = self.lease.as_ref().filter(|_| !forced) {
+            if !l.refresh_due(now) {
+                return Step::Done(Ok(Some(l.token.clone())));
+            }
+            let backing_off = self.retry_at.is_some_and(|t| now < t);
+            if backing_off && !l.expired(now) {
+                return Step::Done(Ok(Some(l.token.clone())));
+            }
+            if l.renewable && !l.expired(now) {
+                renew = Some((l.token.clone(), l.duration));
+            }
+        }
+        Step::Refresh {
+            renew,
+            forced,
+            generation: self.generation,
+        }
+    }
+}
+
+/// What a `token()` call does next, decided under the state lock.
+enum Step {
+    /// Answer without a request.
+    Done(Result<Option<Token>>),
+    /// Renew the token (with the lease it had) if given, else (or if that fails) log in;
+    /// `forced` by a 403. `generation` is the state's when this was decided.
+    Refresh {
+        renew: Option<(Token, Duration)>,
+        forced: bool,
+        generation: u64,
+    },
 }
 
 /// Puts a 403 report back if the login it triggered does not finish (the caller dropped the
@@ -275,13 +349,62 @@ impl LoginSource {
     ) -> Self {
         Self {
             login,
+            max_wait: http.follower_wait(),
             http,
             base,
             namespace,
             alias,
-            state: tokio::sync::Mutex::new(State::default()),
+            state: std::sync::Mutex::new(State::default()),
+            flight: tokio::sync::Mutex::new(()),
             rejected: std::sync::Mutex::new(None),
         }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take_rejected(&self) -> Option<Token> {
+        self.rejected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Waits for the login or renewal another request is running, at most
+    /// [`max_wait`](Self::max_wait). `None` once that passes: the caller then runs its own,
+    /// outside `flight`.
+    async fn enter(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if let Ok(g) = self.flight.try_lock() {
+            return Some(g);
+        }
+        let Some((max, sleep)) = &self.max_wait else {
+            return Some(self.flight.lock().await);
+        };
+        let mut lock = std::pin::pin!(self.flight.lock());
+        let mut timer = sleep(*max);
+        let entered = std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(g) = lock.as_mut().poll(cx) {
+                return std::task::Poll::Ready(Some(g));
+            }
+            if timer.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(None);
+            }
+            std::task::Poll::Pending
+        })
+        .await;
+        #[cfg(feature = "tracing")]
+        if entered.is_none() {
+            tracing::debug!(
+                backend = BACKEND,
+                server_alias = %self.alias,
+                waited_secs = max.as_secs(),
+                "the running login or renewal is not progressing; running another"
+            );
+        }
+        entered
     }
 
     /// Reads the JWT file. A missing file is `Unavailable`, every other failure
@@ -504,74 +627,76 @@ impl LoginSource {
 impl TokenSource for LoginSource {
     fn token(&self) -> BoxFuture<'_, Result<Option<Token>>> {
         Box::pin(async move {
-            // Held across the login or renewal, so concurrent requests share one.
-            let mut state = self.state.lock().await;
-            let now = Instant::now();
-            let rejected = self
-                .rejected
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            let forced = rejected.as_ref().is_some_and(|r| {
-                state
-                    .lease
-                    .as_ref()
-                    .is_some_and(|l| l.token.expose() == r.expose())
-            }) && state
-                .last_forced
-                .is_none_or(|t| now.duration_since(t) >= FORCED_LOGIN_INTERVAL);
+            let rejected = self.take_rejected();
+            let step = self.state().plan(Instant::now(), rejected.as_ref());
+            let forced = match step {
+                Step::Done(r) => return r,
+                Step::Refresh { forced, .. } => forced,
+            };
             // The limit and the report are only used up once the login finishes.
             let mut pending = PendingRejection {
                 slot: &self.rejected,
-                token: if forced { rejected } else { None },
+                token: rejected.filter(|_| forced),
             };
-            if !forced && state.lease.as_ref().is_none_or(|l| l.expired(now)) {
-                // No usable token and a login just failed: share that failure for the backoff.
-                if let (Some(t), Some(e)) = (state.retry_at, state.last_error.as_ref())
-                    && now < t
-                {
-                    return Err(e.clone());
-                }
-            }
-            if let Some(l) = state.lease.as_ref().filter(|_| !forced) {
-                if !l.refresh_due(now) {
-                    return Ok(Some(l.token.clone()));
-                }
-                let backing_off = state.retry_at.is_some_and(|t| now < t);
-                if backing_off && !l.expired(now) {
-                    return Ok(Some(l.token.clone()));
-                }
-                if l.renewable && !l.expired(now) {
-                    match self.renew(&l.token).await {
-                        // Renewal near the max TTL returns only the remaining time: once that
-                        // is under half the previous lease, log in again below instead of
-                        // renewing into ever shorter leases.
-                        Ok(new) if new.duration >= l.duration / 2 => {
-                            let token = new.token.clone();
-                            state.lease = Some(new);
+            // One login or renewal at a time: wait for the one running (bounded), whose outcome
+            // may answer this request too, so decide again after.
+            let _flight = self.enter().await;
+            let now = Instant::now();
+            let rejected = pending.token.take().or_else(|| self.take_rejected());
+            let step = self.state().plan(now, rejected.as_ref());
+            let (renew, forced, generation) = match step {
+                Step::Done(r) => return r,
+                Step::Refresh {
+                    renew,
+                    forced,
+                    generation,
+                } => (renew, forced, generation),
+            };
+            pending.token = rejected.filter(|_| forced);
+            if let Some((token, previous)) = renew {
+                match self.renew(&token).await {
+                    // Renewal near the max TTL returns only the remaining time: once that is
+                    // under half the previous lease, log in again below instead of renewing
+                    // into ever shorter leases.
+                    Ok(new) if new.duration >= previous / 2 => {
+                        let token = new.token.clone();
+                        let mut state = self.state();
+                        // Unless a newer token was stored meanwhile (see `State::generation`).
+                        if state.generation == generation {
+                            state.store(new);
                             state.retry_at = None;
-                            return Ok(Some(token));
                         }
-                        // A failed renewal was logged in its token span; log in again below.
-                        Ok(_) | Err(_) => {}
+                        return Ok(Some(token));
                     }
+                    // A failed renewal was logged in its token span; log in again below.
+                    Ok(_) | Err(_) => {}
                 }
             }
             let result = self.login().await;
             pending.token = None;
+            let mut state = self.state();
             if forced {
                 state.last_forced = Some(now);
+            }
+            let now = Instant::now();
+            if state.generation != generation {
+                // This login stalled while a request that stopped waiting for it stored a newer
+                // token: keep that one, and this login's outcome out of the state.
+                return match (result, state.lease.as_ref()) {
+                    (Ok(new), _) => Ok(Some(new.token)),
+                    (Err(_), Some(l)) if !l.expired(now) => Ok(Some(l.token.clone())),
+                    (Err(e), _) => Err(e),
+                };
             }
             match result {
                 Ok(new) => {
                     let token = new.token.clone();
-                    state.lease = Some(new);
+                    state.store(new);
                     state.retry_at = None;
                     state.last_error = None;
                     Ok(Some(token))
                 }
                 Err(e) => {
-                    let now = Instant::now();
                     match state.lease.as_ref() {
                         // Still valid: keep using it (and stop retrying for a while) rather
                         // than fail the request. A token a 403 rejected is kept too: the
