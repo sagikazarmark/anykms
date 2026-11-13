@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use anykms_core::SleepFn;
@@ -43,24 +45,35 @@ pub fn jittered_ttl(ttl: Duration) -> Duration {
 /// fetch progresses only while its caller polls it. A caller that leads a flight inside one item
 /// of a `buffer_unordered` stream and then awaits, from the loop body, an operation that follows
 /// the same flight, or that keeps a leading future pinned in an idle `select!` branch, strands
-/// its followers: the leader's own HTTP timeout cannot fire while it is not polled. With
+/// its followers: the leader's own HTTP timeout cannot fire while it is not polled. Such a leader
+/// still has its fetch **woken** (by the response arriving, or by that timeout's timer), but
+/// nothing polls it. A leader runs its fetch through [`Leader::track`] (as
+/// [`run_and_commit`](Self::run_and_commit) does) so that its followers can see this. With
 /// [`with_max_wait`](Self::with_max_wait), or the transport's bound through
-/// [`bound_by`](Self::bound_by) (what the built-in backends do), the first follower that has
-/// waited that long [takes the flight over](Self::take_over): it leads a replacement flight with
-/// its own fetch, and the stalled flight's other followers move to it (one replacement fetch,
-/// not one per follower). The stalled leader is superseded: if it resumes, it still gets its own
-/// fetch's result, but publishes nothing and does not end the replacement flight. A fetch that
-/// stored its result itself would still store it once superseded, over the replacement's newer
-/// one: a cache stores in the `commit` step of [`run_and_commit`](Self::run_and_commit) (or
+/// [`bound_by`](Self::bound_by) (what the built-in backends do), a follower looks at the leader
+/// each time the bound passes, and the first to find its fetch woken at the previous look (or
+/// when it started waiting) and not polled since [takes the flight over](Self::take_over): it
+/// leads a replacement flight with its own fetch, and the stalled flight's other followers move
+/// to it (one replacement fetch, not one per follower). A stalled leader is so replaced between
+/// one and two bounds after its fetch was woken. The bound is how long a woken fetch may go
+/// unpolled, not how long a fetch may take: a leader that is being polled is never replaced,
+/// however long its fetch takes, and neither is one whose fetch is never woken (I/O without a
+/// timeout that never completes, or a fetch not run through [`Leader::track`]): its followers
+/// wait for it as for a polled one.
+///
+/// The stalled leader is superseded: if it resumes, it still gets its own fetch's result, but
+/// publishes nothing and does not end the replacement flight. A fetch that stored its result
+/// itself would still store it once superseded, over the replacement's newer one: a cache stores
+/// in the `commit` step of [`run_and_commit`](Self::run_and_commit) (or
 /// [`Leader::finish_and_commit`]) instead, which runs only for a flight that was not taken over,
 /// atomically with ending it. (The credential cache orders its outcomes by [`Leader::id`]
 /// instead: later flights have greater ids.) Without a bound, followers wait for as long as the
 /// leader lives.
 ///
 /// [`run`](Self::run) is the whole pattern; [`join`](Self::join), [`try_lead`](Self::try_lead),
-/// [`follow`](Self::follow) and [`take_over`](Self::take_over) are its parts, for a cache that
-/// decides under its own lock whether to wait (the credential cache refreshes ahead of expiry
-/// without making the holders of a valid credential wait).
+/// [`follow`](Self::follow), [`take_over`](Self::take_over) and [`Leader::track`] are its parts,
+/// for a cache that decides under its own lock whether to wait (the credential cache refreshes
+/// ahead of expiry without making the holders of a valid credential wait).
 pub struct SingleFlight<K, V> {
     flights: Mutex<Flights<K, V>>,
     /// Set once, by [`with_max_wait`](Self::with_max_wait) or [`bound_by`](Self::bound_by).
@@ -75,7 +88,8 @@ pub enum Waited<V> {
     /// The leader was cancelled before it finished, or another follower took the flight over:
     /// [`join`](SingleFlight::join) again.
     Cancelled,
-    /// The [`with_max_wait`](SingleFlight::with_max_wait) bound passed first:
+    /// The leader stalled: its fetch was woken and then not polled for a whole
+    /// [`with_max_wait`](SingleFlight::with_max_wait) bound (see [`SingleFlight`]).
     /// [`take_over`](SingleFlight::take_over) the flight (its [`id`](Follower::id)).
     TimedOut,
 }
@@ -98,6 +112,59 @@ struct Running<V> {
     /// flight to move. Dropped from here when the flight lands or is taken over, so once the
     /// leader is gone too the channel closes (a cancelled leader).
     tx: Arc<watch::Sender<Slot<V>>>,
+    /// The leader's fetch, as [`Leader::track`] reports it to the followers.
+    progress: Arc<Progress>,
+}
+
+/// How a leader's [tracked](Leader::track) fetch is getting on: bit 0 is set when the fetch is
+/// woken and cleared when it is polled; the other bits count the polls. A follower that reads
+/// the same woken state twice, one bound apart, has seen the fetch go unpolled for that long.
+#[derive(Debug, Default)]
+struct Progress(AtomicU64);
+
+impl Progress {
+    const WOKEN: u64 = 1;
+
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// The fetch is about to be polled: one more poll, not woken since. (A wake between the two
+    /// steps is lost, harmlessly: the poll that follows sees what it woke for.)
+    fn polled(&self) {
+        self.0.fetch_add(Self::WOKEN + 1, Ordering::AcqRel);
+        self.0.fetch_and(!Self::WOKEN, Ordering::AcqRel);
+    }
+
+    fn woken(&self) {
+        self.0.fetch_or(Self::WOKEN, Ordering::AcqRel);
+    }
+
+    /// Whether the fetch was woken at `then` and has not been polled since (`now`).
+    fn stalled(then: u64, now: u64) -> bool {
+        then & Self::WOKEN != 0 && now == then
+    }
+}
+
+/// The waker a tracked fetch is polled with: records the wake, then wakes the leader's task.
+struct ProgressWaker {
+    progress: Arc<Progress>,
+    /// The leader task's waker, as of its last poll.
+    task: Mutex<Waker>,
+}
+
+impl Wake for ProgressWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.progress.woken();
+        self.task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wake_by_ref();
+    }
 }
 
 struct Flights<K, V> {
@@ -129,17 +196,21 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
         }
     }
 
-    /// Bounds how long a follower waits for the leader (see the type's docs): after `max`
-    /// (measured with `sleep`, e.g. `tokio::time::sleep`), [`run`](Self::run) takes the flight
-    /// over with the follower's own fetch. Pick a bound above the fetch's own timeout (a request
-    /// timeout), so a leader that is polled always finishes first.
+    /// Bounds how long a follower waits for a **stalled** leader (see the type's docs): once
+    /// the leader's fetch has been woken and left unpolled for `max` (measured with `sleep`,
+    /// e.g. `tokio::time::sleep`), [`run`](Self::run) takes the flight over with the
+    /// follower's own fetch, between one and two `max` after the wake. A leader that is being
+    /// polled is never replaced, however long its fetch takes, so `max` need not cover the
+    /// fetch: it is how long a stall goes unnoticed, and must stay well above the time a busy
+    /// executor may take to poll a woken task.
     pub fn with_max_wait(mut self, max: Duration, sleep: SleepFn) -> Self {
         self.max_wait = OnceLock::from((max, sleep));
         self
     }
 
-    /// Takes the bound from `transport` ([`HttpTransport::follower_wait`]) unless one is set
-    /// already: the first bound wins. A transport without a timer (`None`) leaves it unbounded.
+    /// Takes the stall bound ([`with_max_wait`](Self::with_max_wait)) from `transport`
+    /// ([`HttpTransport::follower_wait`]) unless one is set already: the first bound wins. A
+    /// transport without a timer (`None`) leaves it unbounded.
     pub fn bound_by(&self, transport: &dyn HttpTransport) {
         if self.max_wait.get().is_none()
             && let Some(w) = transport.follower_wait()
@@ -159,6 +230,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
             id: running.id,
             rx: running.tx.subscribe(),
             max_wait: self.max_wait.get().cloned(),
+            progress: running.progress.clone(),
         }
     }
 
@@ -170,21 +242,28 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
         let tx = Arc::new(watch::channel(Slot::Pending).0);
         let id = flights.next_id;
         flights.next_id = flights.next_id.wrapping_add(1);
-        flights
-            .running
-            .insert(key.clone(), Running { id, tx: tx.clone() });
+        let progress = Arc::<Progress>::default();
+        flights.running.insert(
+            key.clone(),
+            Running {
+                id,
+                tx: tx.clone(),
+                progress: progress.clone(),
+            },
+        );
         Leader {
             group: self,
             key: key.clone(),
             id,
             tx,
+            progress,
         }
     }
 
     /// The result of `fetch`, or of the flight already running for `key`. When that flight's
-    /// leader is cancelled, `fetch` runs instead (once). When the
-    /// [`with_max_wait`](Self::with_max_wait) bound passes first, the first follower to give up
-    /// runs `fetch` in a replacement flight that the others follow.
+    /// leader is cancelled, `fetch` runs instead (once). When that leader stalls (see the type's
+    /// docs), the first follower to notice runs `fetch` in a replacement flight that the others
+    /// follow. A caller that leads runs `fetch` [tracked](Leader::track).
     pub async fn run<F, Fut>(&self, key: &K, fetch: F) -> V
     where
         F: FnOnce() -> Fut,
@@ -217,7 +296,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
             };
             match flight {
                 Flight::Leader(leader) => {
-                    let v = fetch().await;
+                    let v = leader.track(fetch()).await;
                     leader.finish_and_commit(v.clone(), commit);
                     return v;
                 }
@@ -226,7 +305,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
                     match f.wait_bounded().await {
                         Waited::Done(v) => return v,
                         Waited::Cancelled => {}
-                        // The leader is alive but not making progress: replace its flight.
+                        // The leader is alive but stalled: replace its flight.
                         Waited::TimedOut => stalled = Some(id),
                     }
                 }
@@ -243,11 +322,11 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
         Flight::Leader(self.lead(&mut flights, key))
     }
 
-    /// For a follower whose wait for flight `stalled` [timed out](Waited::TimedOut): if that
-    /// flight is still the one running for `key`, leads a replacement and moves the stalled
-    /// flight's other followers to it (their wait ends with [`Waited::Cancelled`], and they
-    /// join the replacement). Otherwise, as [`join`](Self::join): another follower took over
-    /// first, or the flight landed.
+    /// For a follower whose wait for flight `stalled` [timed out](Waited::TimedOut) (its leader
+    /// stalled): if that flight is still the one running for `key`, leads a replacement and
+    /// moves the stalled flight's other followers to it (their wait ends with
+    /// [`Waited::Cancelled`], and they join the replacement). Otherwise, as
+    /// [`join`](Self::join): another follower took over first, or the flight landed.
     pub fn take_over(&self, key: &K, stalled: FlightId) -> Flight<'_, K, V> {
         let mut flights = self.lock();
         match flights.running.get(key) {
@@ -282,7 +361,8 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
 /// A caller's place in a [`SingleFlight`].
 #[derive(Debug)]
 pub enum Flight<'a, K: Eq + Hash, V> {
-    /// No flight was running: this caller fetches, then [finishes](Leader::finish).
+    /// No flight was running: this caller fetches ([tracked](Leader::track)), then
+    /// [finishes](Leader::finish).
     Leader(Leader<'a, K, V>),
     /// A flight is running: [wait](Follower::wait) for its result.
     Follower(Follower<V>),
@@ -295,6 +375,7 @@ pub struct Leader<'a, K: Eq + Hash, V> {
     key: K,
     id: u64,
     tx: Arc<watch::Sender<Slot<V>>>,
+    progress: Arc<Progress>,
 }
 
 impl<K: Eq + Hash, V> fmt::Debug for Leader<'_, K, V> {
@@ -308,6 +389,37 @@ impl<K: Eq + Hash, V> Leader<'_, K, V> {
     /// [took it over](SingleFlight::take_over) included.
     pub fn id(&self) -> FlightId {
         FlightId(self.id)
+    }
+
+    /// `fetch`, reporting to the flight's followers when it is woken and when it is polled, so
+    /// that they can tell a stalled leader from a slow one (see [`SingleFlight`]). Run the
+    /// flight's fetch through it: followers never take over a leader whose fetch is not
+    /// tracked.
+    pub fn track<F: Future>(&self, fetch: F) -> impl Future<Output = F::Output> + use<F, K, V> {
+        let progress = self.progress.clone();
+        async move {
+            let mut fetch = std::pin::pin!(fetch);
+            // Made at the first poll, then reused: only the task waker it forwards to changes.
+            let mut proxy: Option<(Arc<ProgressWaker>, Waker)> = None;
+            std::future::poll_fn(|cx| {
+                progress.polled();
+                let (p, waker) = proxy.get_or_insert_with(|| {
+                    let p = Arc::new(ProgressWaker {
+                        progress: progress.clone(),
+                        task: Mutex::new(cx.waker().clone()),
+                    });
+                    (p.clone(), Waker::from(p))
+                });
+                {
+                    let mut task = p.task.lock().unwrap_or_else(PoisonError::into_inner);
+                    if !task.will_wake(cx.waker()) {
+                        task.clone_from(cx.waker());
+                    }
+                }
+                fetch.as_mut().poll(&mut Context::from_waker(waker))
+            })
+            .await
+        }
     }
 
     /// Ends the flight if it is still the one running for its key; `false` if it was taken
@@ -369,6 +481,8 @@ pub struct Follower<V> {
     id: u64,
     rx: watch::Receiver<Slot<V>>,
     max_wait: Option<(Duration, SleepFn)>,
+    /// The followed leader's fetch ([`Leader::track`]).
+    progress: Arc<Progress>,
 }
 
 impl<V> fmt::Debug for Follower<V> {
@@ -398,22 +512,39 @@ impl<V: Clone> Follower<V> {
         }
     }
 
-    /// [`wait`](Self::wait), bounded by the group's [`with_max_wait`](SingleFlight::with_max_wait)
-    /// (unbounded without one).
+    /// [`wait`](Self::wait), ending with [`Waited::TimedOut`] once the leader is seen stalled:
+    /// each time the group's [`with_max_wait`](SingleFlight::with_max_wait) bound passes, the
+    /// follower looks at the leader's [tracked](Leader::track) fetch, and gives up if it was
+    /// woken at the previous look (or when the wait began) and has not been polled since. A
+    /// leader that is being polled, or whose fetch is never woken, is waited for until it
+    /// finishes or is cancelled; so is every leader without a bound.
     pub async fn wait_bounded(mut self) -> Waited<V> {
         let Some((max, sleep)) = self.max_wait.take() else {
             return self.wait().await.map_or(Waited::Cancelled, Waited::Done);
         };
+        let progress = self.progress.clone();
+        let mut seen = progress.load();
         let mut wait = std::pin::pin!(self.wait());
         let mut timer = sleep(max);
         std::future::poll_fn(|cx| {
-            if let std::task::Poll::Ready(v) = wait.as_mut().poll(cx) {
-                return std::task::Poll::Ready(v.map_or(Waited::Cancelled, Waited::Done));
+            if let Poll::Ready(v) = wait.as_mut().poll(cx) {
+                return Poll::Ready(v.map_or(Waited::Cancelled, Waited::Done));
             }
-            if timer.as_mut().poll(cx).is_ready() {
-                return std::task::Poll::Ready(Waited::TimedOut);
+            // At most two looks per poll: with a `sleep` that is ready at once, the follower
+            // yields between looks instead of spinning here.
+            for _ in 0..2 {
+                if timer.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                let now = progress.load();
+                if Progress::stalled(seen, now) {
+                    return Poll::Ready(Waited::TimedOut);
+                }
+                seen = now;
+                timer = sleep(max);
             }
-            std::task::Poll::Pending
+            cx.waker().wake_by_ref();
+            Poll::Pending
         })
         .await
     }
@@ -542,8 +673,12 @@ mod tests {
 /// Regression tests for the security review (L28, L29).
 #[cfg(test)]
 mod review_tests {
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
+
+    use tokio::time::{Instant, sleep};
 
     use super::*;
 
@@ -558,28 +693,37 @@ mod review_tests {
 
     type Group = SingleFlight<&'static str, Result<usize, String>>;
 
+    /// Polls `f` once, expecting it to be pending: a leader that has started its fetch, and that
+    /// its caller then stops polling.
+    async fn poll_once<F: Future + Unpin>(f: &mut F) {
+        std::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut *f).poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+
     /// L29: a leader that is alive but never polled again (one `buffer_unordered` item awaited
-    /// from the loop body, a pinned `select!` branch) must not hang its followers forever: after
-    /// the bound, a follower fetches for itself.
+    /// from the loop body, a pinned `select!` branch) must not hang its followers forever: once
+    /// its fetch was woken (here at 1 s) and then left unpolled for the bound, a follower
+    /// fetches for itself.
     #[tokio::test(start_paused = true)]
     async fn review_l29_a_follower_does_not_wait_forever_on_an_unpolled_leader() {
         let group: Arc<Group> = Arc::new(review_group());
         let mut leader = Box::pin(group.run(&"k", || async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            sleep(Duration::from_secs(1)).await;
             Ok(1)
         }));
-        // Poll the leader once (it starts its fetch and leads), then never again.
-        std::future::poll_fn(|cx| {
-            assert!(leader.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        poll_once(&mut leader).await;
+        let started = Instant::now();
         let r = tokio::time::timeout(
             Duration::from_secs(120),
             group.run(&"k", || async { Ok(2) }),
         )
         .await;
         assert_eq!(r, Ok(Ok(2)), "the follower hung on the unpolled leader");
+        // Seen woken at the first look (30 s), still unpolled at the second.
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
         drop(leader);
     }
 
@@ -603,14 +747,10 @@ mod review_tests {
         // 2 × (2 s connect + 10 s request).
         assert_eq!(group.max_wait(), Some(Duration::from_secs(24)));
         let mut leader = Box::pin(group.run(&"k", || async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            sleep(Duration::from_secs(1)).await;
             Ok(1)
         }));
-        std::future::poll_fn(|cx| {
-            assert!(leader.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        poll_once(&mut leader).await;
         let r = tokio::time::timeout(
             Duration::from_secs(120),
             group.run(&"k", || async { Ok(2) }),
@@ -620,32 +760,86 @@ mod review_tests {
         drop(leader);
     }
 
+    /// A leader that is being polled is never taken over, however long its fetch takes: here
+    /// ten 10 s steps (each woken and polled at once), over three times the 30 s bound. Every
+    /// follower, whenever it joined, gets the one fetch's result.
+    #[tokio::test(start_paused = true)]
+    async fn review_a_polled_leader_is_never_taken_over() {
+        let group: Arc<Group> = Arc::new(review_group());
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let started = Instant::now();
+        let callers: Vec<_> = (0..8u64)
+            .map(|i| {
+                let (group, fetches) = (group.clone(), fetches.clone());
+                tokio::spawn(async move {
+                    // The leader at 0 s, followers at 12, 24 … 84 s.
+                    sleep(Duration::from_secs(12 * i)).await;
+                    group
+                        .run(&"k", || async {
+                            let n = fetches.fetch_add(1, Ordering::SeqCst);
+                            for _ in 0..10 {
+                                sleep(Duration::from_secs(10)).await;
+                            }
+                            Ok(n)
+                        })
+                        .await
+                })
+            })
+            .collect();
+        let mut results = Vec::new();
+        for c in callers {
+            results.push(c.await.unwrap());
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1, "{results:?}");
+        assert!(results.iter().all(|r| *r == Ok(0)), "{results:?}");
+        assert_eq!(started.elapsed(), Duration::from_secs(100));
+        assert!(group.lock().running.is_empty());
+    }
+
+    /// A leader whose fetch is never woken (I/O without a timeout that never completes) cannot
+    /// be told from a polled one: its followers wait for it, until it is cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn review_a_leader_never_woken_is_waited_for() {
+        let group: Arc<Group> = Arc::new(review_group());
+        let mut leader = Box::pin(group.run(&"k", std::future::pending));
+        poll_once(&mut leader).await;
+        let follower = {
+            let group = group.clone();
+            tokio::spawn(async move { group.run(&"k", || async { Ok(2) }).await })
+        };
+        sleep(Duration::from_secs(600)).await;
+        assert!(
+            !follower.is_finished(),
+            "a leader never woken was taken over"
+        );
+        drop(leader);
+        assert_eq!(follower.await.unwrap(), Ok(2));
+    }
+
     /// Followers of a stalled (alive, unpolled) leader, joined at different times, give up
     /// together and share one replacement flight: no burst of one fetch per follower, and the
     /// late joiners do not wait out a bound of their own.
     #[tokio::test(start_paused = true)]
     async fn review_followers_of_a_stalled_leader_share_one_replacement() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         let group: Arc<Group> = Arc::new(review_group());
         let fetches = Arc::new(AtomicUsize::new(0));
-        let mut stalled = Box::pin(group.run(&"k", std::future::pending));
-        std::future::poll_fn(|cx| {
-            assert!(stalled.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        let started = tokio::time::Instant::now();
+        // Woken at 1 s, never polled again.
+        let mut stalled = Box::pin(group.run(&"k", || async {
+            sleep(Duration::from_secs(1)).await;
+            std::future::pending().await
+        }));
+        poll_once(&mut stalled).await;
+        let started = Instant::now();
         let followers: Vec<_> = (0..8u64)
             .map(|i| {
                 let (group, fetches) = (group.clone(), fetches.clone());
                 tokio::spawn(async move {
                     // Join at 0, 2 … 14 s.
-                    tokio::time::sleep(Duration::from_secs(2 * i)).await;
+                    sleep(Duration::from_secs(2 * i)).await;
                     group
                         .run(&"k", || async {
                             let n = fetches.fetch_add(1, Ordering::SeqCst);
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            sleep(Duration::from_secs(1)).await;
                             Ok(10 + n)
                         })
                         .await
@@ -658,8 +852,9 @@ mod review_tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1, "{results:?}");
         assert!(results.iter().all(|r| *r == Ok(10)), "{results:?}");
-        // The first follower's bound (30 s) plus the replacement fetch (1 s).
-        assert_eq!(started.elapsed(), Duration::from_secs(31));
+        // The follower that joined at 2 s found the fetch woken already and still unpolled one
+        // bound (30 s) later; then the replacement fetch (1 s).
+        assert_eq!(started.elapsed(), Duration::from_secs(33));
         // The replacement landed; the stalled leader, still alive, holds no flight.
         assert!(group.lock().running.is_empty());
         drop(stalled);
@@ -673,14 +868,11 @@ mod review_tests {
         let group: Arc<Group> = Arc::new(review_group());
         let (release_old, gate_old) = tokio::sync::oneshot::channel::<()>();
         let mut stalled = Box::pin(group.run(&"k", || async move {
+            sleep(Duration::from_secs(1)).await;
             gate_old.await.unwrap();
             Ok(1)
         }));
-        std::future::poll_fn(|cx| {
-            assert!(stalled.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        poll_once(&mut stalled).await;
         let (release_new, gate_new) = tokio::sync::oneshot::channel::<()>();
         let replacing = {
             let group = group.clone();
@@ -693,13 +885,13 @@ mod review_tests {
                     .await
             })
         };
-        // Past the bound (30 s): the follower has taken the flight over.
-        tokio::time::sleep(Duration::from_secs(31)).await;
+        // Woken at 1 s, seen woken at 30 s and still unpolled at 60 s: taken over.
+        sleep(Duration::from_secs(61)).await;
         let late = {
             let group = group.clone();
             tokio::spawn(async move { group.run(&"k", || async { Ok(3) }).await })
         };
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        sleep(Duration::from_millis(1)).await;
         // The stalled leader resumes and finishes.
         release_old.send(()).unwrap();
         assert_eq!(stalled.await, Ok(1));
@@ -730,16 +922,13 @@ mod review_tests {
         let mut stalled = Box::pin(group.run_and_commit(
             &"k",
             || async move {
+                sleep(Duration::from_secs(1)).await;
                 gate_old.await.unwrap();
                 Ok(1)
             },
             commit(&committed),
         ));
-        std::future::poll_fn(|cx| {
-            assert!(stalled.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        poll_once(&mut stalled).await;
         let (release_new, gate_new) = tokio::sync::oneshot::channel::<()>();
         let replacing = {
             let (group, commit) = (group.clone(), commit(&committed));
@@ -756,15 +945,15 @@ mod review_tests {
                     .await
             })
         };
-        // Past the bound (30 s): the follower has taken the flight over.
-        tokio::time::sleep(Duration::from_secs(31)).await;
+        // Woken at 1 s, seen woken at 30 s and still unpolled at 60 s: taken over.
+        sleep(Duration::from_secs(61)).await;
         let follower = {
             let (group, commit) = (group.clone(), commit(&committed));
             tokio::spawn(
                 async move { group.run_and_commit(&"k", || async { Ok(3) }, commit).await },
             )
         };
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        sleep(Duration::from_millis(1)).await;
         // The replacement lands first; then the stalled leader resumes.
         release_new.send(()).unwrap();
         assert_eq!(replacing.await.unwrap(), Ok(2));
@@ -796,7 +985,7 @@ mod review_tests {
                     .await
             })
         };
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        sleep(Duration::from_millis(1)).await;
         let follower = group.follow(&"k").unwrap();
         leader.abort();
         assert!(leader.await.unwrap_err().is_cancelled());

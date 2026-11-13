@@ -81,7 +81,8 @@ anykms-recipes = { workspace = true, features = ["envelope"] }
 # The fake Cloud KMS server's crypto (tests/common/fake.rs: AES-GCM, ECDSA, Ed25519, RSA, HMAC)
 # and service-account test keys.
 aws-lc-rs.workspace = true
-tokio.workspace = true
+# Paused time for the single-flight timing tests.
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

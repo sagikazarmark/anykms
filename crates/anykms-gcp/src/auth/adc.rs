@@ -1,12 +1,12 @@
 //! Application Default Credentials: the chain of the [module docs](super), resolved on the first
 //! token request. A failed resolution is not cached: the next request tries again.
 //!
-//! Concurrent first requests share one resolution (one metadata-server probe), but wait for it
-//! no longer than the transport's follower bound
-//! ([`HttpTransport::follower_wait`](anykms_http::HttpTransport::follower_wait)): a resolving
-//! caller that is alive but no longer polled would otherwise strand every later caller before
-//! they reach the (equally bounded) token cache. A caller that gives up resolves for itself;
-//! the first resolution to finish is kept.
+//! Concurrent first requests share one resolution (one metadata-server probe). A resolving
+//! caller that is alive but no longer polled would strand every later caller before they reach
+//! the (equally bounded) token cache: once its probe has been woken and then left unpolled for
+//! the transport's follower bound
+//! ([`HttpTransport::follower_wait`](anykms_http::HttpTransport::follower_wait)), a waiting
+//! caller resolves for itself instead. The first resolution to finish is kept.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

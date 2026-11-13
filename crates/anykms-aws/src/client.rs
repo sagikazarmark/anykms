@@ -189,8 +189,8 @@ pub(crate) struct Call<'a> {
 impl Kms {
     pub(crate) fn new(http: Arc<Http>, source: Arc<dyn CredentialSource>) -> Self {
         let creds = CredsCache::new(source);
-        // Callers waiting for another caller's credential fetch give up after the transport's
-        // bound (L29).
+        // Callers waiting for another caller's credential fetch replace it once it stalls: woken,
+        // then left unpolled for the transport's bound (L29).
         creds.cache.bound_by(&*http.transport);
         Self {
             http,

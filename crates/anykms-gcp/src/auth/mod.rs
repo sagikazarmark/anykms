@@ -851,8 +851,9 @@ impl<F: Fetch> Cached<F> {
         }
     }
 
-    /// Callers waiting for another caller's token fetch give up after `transport`'s bound
-    /// (L29). For fetchers that send requests.
+    /// Callers waiting for another caller's token fetch replace it once it stalls: woken, then
+    /// left unpolled for `transport`'s bound (L29). A fetch that is being polled is waited for,
+    /// however many requests it makes.
     pub(crate) fn bounded_by(self, transport: &dyn HttpTransport) -> Self {
         self.cache.bound_by(transport);
         self

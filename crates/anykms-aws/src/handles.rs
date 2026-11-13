@@ -64,7 +64,7 @@ impl DescribeCache {
         self.generation.load(Ordering::SeqCst)
     }
 
-    /// An empty cache whose followers give up waiting after `transport`'s bound (L29).
+    /// An empty cache whose followers replace a stalled leader after `transport`'s bound (L29).
     pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
         let c = Self::default();
         c.flights.bound_by(transport);

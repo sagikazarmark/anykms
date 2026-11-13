@@ -91,10 +91,12 @@ impl<S> TowerTransport<S> {
         }
     }
 
-    /// Bounds how long a backend's single-flight followers wait for another caller's request
-    /// ([`HttpTransport::follower_wait`]): after `max`, measured with `sleep` (e.g.
-    /// `tokio::time::sleep`, or a JS timer on wasm), a follower sends its own. Pick a bound above
-    /// the service's own request timeout. Without it, followers wait as long as the leader lives.
+    /// Bounds how long a backend's single-flight followers let another caller's request go
+    /// unpolled ([`HttpTransport::follower_wait`]): once that request has been woken (its
+    /// response arrived, or its timeout passed) and left unpolled for `max`, measured with
+    /// `sleep` (e.g. `tokio::time::sleep`, or a JS timer on wasm), a follower sends its own. A
+    /// request that is being polled is waited for however long it takes. Without it, followers
+    /// wait as long as the leader lives.
     pub fn with_follower_wait(mut self, max: Duration, sleep: anykms_core::SleepFn) -> Self {
         self.follower_wait = Some((max, sleep));
         self

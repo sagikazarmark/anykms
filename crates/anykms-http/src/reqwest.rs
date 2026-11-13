@@ -269,7 +269,9 @@ impl ReqwestTransportBuilder {
             .map_err(|_| config_err("cannot build the HTTP client"))?;
         Ok(ReqwestTransport {
             client,
-            // Above one request's whole life (connect, then the request timeout), twice over.
+            // How long a woken request may go unpolled before a follower replaces it: twice
+            // one request's whole life (connect, then the request timeout), far above any
+            // scheduling delay.
             follower_wait: self
                 .connect_timeout
                 .saturating_add(self.request_timeout)
@@ -385,8 +387,9 @@ impl HttpTransport for ReqwestTransport {
         Ok(())
     }
 
-    /// Twice the connect plus request timeout, on Tokio's timer: reqwest's own timeouts already
-    /// need a Tokio runtime with its time driver.
+    /// Twice the connect plus request timeout, on Tokio's timer (reqwest's own timeouts already
+    /// need a Tokio runtime with its time driver): how long a follower lets a woken request go
+    /// unpolled before sending its own.
     fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
         Some((
             self.follower_wait,

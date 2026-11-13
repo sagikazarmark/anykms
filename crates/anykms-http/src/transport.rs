@@ -60,9 +60,12 @@ pub trait HttpTransport: Send + Sync + 'static {
 
     /// How long a caller that waits for another caller's request (a follower in a backend's
     /// single-flight credential or metadata cache, see [`SingleFlight`](crate::cache::SingleFlight))
-    /// waits before sending its own, and how to sleep for it. A leader that is alive but not being
-    /// polled (a future held in an idle `select!` branch or `buffer_unordered` item) would
-    /// otherwise strand its followers: its own request timeout cannot fire while it is not polled.
+    /// lets that request go unpolled before sending its own, and how to sleep for it. A leader
+    /// that is alive but not being polled (a future held in an idle `select!` branch or
+    /// `buffer_unordered` item) would otherwise strand its followers: its own request timeout
+    /// cannot fire while it is not polled. A follower takes over only once the leader's request
+    /// has been woken (its response arrived, or its timeout passed) and then left unpolled for
+    /// this long, so a request that is being polled is never duplicated, however long it takes.
     ///
     /// The backends apply it to their caches. `None` (the default) waits as long as the leader
     /// lives, for transports without a timer. [`ReqwestTransport`](crate::reqwest::ReqwestTransport)

@@ -1016,8 +1016,9 @@ async fn poll_up_to<F: std::future::Future + Unpin>(f: &mut F, polls: usize) -> 
 }
 
 /// ADC discovery's first metadata probe, held by a caller that is alive but no longer polled,
-/// strands later callers no longer than the transport's follower bound: then they probe for
-/// themselves. The resolution is kept, so callers after that do not probe again.
+/// strands later callers no longer than the transport's follower bound once the probe's answer
+/// has arrived (its future is woken, but nothing polls it): then they probe for themselves. The
+/// resolution is kept, so callers after that do not probe again.
 #[tokio::test]
 async fn an_unpolled_adc_probe_does_not_strand_later_callers() {
     if child() {
@@ -1038,6 +1039,12 @@ async fn an_unpolled_adc_probe_does_not_strand_later_callers() {
         "within the bound, a later caller waits for the probe in flight"
     );
     assert_eq!(t.probes(), 1);
+    // The first probe's answer arrives, waking its future, which nobody polls.
+    t.release.send_replace(true);
+    assert!(
+        poll_up_to(&mut later, 50).await.is_none(),
+        "within the bound, a later caller waits for the probe in flight"
+    );
     t.bound_elapsed.send_replace(true);
     poll_up_to(&mut later, 1000)
         .await
@@ -1070,4 +1077,127 @@ async fn concurrent_adc_callers_share_one_probe() {
     a.unwrap();
     b.unwrap();
     assert_eq!(t.probes(), 1);
+}
+
+const IMPERSONATE: &str =
+    "/v1/projects/-/serviceAccounts/ci@p.iam.gserviceaccount.com:generateAccessToken";
+
+/// A transport for an `external_account` source with a subject token URL and impersonation:
+/// each of its three requests (subject token, STS exchange, impersonation) answers after 9 s
+/// of tokio time, KMS encrypt at once. It counts requests by path, and bounds single-flight
+/// followers at 24 s, as the built-in transport does.
+#[derive(Default)]
+struct SlowStages {
+    hits: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+
+impl SlowStages {
+    fn hits(&self, path: &str) -> usize {
+        self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
+}
+
+impl anykms_http::HttpTransport for SlowStages {
+    fn send(
+        &self,
+        req: anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<'_, Result<anykms_http::transport::Response, anykms_http::SendError>>
+    {
+        let path = req.uri().path().to_owned();
+        *self.hits.lock().unwrap().entry(path.clone()).or_default() += 1;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (slow, body) = match path.as_str() {
+            "/subject" => (true, "eyJ.subject.token".to_owned()),
+            "/v1/token" => (
+                true,
+                json!({
+                    "access_token": "ya29.federated", "expires_in": 3600, "token_type": "Bearer",
+                    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                })
+                .to_string(),
+            ),
+            IMPERSONATE => (
+                true,
+                json!({"accessToken": "ya29.sa", "expireTime": "2099-01-01T00:00:00Z"}).to_string(),
+            ),
+            _ => {
+                assert_eq!(
+                    req.headers().get("authorization").unwrap(),
+                    "Bearer ya29.sa"
+                );
+                (
+                    false,
+                    json!({
+                        "name": format!("{KEY}/cryptoKeyVersions/1"),
+                        "ciphertext": b64.encode(b"ct"),
+                        "ciphertextCrc32c": crc(b"ct"),
+                        "verifiedPlaintextCrc32c": true,
+                    })
+                    .to_string(),
+                )
+            }
+        };
+        Box::pin(async move {
+            if slow {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+            }
+            Ok(http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(zeroize::Zeroizing::new(body.into_bytes()))
+                .unwrap())
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        Some((
+            Duration::from_secs(24),
+            Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
+    }
+}
+
+/// An `external_account` token fetch of three sequential requests (subject token URL, STS,
+/// impersonation) that answer in 9 s each takes 27 s, more than the 24 s follower bound. Its
+/// caller keeps polling it, so callers waiting for it, whenever they came, wait it out: each
+/// endpoint is asked once, not once more per bound that passed.
+#[tokio::test(start_paused = true)]
+async fn a_slow_multi_stage_external_account_fetch_is_not_duplicated() {
+    if child() {
+        return;
+    }
+    let t = Arc::new(SlowStages::default());
+    let origin = "http://127.0.0.1:9";
+    let f = json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/pool",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{origin}/v1/token"),
+        "service_account_impersonation_url": format!("{origin}{IMPERSONATE}"),
+        "credential_source": {"url": format!("{origin}/subject")},
+    });
+    let p = GcpProvider::builder()
+        .credentials(Credentials::from_json(f.to_string()))
+        .endpoint(Endpoint::custom(origin))
+        .auth_endpoints(AuthEndpoints::custom(origin).unwrap())
+        .allow_loopback_http()
+        .http_transport(t.clone())
+        .build()
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let late = async {
+        // Joins after the first two stages.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        encrypt(&p).await
+    };
+    let (a, b, c, d, e) = tokio::join!(encrypt(&p), encrypt(&p), encrypt(&p), encrypt(&p), late);
+    for r in [a, b, c, d, e] {
+        r.unwrap();
+    }
+    assert_eq!(started.elapsed(), Duration::from_secs(27));
+    for path in ["/subject", "/v1/token", IMPERSONATE] {
+        assert_eq!(t.hits(path), 1, "{path}");
+    }
+    assert_eq!(t.hits(&format!("/v1/{KEY}:encrypt")), 5);
 }

@@ -168,13 +168,15 @@ look through a tower stack. With `into_service()` at the bottom, `NoRuntime` sti
 and is still a `Configuration` error, but it surfaces from the first request, after the credential
 chain has started.
 
-A second: the adapter cannot see the client's timeouts either, so it does not bound how long a
-backend's single-flight followers wait for another caller's credential or metadata request
+A second: the adapter has no timer of its own either, so it does not bound how long a backend's
+single-flight followers wait on another caller's credential or metadata request that has stalled
 (`HttpTransport::follower_wait`; the built-in transport bounds it at twice its connect plus request
-timeout). Without a bound, a caller that stops polling its request mid-flight (a dropped
-`select!` branch that is never polled again, say) leaves every later caller waiting for as long as
-that future lives. `with_follower_wait` sets the bound, measured with the given sleep (a JS timer
-on a Worker); pick one above the stack's request timeout, as above.
+timeout). Without a bound, a caller that stops polling its request mid-flight (a `select!` branch
+that is never polled again, say) leaves every later caller waiting for as long as that future
+lives. `with_follower_wait` sets the bound, measured with the given sleep (a JS timer on a
+Worker): once the stalled request has been woken (its response arrived, or its timeout passed)
+and left unpolled that long, a follower sends its own. A request that is being polled is waited
+for however long it takes, so the bound need not cover the stack's timeouts.
 
 The same adapter is how anykms runs where reqwest cannot, such as Cloudflare Workers: with
 `default-features = false`, a backend feature, `tower` and `js` (the host's clocks and RNG), the

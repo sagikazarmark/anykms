@@ -7,12 +7,14 @@
 //!   at a time ([`SingleFlight`]). Callers that find no usable credential while it runs wait for
 //!   it and all get its result: the credential, **or the error**. If the fetching caller is
 //!   cancelled, one of the waiting callers fetches instead. If it is alive but not being
-//!   polled, they wait for as long as it lives, unless [`max_wait`](CredentialCache::max_wait)
-//!   or [`bound_by`](CredentialCache::bound_by) bounds the wait: then the first waiting caller
-//!   to give up fetches in its place, and the others wait for that fetch (one fetch, not one
-//!   per waiter). If the stalled caller resumes, its fetch's credential, older and possibly
-//!   revoked, is not cached over the newer one: it gets the newer one too. The built-in
-//!   backends bound every cache by their transport's
+//!   polled (stalled), they wait for as long as it lives, unless
+//!   [`max_wait`](CredentialCache::max_wait) or [`bound_by`](CredentialCache::bound_by) sets a
+//!   stall bound: then, once its fetch has been woken (its response arrived, or its timeout
+//!   passed) and left unpolled for that long, the first waiting caller to notice fetches in
+//!   its place, and the others wait for that fetch (one fetch, not one per waiter). A fetch
+//!   that is being polled is waited for however long it takes. If the stalled caller resumes,
+//!   its fetch's credential, older and possibly revoked, is not cached over the newer one: it
+//!   gets the newer one too. The built-in backends bound every cache by their transport's
 //!   [`follower_wait`](crate::HttpTransport::follower_wait): twice the connect plus request
 //!   timeout with the built-in transport.
 //! - **Refresh ahead, without waiting.** A credential is refreshed `refresh_ahead` before it
@@ -257,25 +259,27 @@ impl<T: Clone + Send> CredentialCache<T> {
         self
     }
 
-    /// Bounds how long a caller waits for another caller's fetch: after `max` (measured with
-    /// `sleep`, e.g. `tokio::time::sleep`) it fetches in that caller's place (the other waiters
-    /// then wait for its fetch; see the [module docs](self)). Without it, a fetching caller
-    /// that is alive but not being polled (see [`SingleFlight`]) strands every caller that needs a
-    /// credential. Pick a bound above the fetch's own timeout.
+    /// Bounds how long a caller waits for another caller's **stalled** fetch: once that fetch
+    /// has been woken and left unpolled for `max` (measured with `sleep`, e.g.
+    /// `tokio::time::sleep`), it fetches in that caller's place (the other waiters then wait for
+    /// its fetch; see the [module docs](self) and [`SingleFlight::with_max_wait`]). A fetch that
+    /// is being polled is never replaced, however long it takes. Without a bound, a fetching
+    /// caller that is alive but not being polled (see [`SingleFlight`]) strands every caller
+    /// that needs a credential.
     pub fn max_wait(mut self, max: Duration, sleep: anykms_core::SleepFn) -> Self {
         let flight = std::mem::take(&mut self.flight);
         self.flight = flight.with_max_wait(max, sleep);
         self
     }
 
-    /// Takes the wait bound from `transport` ([`HttpTransport::follower_wait`](crate::HttpTransport::follower_wait))
+    /// Takes the stall bound from `transport` ([`HttpTransport::follower_wait`](crate::HttpTransport::follower_wait))
     /// unless one is set already (see [`SingleFlight::bound_by`]). The built-in backends call it
     /// with the transport the credential is fetched with.
     pub fn bound_by(&self, transport: &dyn crate::HttpTransport) {
         self.flight.bound_by(transport);
     }
 
-    /// The wait bound, if any.
+    /// The stall bound, if any.
     pub fn wait_bound(&self) -> Option<Duration> {
         self.flight.max_wait()
     }
@@ -293,8 +297,8 @@ impl<T: Clone + Send> CredentialCache<T> {
 
     /// The cached credential, or a new one from `fetch` when there is none, it expired, it is
     /// due for an early refresh, or it was [invalidated](Self::invalidate). `fetch` runs at most
-    /// once at a time across all callers (a fetch whose caller stalled past the wait bound
-    /// aside: see the [module docs](self)), and only in a caller that found no fetch running;
+    /// once at a time across all callers (a stalled fetch that was replaced aside: see
+    /// the [module docs](self)), and only in a caller that found no fetch running;
     /// the others wait for that fetch's result, unless they can return a still-valid
     /// credential. A failed fetch returns a still-valid credential if there is one, else the
     /// error, which later callers get too until the backoff ends.
@@ -362,7 +366,7 @@ impl<T: Clone + Send> CredentialCache<T> {
             };
             match flight {
                 Flight::Leader(leader) => {
-                    let result = self.settle(leader.id(), fetch().await);
+                    let result = self.settle(leader.id(), leader.track(fetch()).await);
                     leader.finish(result.clone());
                     return result;
                 }
@@ -838,7 +842,7 @@ mod review_tests {
     async fn review_l29_a_waiter_does_not_wait_forever_on_an_unpolled_fetch() {
         let cache: CredentialCache<String> = review_cache();
         let mut leader = Box::pin(cache.get(|| async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(Expiring::never_expires("slow".to_owned()))
         }));
         std::future::poll_fn(|cx| {
@@ -875,7 +879,7 @@ mod review_tests {
         cache.bound_by(&transport);
         assert_eq!(cache.wait_bound(), Some(Duration::from_secs(24)));
         let mut leader = Box::pin(cache.get(|| async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             Ok(Expiring::never_expires("slow".to_owned()))
         }));
         std::future::poll_fn(|cx| {
@@ -902,6 +906,7 @@ mod review_tests {
         let cache: CredentialCache<String> = review_cache();
         let (release, gate) = tokio::sync::oneshot::channel::<()>();
         let mut stalled = Box::pin(cache.get(|| async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
             gate.await.unwrap();
             Ok(Expiring::never_expires("old".to_owned()))
         }));
@@ -940,7 +945,11 @@ mod review_tests {
     async fn review_waiters_on_a_stalled_fetch_share_one_replacement() {
         let cache = std::sync::Arc::new(review_cache());
         let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut stalled = Box::pin(cache.get(std::future::pending::<Result<Expiring<String>>>));
+        // Woken at 1 s, never polled again.
+        let mut stalled = Box::pin(cache.get(|| async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::future::pending::<Result<Expiring<String>>>().await
+        }));
         std::future::poll_fn(|cx| {
             assert!(stalled.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -970,9 +979,44 @@ mod review_tests {
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1, "{got:?}");
         assert!(got.iter().all(|g| *g == ("own-1".to_owned(), 1)), "{got:?}");
-        // The first waiter's bound (30 s) plus the replacement fetch (1 s).
-        assert_eq!(started.elapsed(), Duration::from_secs(31));
+        // The waiter that joined at 2 s found the fetch woken already and still unpolled one
+        // bound (30 s) later; then the replacement fetch (1 s).
+        assert_eq!(started.elapsed(), Duration::from_secs(33));
         drop(stalled);
+    }
+
+    /// A fetch whose caller keeps polling it is never replaced, however long it takes: here ten
+    /// 10 s steps (each woken and polled at once), over three times the 30 s bound. Every caller,
+    /// whenever it came, gets that fetch's credential.
+    #[tokio::test(start_paused = true)]
+    async fn review_a_slow_fetch_that_is_polled_is_never_replaced() {
+        let cache = std::sync::Arc::new(review_cache());
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let callers: Vec<_> = (0..8u64)
+            .map(|i| {
+                let (cache, fetches) = (cache.clone(), fetches.clone());
+                tokio::spawn(async move {
+                    // The fetching caller at 0 s, waiters at 12, 24 … 84 s.
+                    tokio::time::sleep(Duration::from_secs(12 * i)).await;
+                    cache
+                        .get(|| async {
+                            let n = fetches.fetch_add(1, Ordering::SeqCst) + 1;
+                            for _ in 0..10 {
+                                tokio::time::sleep(Duration::from_secs(10)).await;
+                            }
+                            Ok(Expiring::never_expires(format!("slow-{n}")))
+                        })
+                        .await
+                })
+            })
+            .collect();
+        for c in callers {
+            let c = c.await.unwrap().unwrap();
+            assert_eq!((c.value().as_str(), c.generation()), ("slow-1", 1));
+        }
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(100));
     }
 
     fn review_cache() -> CredentialCache<String> {
