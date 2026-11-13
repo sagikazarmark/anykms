@@ -84,10 +84,16 @@ type LatestRead = (Instant, Option<(u64, Error)>);
 /// State shared by every handle of one provider.
 pub(crate) struct Shared {
     pub(crate) client: Client,
-    /// Passed key-type checks: check id → expiry.
+    /// Passed key-type checks: check id → expiry. A run caches its pass only if no check was
+    /// dropped since it started (`checks_generation`), and a run that a stalled flight's
+    /// replacement superseded caches nothing: a pass never comes back after the key was found
+    /// missing or changed.
     checks: Mutex<HashMap<String, Instant>>,
-    /// One run at a time of each check for concurrent misses (R-34), by check id.
-    check_flights: SingleFlight<String, Result<()>>,
+    /// Bumped, under `checks`' lock, whenever checks are dropped ([`KeyCtx::forget_checks`]).
+    checks_generation: AtomicU64,
+    /// One run at a time of each check for concurrent misses (R-34), by check id: whether the
+    /// run checked the key (`false`: a pass was cached meanwhile).
+    check_flights: SingleFlight<String, Result<bool>>,
     /// Public keys per version resource name: (expiry, key). The expiry counts from the fetch
     /// (`public_key_ttl`, jittered), not from the last use.
     public_keys: Mutex<HashMap<String, (Instant, VersionKey)>>,
@@ -129,6 +135,7 @@ impl Shared {
         Self {
             client,
             checks: Mutex::default(),
+            checks_generation: AtomicU64::new(0),
             check_flights,
             public_keys: Mutex::default(),
             unknown_versions: Mutex::default(),
@@ -353,13 +360,22 @@ impl KeyCtx {
             .is_some_and(|exp| now < *exp)
     }
 
-    fn mark_checked(&self, what: &str) {
-        let now = Instant::now();
+    /// The generation a check about to run caches its pass under (see [`Self::mark_checked`]).
+    fn checks_generation(&self) -> u64 {
+        self.shared.checks_generation.load(Ordering::SeqCst)
+    }
+
+    /// Caches a pass of check `what`, unless checks were dropped since `generation` was current.
+    fn mark_checked(&self, what: &str, generation: u64) {
         let mut c = self
             .shared
             .checks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.checks_generation() != generation {
+            return;
+        }
+        let now = Instant::now();
         c.retain(|_, exp| now < *exp);
         c.insert(
             self.check_id(what),
@@ -367,13 +383,16 @@ impl KeyCtx {
         );
     }
 
+    /// Drops the key's cached passes; a check that started before cannot cache its own.
     fn forget_checks(&self) {
         let prefix = format!("{}|", self.key.resource_name());
-        self.shared
+        let mut c = self
+            .shared
             .checks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|k, _| !k.starts_with(&prefix));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.shared.checks_generation.fetch_add(1, Ordering::SeqCst);
+        c.retain(|k, _| !k.starts_with(&prefix));
     }
 
     /// `cryptoKeys.get`.
@@ -739,30 +758,41 @@ impl KeyCtx {
 
     /// Runs the key-type check now, whatever the cache and the opt-out say, and caches a pass.
     async fn recheck(&self, check: Check, op: Operation) -> Result<()> {
+        let generation = self.checks_generation();
         check.run(self, op).await?;
-        self.mark_checked(&check.id());
+        self.mark_checked(&check.id(), generation);
         Ok(())
     }
 
     /// Runs the key-type check once (cached) unless the caller opted out. Concurrent misses for
-    /// the check share one run and its result, a failure included.
+    /// the check share one run and its result, a failure included; a pass is cached as the
+    /// flight lands, unless a replacement superseded that flight.
     async fn ensure(&self, check: Check, op: Operation) -> Result<()> {
         let id = check.id();
         if self.check == KeyTypeCheck::TrustCaller || self.checked(&id) {
             return Ok(());
         }
+        let generation = self.checks_generation();
         self.shared
             .check_flights
-            .run(&self.check_id(&id), || async {
-                // A flight that landed after the miss above has cached a pass.
-                if self.checked(&id) {
-                    return Ok(());
-                }
-                check.run(self, op).await?;
-                self.mark_checked(&id);
-                Ok(())
-            })
+            .run_and_commit(
+                &self.check_id(&id),
+                || async {
+                    // A flight that landed after the miss above has cached a pass.
+                    if self.checked(&id) {
+                        return Ok(false);
+                    }
+                    check.run(self, op).await?;
+                    Ok(true)
+                },
+                |r| {
+                    if let Ok(true) = r {
+                        self.mark_checked(&id, generation);
+                    }
+                },
+            )
             .await
+            .map(|_| ())
             // The flight may have been another operation's.
             .map_err(|e| e.with_operation(op))
     }

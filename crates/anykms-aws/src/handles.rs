@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,15 +42,28 @@ const DESCRIBE_TTL: Duration = Duration::from_secs(600);
 type Described = (Instant, Arc<AwsKeyInfo>);
 
 /// Key metadata cache, shared per provider: URI ARN → (expiry, (sent, metadata)).
+///
+/// A `DescribeKey` stores its metadata only if no `DescribeKey` sent later stored meanwhile and
+/// no entry was dropped since it started ([`generation`](Self::generation)), and one that a
+/// stalled flight's replacement superseded stores nothing: older metadata (an alias's previous
+/// target) never replaces newer metadata, nor comes back after the key was found missing or
+/// changed.
 #[derive(Default)]
 pub(crate) struct DescribeCache {
     entries: Mutex<HashMap<String, (Instant, Described)>>,
+    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget`]).
+    generation: AtomicU64,
     /// One `DescribeKey` at a time for concurrent misses (R-34), per URI ARN and grant tokens
     /// (a failure with one handle's grant tokens says nothing about another's).
     flights: SingleFlight<(String, usize), Result<Described>>,
 }
 
 impl DescribeCache {
+    /// The generation a `DescribeKey` about to be sent stores under (see [`KeyCtx::store`]).
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// An empty cache whose followers give up waiting after `transport`'s bound (L29).
     pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
         let c = Self::default();
@@ -475,12 +489,40 @@ impl KeyCtx {
         r
     }
 
+    /// Drops the cached metadata; a `DescribeKey` that started before cannot store its own.
     fn forget(&self) {
-        self.cache
+        let mut c = self
+            .cache
             .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.key.arn);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cache.generation.fetch_add(1, Ordering::SeqCst);
+        c.remove(&self.key.arn);
+    }
+
+    /// Caches a `DescribeKey`'s metadata (see [`DescribeCache`]): not if an entry was dropped
+    /// since `generation` was current, nor over metadata from a `DescribeKey` sent later.
+    fn store(&self, generation: u64, d: &Described) {
+        let mut c = self
+            .cache
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cache.generation() != generation
+            || c.get(&self.key.arn)
+                .is_some_and(|(_, (sent, _))| *sent >= d.0)
+        {
+            return;
+        }
+        let now = Instant::now();
+        c.retain(|_, (exp, _)| now < *exp);
+        c.insert(
+            self.key.arn.clone(),
+            (
+                now + anykms_http::cache::jittered_ttl(DESCRIBE_TTL),
+                d.clone(),
+            ),
+        );
     }
 
     fn cached(&self) -> Option<Described> {
@@ -530,31 +572,25 @@ impl KeyCtx {
     /// [`describe`](Self::describe), with the instant the request was sent: an alias target
     /// in the response is at least that new (a `KeyId` observed after it is newer).
     async fn describe_at(&self, op: Operation) -> Result<Described> {
+        let generation = self.cache.generation();
+        let d = self.describe_sent(op).await?;
+        self.store(generation, &d);
+        self.note_resolved(&d.1.arn, d.0);
+        Ok(d)
+    }
+
+    /// One uncached `DescribeKey` of the handle's key, with the instant it was sent; caches
+    /// nothing.
+    async fn describe_sent(&self, op: Operation) -> Result<Described> {
         let sent = Instant::now();
         let info = self.describe_key(Origin::Handle, self.arn(), op).await?;
-        let now = Instant::now();
-        {
-            let mut c = self
-                .cache
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            c.retain(|_, (exp, _)| now < *exp);
-            c.insert(
-                self.key.arn.clone(),
-                (
-                    now + anykms_http::cache::jittered_ttl(DESCRIBE_TTL),
-                    (sent, info.clone()),
-                ),
-            );
-        }
-        self.note_resolved(&info.arn, sent);
         Ok((sent, info))
     }
 
     /// The cached or fresh metadata. Concurrent misses for the key share one `DescribeKey` and
-    /// its result, a failure included (R-34). The handle adopts the metadata's alias target
-    /// when it is newer than what the handle knows, whichever handle fetched it (M1).
+    /// its result, a failure included (R-34); the metadata is cached as the flight lands,
+    /// unless a replacement superseded that flight. The handle adopts the metadata's alias
+    /// target when it is newer than what the handle knows, whichever handle fetched it (M1).
     async fn info(&self, op: Operation) -> Result<Arc<AwsKeyInfo>> {
         let (sent, i) = if let Some(d) = self.cached() {
             d
@@ -563,15 +599,24 @@ impl KeyCtx {
                 self.key.arn.clone(),
                 self.grant_tokens.as_ref().map_or(0, GrantTokens::identity),
             );
+            let generation = self.cache.generation();
             self.cache
                 .flights
-                .run(&flight, || async {
-                    // A flight that landed after the miss above has filled the cache.
-                    match self.cached() {
-                        Some(d) => Ok(d),
-                        None => self.describe_at(op).await,
-                    }
-                })
+                .run_and_commit(
+                    &flight,
+                    || async {
+                        // A flight that landed after the miss above has filled the cache.
+                        match self.cached() {
+                            Some(d) => Ok(d),
+                            None => self.describe_sent(op).await,
+                        }
+                    },
+                    |r| {
+                        if let Ok(d) = r {
+                            self.store(generation, d);
+                        }
+                    },
+                )
                 .await
                 // The flight may have been another operation's.
                 .map_err(|e| e.with_operation(op))?

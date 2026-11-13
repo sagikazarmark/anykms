@@ -34,10 +34,10 @@ pub fn jittered_ttl(ttl: Duration) -> Duration {
 /// The first caller for a key leads the flight: it runs its own fetch, in its own task (nothing
 /// is spawned), and publishes the result, success **or** failure, to every caller that joined
 /// while it ran. Nothing is kept once the flight lands: the leader stores what should outlive it
-/// (a metadata or credential cache) before it [finishes](Leader::finish), and a caller arriving
-/// later starts a new flight. If the leader is cancelled (its future dropped) before it
-/// finishes, its followers wake up and one of them leads a new flight with its own fetch, so a
-/// cancelled caller never strands the others.
+/// (a metadata or credential cache) as it [finishes](Leader::finish_and_commit) (see below on
+/// superseded leaders), and a caller arriving later starts a new flight. If the leader is
+/// cancelled (its future dropped) before it finishes, its followers wake up and one of them
+/// leads a new flight with its own fetch, so a cancelled caller never strands the others.
 ///
 /// A leader that is alive but **not being polled** is another matter: nothing is spawned, so its
 /// fetch progresses only while its caller polls it. A caller that leads a flight inside one item
@@ -49,10 +49,13 @@ pub fn jittered_ttl(ttl: Duration) -> Duration {
 /// waited that long [takes the flight over](Self::take_over): it leads a replacement flight with
 /// its own fetch, and the stalled flight's other followers move to it (one replacement fetch,
 /// not one per follower). The stalled leader is superseded: if it resumes, it still gets its own
-/// fetch's result, but publishes nothing and does not end the replacement flight. What its fetch
-/// stores is up to the fetch: a cache whose entries must not go back in time checks
-/// [`Leader::id`] (later flights have greater ids) before it commits, as the credential cache
-/// does. Without a bound, followers wait for as long as the leader lives.
+/// fetch's result, but publishes nothing and does not end the replacement flight. A fetch that
+/// stored its result itself would still store it once superseded, over the replacement's newer
+/// one: a cache stores in the `commit` step of [`run_and_commit`](Self::run_and_commit) (or
+/// [`Leader::finish_and_commit`]) instead, which runs only for a flight that was not taken over,
+/// atomically with ending it. (The credential cache orders its outcomes by [`Leader::id`]
+/// instead: later flights have greater ids.) Without a bound, followers wait for as long as the
+/// leader lives.
 ///
 /// [`run`](Self::run) is the whole pattern; [`join`](Self::join), [`try_lead`](Self::try_lead),
 /// [`follow`](Self::follow) and [`take_over`](Self::take_over) are its parts, for a cache that
@@ -187,6 +190,25 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = V>,
     {
+        self.run_and_commit(key, fetch, |_| {}).await
+    }
+
+    /// [`run`](Self::run), where the caller that runs `fetch` also runs `commit` on its result
+    /// (to store it in a cache) as it [finishes](Leader::finish_and_commit) the flight: only if
+    /// its flight was not [taken over](Self::take_over) meanwhile, and under the group's lock, so
+    /// no replacement flight lands between the check and the store, and a caller that joins
+    /// after the flight landed finds what `commit` stored. A superseded leader's caller still
+    /// gets its own result, uncommitted. Nothing is committed when the fetch is cancelled, nor
+    /// by a caller that followed another's flight (that flight's leader commits).
+    ///
+    /// `commit` runs with the group's lock held: it must be quick, not block, and not call into
+    /// this group.
+    pub async fn run_and_commit<F, Fut, C>(&self, key: &K, fetch: F, commit: C) -> V
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = V>,
+        C: FnOnce(&V),
+    {
         let mut stalled = None;
         loop {
             let flight = match stalled.take() {
@@ -196,7 +218,7 @@ impl<K: Eq + Hash + Clone, V: Clone> SingleFlight<K, V> {
             match flight {
                 Flight::Leader(leader) => {
                     let v = fetch().await;
-                    leader.finish(v.clone());
+                    leader.finish_and_commit(v.clone(), commit);
                     return v;
                 }
                 Flight::Follower(f) => {
@@ -305,14 +327,29 @@ impl<K: Eq + Hash, V> Leader<'_, K, V> {
     /// new flight. A flight that was [taken over](SingleFlight::take_over) has no followers
     /// left: nothing is handed out, and the replacement flight goes on.
     pub fn finish(self, value: V) {
+        self.finish_and_commit(value, |_| {});
+    }
+
+    /// [`finish`](Self::finish), running `commit` on `value` first (to store it in a cache) if
+    /// the flight was not [taken over](SingleFlight::take_over): under the group's lock, so no
+    /// replacement flight lands between the check and the store, and before the followers get
+    /// `value`. Returns whether `commit` ran; a superseded flight commits nothing.
+    ///
+    /// `commit` runs with the group's lock held: it must be quick, not block, and not call into
+    /// the group.
+    pub fn finish_and_commit(self, value: V, commit: impl FnOnce(&V)) -> bool {
         let mut flights = self
             .group
             .flights
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if self.land(&mut flights) {
-            self.tx.send_replace(Slot::Done(value));
+        if !self.land(&mut flights) {
+            return false;
         }
+        // Should `commit` panic, the flight has landed: its followers see a cancelled leader.
+        commit(&value);
+        self.tx.send_replace(Slot::Done(value));
+        true
     }
 }
 
@@ -673,6 +710,101 @@ mod review_tests {
         release_new.send(()).unwrap();
         assert_eq!(replacing.await.unwrap(), Ok(2));
         assert_eq!(late.await.unwrap(), Ok(2));
+        assert!(group.lock().running.is_empty());
+    }
+
+    /// `run_and_commit`: the stalled leader resumes after a follower took its flight over and
+    /// gets its own result, but only the replacement's result is committed (even when the
+    /// stalled leader finishes last); a follower commits nothing; a cancelled leader commits
+    /// nothing.
+    #[tokio::test(start_paused = true)]
+    async fn review_only_a_current_leader_commits() {
+        let group: Arc<Group> = Arc::new(review_group());
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let commit = |c: &Arc<Mutex<Vec<Result<usize, String>>>>| {
+            let c = c.clone();
+            move |v: &Result<usize, String>| c.lock().unwrap().push(v.clone())
+        };
+
+        let (release_old, gate_old) = tokio::sync::oneshot::channel::<()>();
+        let mut stalled = Box::pin(group.run_and_commit(
+            &"k",
+            || async move {
+                gate_old.await.unwrap();
+                Ok(1)
+            },
+            commit(&committed),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(stalled.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let (release_new, gate_new) = tokio::sync::oneshot::channel::<()>();
+        let replacing = {
+            let (group, commit) = (group.clone(), commit(&committed));
+            tokio::spawn(async move {
+                group
+                    .run_and_commit(
+                        &"k",
+                        || async move {
+                            gate_new.await.unwrap();
+                            Ok(2)
+                        },
+                        commit,
+                    )
+                    .await
+            })
+        };
+        // Past the bound (30 s): the follower has taken the flight over.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        let follower = {
+            let (group, commit) = (group.clone(), commit(&committed));
+            tokio::spawn(
+                async move { group.run_and_commit(&"k", || async { Ok(3) }, commit).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        // The replacement lands first; then the stalled leader resumes.
+        release_new.send(()).unwrap();
+        assert_eq!(replacing.await.unwrap(), Ok(2));
+        assert_eq!(follower.await.unwrap(), Ok(2));
+        release_old.send(()).unwrap();
+        assert_eq!(stalled.await, Ok(1));
+        assert_eq!(*committed.lock().unwrap(), [Ok(2)]);
+
+        // A superseded leader that finishes before its replacement commits nothing either.
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let old = group.try_lead(&"k").unwrap();
+        let Flight::Follower(f) = group.join(&"k") else {
+            panic!("a flight is running")
+        };
+        let Flight::Leader(new) = group.take_over(&"k", f.id()) else {
+            panic!("the stalled flight is replaced")
+        };
+        assert!(!old.finish_and_commit(Ok(1), commit(&committed)));
+        assert!(new.finish_and_commit(Ok(2), commit(&committed)));
+        assert_eq!(*committed.lock().unwrap(), [Ok(2)]);
+
+        // A cancelled leader commits nothing; the follower that leads next does.
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let leader = {
+            let (group, commit) = (group.clone(), commit(&committed));
+            tokio::spawn(async move {
+                group
+                    .run_and_commit(&"k", std::future::pending, commit)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let follower = group.follow(&"k").unwrap();
+        leader.abort();
+        assert!(leader.await.unwrap_err().is_cancelled());
+        assert_eq!(follower.wait().await, None);
+        assert!(committed.lock().unwrap().is_empty());
+        let next = group.run_and_commit(&"k", || async { Ok(4) }, commit(&committed));
+        assert_eq!(next.await, Ok(4));
+        assert_eq!(*committed.lock().unwrap(), [Ok(4)]);
         assert!(group.lock().running.is_empty());
     }
 

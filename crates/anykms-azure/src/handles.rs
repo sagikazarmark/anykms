@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,15 +54,31 @@ pub(crate) enum Origin {
 /// (host, lowercase name, version).
 pub(crate) type CacheKey = (String, String, Option<String>);
 
-/// Key bundles read for the key-type check, shared per provider.
+/// A key bundle and when the read that returned it was sent.
+type Bundled = (Instant, Arc<KeyBundle>);
+
+/// Key bundles read for the key-type check, shared per provider: key → (expiry, (sent,
+/// bundle)).
+///
+/// A read stores its bundle only if no read sent later stored meanwhile and no entry was
+/// dropped since it started ([`generation`](Self::generation)), and a read that a stalled
+/// flight's replacement superseded stores nothing: an older bundle never replaces a newer one,
+/// nor comes back after the key was found missing or changed.
 #[derive(Default)]
 pub(crate) struct DescribeCache {
-    entries: Mutex<HashMap<CacheKey, (Instant, Arc<KeyBundle>)>>,
+    entries: Mutex<HashMap<CacheKey, (Instant, Bundled)>>,
+    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget`]).
+    generation: AtomicU64,
     /// One key read at a time for concurrent misses (R-34).
-    flights: SingleFlight<CacheKey, Result<Arc<KeyBundle>>>,
+    flights: SingleFlight<CacheKey, Result<Bundled>>,
 }
 
 impl DescribeCache {
+    /// The generation a read about to be sent stores under (see [`KeyCtx::store`]).
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// An empty cache whose followers give up waiting after `transport`'s bound (L29).
     pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
         let c = Self::default();
@@ -210,15 +227,18 @@ impl KeyCtx {
         )
     }
 
+    /// Drops the cached bundle; a read that started before cannot store its own.
     fn forget(&self) {
-        self.cache
+        let mut cache = self
+            .cache
             .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.cache_key());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cache.generation.fetch_add(1, Ordering::SeqCst);
+        cache.remove(&self.cache_key());
     }
 
-    fn cached(&self) -> Option<Arc<KeyBundle>> {
+    fn cached(&self) -> Option<Bundled> {
         let now = Instant::now();
         self.cache
             .entries
@@ -309,40 +329,58 @@ impl KeyCtx {
     }
 
     /// The bundle of the URI's version (or the current one), cached for the key-type check.
-    /// Concurrent misses for the key share one read and its result, a failure included (R-34).
+    /// Concurrent misses for the key share one read and its result, a failure included (R-34);
+    /// the bundle is cached as the flight lands, unless a replacement superseded that flight.
     pub(crate) async fn bundle(&self, op: Operation) -> Result<Arc<KeyBundle>> {
-        if let Some(b) = self.cached() {
+        if let Some((_, b)) = self.cached() {
             return Ok(b);
         }
+        let generation = self.cache.generation();
         self.cache
             .flights
-            .run(&self.cache_key(), || async {
-                // A flight that landed after the miss above has filled the cache.
-                if let Some(b) = self.cached() {
-                    return Ok(b);
-                }
-                let b = Arc::new(
-                    self.get_bundle(Origin::Handle, self.uri.version(), op)
-                        .await?,
-                );
-                self.store(b.clone());
-                Ok(b)
-            })
+            .run_and_commit(
+                &self.cache_key(),
+                || async {
+                    // A flight that landed after the miss above has filled the cache.
+                    if let Some(b) = self.cached() {
+                        return Ok(b);
+                    }
+                    let sent = Instant::now();
+                    let b = self
+                        .get_bundle(Origin::Handle, self.uri.version(), op)
+                        .await?;
+                    Ok((sent, Arc::new(b)))
+                },
+                |r| {
+                    if let Ok(b) = r {
+                        self.store(generation, b);
+                    }
+                },
+            )
             .await
+            .map(|(_, b)| b)
             // The flight may have been another operation's.
             .map_err(|e| e.with_operation(op))
     }
 
-    /// Caches `b` as the bundle of the URI's version (or the current one).
-    fn store(&self, b: Arc<KeyBundle>) {
-        let now = Instant::now();
+    /// Caches a read's bundle as the bundle of the URI's version (or the current one), see
+    /// [`DescribeCache`]: not if an entry was dropped since `generation` was current, nor over a
+    /// bundle from a read sent later.
+    fn store(&self, generation: u64, b: &Bundled) {
+        let key = self.cache_key();
         let mut cache = self
             .cache
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cache.generation() != generation
+            || cache.get(&key).is_some_and(|(_, (sent, _))| *sent >= b.0)
+        {
+            return;
+        }
+        let now = Instant::now();
         cache.retain(|_, (exp, _)| now < *exp);
-        cache.insert(self.cache_key(), (expiry(now, self.client.cache_ttl), b));
+        cache.insert(key, (expiry(now, self.client.cache_ttl), b.clone()));
     }
 
     /// The `Preflight` of every handle: a fresh read of the key (the metadata `describe`
@@ -355,13 +393,15 @@ impl KeyCtx {
     ) -> Result<KeyInfo> {
         self.scoped(async {
             let op = Operation::Describe;
+            let generation = self.cache.generation();
+            let sent = Instant::now();
             let (b, info) = self.azure_info_with_bundle().await?;
             if let Err(e) = check(&b) {
                 self.forget();
                 return Err(e.with_operation(op));
             }
             let usable = check_usable(&b.info, op);
-            self.store(Arc::new(b));
+            self.store(generation, &(sent, Arc::new(b)));
             usable?;
             Ok(info.to_key_info())
         })

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use anykms_core::prelude::*;
-use anykms_core::{ErrorKind, KeyUri};
+use anykms_core::{ErrorKind, KeyTypeCheck, KeyUri};
 use anykms_testkit::{Scripted, ScriptedTransport};
 use anykms_transit::anykms_http::transport::ConnectFailure;
 use anykms_transit::anykms_http::{HttpTransport, SendError};
@@ -410,4 +410,191 @@ async fn a_stalled_login_that_resumes_keeps_the_newer_token() {
         "{seen:?}"
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A transport whose first `keys/k` read does not answer until `release` is notified, and
+/// describes the key as it was then (`rsa-2048`); later reads describe it as recreated
+/// (`aes256-gcm96`), but the second fails with a 400 if `fail_second_read`. `encrypt/k`
+/// encrypts, but the first time answers that the key is missing if `fail_first_encrypt`. It
+/// records each request's path, and bounds followers like `ReqwestTransport`.
+#[derive(Debug, Default)]
+struct StallFirstKeyRead {
+    seen: std::sync::Mutex<Vec<String>>,
+    reads: std::sync::atomic::AtomicUsize,
+    fail_second_read: bool,
+    fail_first_encrypt: bool,
+    encrypts: std::sync::atomic::AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+impl HttpTransport for StallFirstKeyRead {
+    fn send(
+        &self,
+        req: anykms_transit::anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<
+        '_,
+        Result<anykms_transit::anykms_http::transport::Response, SendError>,
+    > {
+        let path = req.uri().path().to_owned();
+        self.seen.lock().unwrap().push(path.clone());
+        let read = path
+            .ends_with("/keys/k")
+            .then(|| self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let (status, body) = match read {
+            Some(0) => (
+                200,
+                r#"{"data": {"type": "rsa-2048", "latest_version": 1, "keys": {"1": 1}}}"#,
+            ),
+            Some(1) if self.fail_second_read => (400, r#"{"errors": ["try again"]}"#),
+            Some(_) => (200, KEY_INFO),
+            None if self.fail_first_encrypt
+                && self
+                    .encrypts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0 =>
+            {
+                (400, r#"{"errors": ["encryption key not found"]}"#)
+            }
+            None => (200, r#"{"data": {"ciphertext": "vault:v1:AAAA"}}"#),
+        };
+        Box::pin(async move {
+            if read == Some(0) {
+                self.release.notified().await;
+            }
+            let mut r = anykms_transit::anykms_http::http::Response::new(zeroize::Zeroizing::new(
+                body.as_bytes().to_vec(),
+            ));
+            *r.status_mut() = status.try_into().unwrap();
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            Ok(r)
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(std::time::Duration, anykms_core::SleepFn)> {
+        Some((
+            FOLLOWER_WAIT,
+            std::sync::Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
+    }
+}
+
+/// An AEAD handle over `t`, and an encryption whose key-type read is stalled (its caller
+/// stopped polling it).
+async fn stalled_type_read(
+    t: &std::sync::Arc<StallFirstKeyRead>,
+) -> (
+    anykms_transit::TransitAeadKey,
+    std::pin::Pin<
+        Box<impl std::future::Future<Output = anykms_core::Result<anykms_core::Ciphertext>>>,
+    >,
+) {
+    let p = TransitProvider::builder()
+        .server(
+            "default",
+            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
+                .token("s.token")
+                .http_transport(t.clone()),
+        )
+        .build()
+        .unwrap();
+    let key = p.aead_key(uri()).unwrap();
+    let mut stalled = {
+        let key = key.clone();
+        Box::pin(async move { key.encrypt(b"x", b"").await })
+    };
+    assert!(poll_once(&mut stalled).await.is_pending());
+    (key, stalled)
+}
+
+/// A key-type read that stalls is taken over by a request that waited out the follower bound,
+/// which reads the key's newer type and caches it. When the stalled read resumes, its own
+/// request is answered from what it read, but the older type it read does not replace the
+/// newer one in the cache.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_type_read_that_resumes_does_not_overwrite_the_newer_type() {
+    let t = std::sync::Arc::new(StallFirstKeyRead::default());
+    let (key, stalled) = stalled_type_read(&t).await;
+    let ct = tokio::time::timeout(std::time::Duration::from_secs(600), key.encrypt(b"y", b""))
+        .await
+        .expect("a request is blocked behind a key read nobody polls")
+        .unwrap();
+    assert_eq!(ct.as_bytes(), b"vault:v1:AAAA");
+
+    // The stalled read resumes: its request is checked against the type it read.
+    t.release.notify_one();
+    let e = stalled.await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::KeyMismatch, "{e}");
+
+    // The cache still holds the newer type: no metadata read, no refusal.
+    let before = t.seen.lock().unwrap().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("the stalled read's older type replaced the cached one");
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(seen[before..], ["/v1/transit/encrypt/k"], "{seen:?}");
+}
+
+/// As above, but the replacement read fails, so nothing newer is cached: the superseded read
+/// still stores nothing, and the next request reads the key again.
+#[tokio::test(start_paused = true)]
+async fn a_superseded_type_read_stores_nothing_when_its_replacement_failed() {
+    let t = std::sync::Arc::new(StallFirstKeyRead {
+        fail_second_read: true,
+        ..Default::default()
+    });
+    let (key, stalled) = stalled_type_read(&t).await;
+    tokio::time::timeout(std::time::Duration::from_secs(600), key.encrypt(b"y", b""))
+        .await
+        .expect("a request is blocked behind a key read nobody polls")
+        .unwrap_err();
+
+    t.release.notify_one();
+    let e = stalled.await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::KeyMismatch, "{e}");
+
+    let before = t.seen.lock().unwrap().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("the superseded read's older type was cached");
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[before..],
+        ["/v1/transit/keys/k", "/v1/transit/encrypt/k"],
+        "{seen:?}"
+    );
+}
+
+/// A key-type read that started before the cached type was dropped (another request found the
+/// key missing) does not store its type when it resumes: the next request reads the key again.
+#[tokio::test(start_paused = true)]
+async fn a_type_read_from_before_the_type_was_dropped_stores_nothing() {
+    let t = std::sync::Arc::new(StallFirstKeyRead {
+        fail_first_encrypt: true,
+        ..Default::default()
+    });
+    let (key, stalled) = stalled_type_read(&t).await;
+    let e = key
+        .clone()
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .encrypt(b"y", b"")
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound, "{e}");
+
+    t.release.notify_one();
+    let e = stalled.await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::KeyMismatch, "{e}");
+
+    let before = t.seen.lock().unwrap().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("the read from before the type was dropped was cached");
+    let seen = t.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[before..],
+        ["/v1/transit/keys/k", "/v1/transit/encrypt/k"],
+        "{seen:?}"
+    );
 }

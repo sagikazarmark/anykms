@@ -1,6 +1,7 @@
 //! Typed key handles.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anykms_core::time::Instant;
@@ -31,15 +32,30 @@ const TYPE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// A key's identity in the type cache: server alias, namespace, mount, name.
 pub(crate) type CacheKey = (String, Option<String>, String, String);
 
-/// Cache of key types, shared per provider: key → (expiry, type, derived).
+/// A key's type, derived flag, and when the read that returned them was sent.
+type Typed = (TransitKeyType, bool, Instant);
+
+/// Cache of key types, shared per provider: key → (expiry, type, derived, sent).
+///
+/// A read stores what it returned only if no read sent later stored meanwhile and no entry was
+/// dropped since it started ([`generation`](Self::generation)), and a read that a stalled
+/// flight's replacement superseded stores nothing: an older type never replaces a newer one,
+/// nor comes back after the key was found deleted or recreated.
 #[derive(Default)]
 pub(crate) struct TypeCache {
-    entries: Mutex<HashMap<Arc<CacheKey>, (Instant, TransitKeyType, bool)>>,
+    entries: Mutex<HashMap<Arc<CacheKey>, (Instant, Typed)>>,
+    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget_type`]).
+    generation: AtomicU64,
     /// One metadata read at a time for concurrent misses (R-34).
-    flights: SingleFlight<Arc<CacheKey>, Result<(TransitKeyType, bool)>>,
+    flights: SingleFlight<Arc<CacheKey>, Result<Typed>>,
 }
 
 impl TypeCache {
+    /// The generation a read about to be sent stores under (see [`KeyCtx::store_type`]).
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// Bounds how long followers wait for another caller's read (L29): the first of the
     /// servers' transports that has a bound sets it.
     pub(crate) fn bound_by(&self, transport: &dyn anykms_http::HttpTransport) {
@@ -248,28 +264,31 @@ impl KeyCtx {
     }
 
     /// The cached key type and derived flag, if a check has run and has not expired.
-    fn cached(&self) -> Option<(TransitKeyType, bool)> {
+    fn cached(&self) -> Option<Typed> {
         let now = Instant::now();
         self.cache
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&*self.cache_key)
-            .filter(|(expires, _, _)| now < *expires)
-            .map(|(_, t, d)| (t.clone(), *d))
+            .filter(|(expires, _)| now < *expires)
+            .map(|(_, typed)| typed.clone())
     }
 
     /// The cached key type, if a check has run within the cache TTL.
     fn cached_type(&self) -> Option<TransitKeyType> {
-        self.cached().map(|(t, _)| t)
+        self.cached().map(|(t, _, _)| t)
     }
 
+    /// Drops the cached type; a read that started before cannot store its own.
     fn forget_type(&self) {
-        self.cache
+        let mut cache = self
+            .cache
             .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&*self.cache_key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cache.generation.fetch_add(1, Ordering::SeqCst);
+        cache.remove(&*self.cache_key);
     }
 
     pub(crate) fn flavor(&self) -> Flavor {
@@ -304,6 +323,20 @@ impl KeyCtx {
         origin: Origin,
         version: Option<u64>,
     ) -> Result<TransitKeyInfo> {
+        let generation = self.cache.generation();
+        let (info, sent) = self.fetch_info(op, origin, version).await?;
+        self.store_type(generation, &(info.parsed_type.clone(), info.derived, sent));
+        Ok(info)
+    }
+
+    /// Reads fresh metadata, without caching it; with the instant the read was sent.
+    async fn fetch_info(
+        &self,
+        op: Operation,
+        origin: Origin,
+        version: Option<u64>,
+    ) -> Result<(TransitKeyInfo, Instant)> {
+        let sent = Instant::now();
         let mut call = self.call(Method::GET, self.path("keys"), None, op);
         call.key_read = true;
         call.key_version = version;
@@ -320,22 +353,33 @@ impl KeyCtx {
                 e.with_operation(op)
             }
         })?;
-        let now = Instant::now();
+        Ok((info, sent))
+    }
+
+    /// Caches a read's type (see [`TypeCache`]): not if an entry was dropped since `generation`
+    /// was current, nor over an entry from a read sent later.
+    fn store_type(&self, generation: u64, typed: &Typed) {
         let mut cache = self
             .cache
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.retain(|_, (expires, _, _)| now < *expires);
+        if self.cache.generation() != generation
+            || cache
+                .get(&*self.cache_key)
+                .is_some_and(|(_, (_, _, sent))| *sent >= typed.2)
+        {
+            return;
+        }
+        let now = Instant::now();
+        cache.retain(|_, (expires, _)| now < *expires);
         cache.insert(
             self.cache_key.clone(),
             (
                 now + anykms_http::cache::jittered_ttl(TYPE_CACHE_TTL),
-                info.parsed_type.clone(),
-                info.derived,
+                typed.clone(),
             ),
         );
-        Ok(info)
     }
 
     /// The [`Preflight`] check: reads fresh metadata (refreshing the type cache), refuses a
@@ -379,23 +423,33 @@ impl KeyCtx {
         if self.check == KeyTypeCheck::TrustCaller {
             return Ok(());
         }
-        // Concurrent misses for the key share one read and its result, a failure included.
-        let (t, derived) = match self.cached() {
-            Some(c) => c,
-            None => self
-                .cache
+        // Concurrent misses for the key share one read and its result, a failure included. The
+        // read is cached as its flight lands, unless a replacement superseded that flight.
+        let (t, derived, _) = if let Some(c) = self.cached() {
+            c
+        } else {
+            let generation = self.cache.generation();
+            self.cache
                 .flights
-                .run(&self.cache_key, || async {
-                    // A flight that landed after the miss above has filled the cache.
-                    if let Some(c) = self.cached() {
-                        return Ok(c);
-                    }
-                    let info = self.read_info(op).await?;
-                    Ok((info.parsed_type, info.derived))
-                })
+                .run_and_commit(
+                    &self.cache_key,
+                    || async {
+                        // A flight that landed after the miss above has filled the cache.
+                        if let Some(c) = self.cached() {
+                            return Ok(c);
+                        }
+                        let (info, sent) = self.fetch_info(op, Origin::Handle, None).await?;
+                        Ok((info.parsed_type, info.derived, sent))
+                    },
+                    |r| {
+                        if let Ok(typed) = r {
+                            self.store_type(generation, typed);
+                        }
+                    },
+                )
                 .await
                 // The flight may have been another operation's.
-                .map_err(|e| e.with_operation(op))?,
+                .map_err(|e| e.with_operation(op))?
         };
         if derived {
             return Err(Error::new(
