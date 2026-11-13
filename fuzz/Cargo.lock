@@ -81,6 +81,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "sha2",
+ "subtle",
  "trait-variant",
  "zeroize",
 ]
@@ -127,6 +128,7 @@ dependencies = [
  "hmac",
  "http",
  "httpdate",
+ "libc",
  "reqwest",
  "rustls",
  "rustls-native-certs",
