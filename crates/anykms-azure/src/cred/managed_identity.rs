@@ -101,8 +101,33 @@ fn endpoint_ok(url: &str, imds: bool) -> Result<String> {
                 "the IMDS endpoint must be 169.254.169.254 or a loopback IP",
             ));
         }
+    } else if u.scheme() == "http" && !local_host(u.host().as_ref()) {
+        // The header and the token cross the network in clear: only to hosts that cannot be off
+        // the machine's own network (Container Apps and Functions use `localhost`, App Service
+        // on Linux a private address).
+        return Err(cred_config_err(
+            "a plain-http identity endpoint must be localhost, a loopback, link-local or \
+             private address (use https otherwise)",
+        ));
     }
     Ok(u.to_string())
+}
+
+/// `localhost` (exactly), or a loopback, link-local or private (RFC 1918, IPv6 unique local)
+/// address literal.
+fn local_host(host: Option<&anykms_http::url::Host<&str>>) -> bool {
+    use anykms_http::url::Host;
+    match host {
+        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback() || ip.is_link_local() || ip.is_private(),
+        Some(Host::Ipv6(ip)) => {
+            let seg0 = ip.segments()[0];
+            ip.is_loopback()
+                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (seg0 & 0xfe00) == 0xfc00 // unique local fc00::/7
+        }
+        None => false,
+    }
 }
 
 impl ManagedIdentity {
@@ -164,7 +189,8 @@ impl ManagedIdentity {
     }
 
     /// Uses the App Service / Functions identity endpoint (`IDENTITY_ENDPOINT`) with its secret
-    /// header value (`IDENTITY_HEADER`).
+    /// header value (`IDENTITY_HEADER`). The endpoint must be https, or plain http on `localhost`
+    /// or a loopback, link-local or private address literal (`Configuration` otherwise).
     pub fn app_service(mut self, endpoint: &str, identity_header: &str) -> Result<Self> {
         let endpoint = endpoint_ok(endpoint, false)?;
         if identity_header.is_empty() || !identity_header.bytes().all(|b| b.is_ascii_graphic()) {
@@ -254,5 +280,45 @@ impl AzureCredential for ManagedIdentity {
 
     fn bind_transport(&self, transport: std::sync::Arc<dyn anykms_http::HttpTransport>) {
         self.http.bind(transport);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anykms_core::ErrorKind;
+
+    /// Review L1: plain HTTP to the App Service / Functions identity endpoint only on hosts that
+    /// cannot be off the machine's own network: loopback (`localhost` included, as Container
+    /// Apps and Functions set it), link-local and private addresses. Anything else needs https.
+    #[test]
+    fn review_l1_app_service_endpoint_plain_http_only_on_local_hosts() {
+        let mi = |u: &str| ManagedIdentity::system().app_service(u, "h");
+        for ok in [
+            "http://localhost:42356/msi/token",
+            "http://127.0.0.1:41000/msi/token",
+            "http://[::1]:8081/msi/token",
+            "http://172.16.1.4:8081/msi/token",
+            "http://10.0.0.5:8081/msi/token",
+            "http://192.168.0.2:8081/msi/token",
+            "http://169.254.130.1:8081/msi/token",
+            "http://[fe80::1]:8081/msi/token",
+            "http://[fd00:ec2::23]/msi/token",
+            "https://collector.example/msi/token",
+        ] {
+            assert!(mi(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://collector.example/msi/token",
+            "http://8.8.8.8/msi/token",
+            "http://172.32.0.1/msi/token",
+            "http://localhost./msi/token",
+            "http://evil.localhost/msi/token",
+            "http://[2001:db8::1]/msi/token",
+            "http://[::ffff:8.8.8.8]/msi/token",
+        ] {
+            let e = mi(bad).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::Configuration, "{bad}");
+        }
     }
 }

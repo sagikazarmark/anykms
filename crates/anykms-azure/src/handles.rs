@@ -12,6 +12,12 @@ use anykms_core::time::Instant;
 // versions disabled).
 use anykms_http::cache::{SingleFlight, jittered_ttl};
 
+/// When an entry fetched at `from` expires: `ttl` ±10% later. The builder clamps the TTL, and an
+/// overflow still never panics: such an entry is expired at once (fails towards a re-read).
+fn expiry(from: Instant, ttl: Duration) -> Instant {
+    from.checked_add(jittered_ttl(ttl)).unwrap_or(from)
+}
+
 use anykms_core::{
     Ciphertext, Describe, Digest, DigestSigner, DigestVerifier, Error, ErrorKind, KeyInfo,
     KeyState, KeyTypeCheck, KeyVersion, KeyWrap, Operation, Preflight, PublicKey, PublicKeys,
@@ -321,10 +327,7 @@ impl KeyCtx {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.retain(|_, (exp, _)| now < *exp);
-        cache.insert(
-            self.cache_key(),
-            (now + jittered_ttl(self.client.cache_ttl), b),
-        );
+        cache.insert(self.cache_key(), (expiry(now, self.client.cache_ttl), b));
     }
 
     /// The `Preflight` of every handle: a fresh read of the key (the metadata `describe`
@@ -365,6 +368,25 @@ impl KeyCtx {
             return Err(e.with_operation(op));
         }
         Ok(Some(b))
+    }
+
+    /// [`ensure`](Self::ensure) for an operation on `version`, a version named by input (a
+    /// signature's or a frame's). The cached bundle describes the URI's version or the current
+    /// one; when `version` is another (older) version, which may have another RSA size or even
+    /// another key type, the check is skipped and the vault judges that version (review L20).
+    /// `check` must not depend on anything else from the input, so input never drops the
+    /// cached bundle (review L13). Returns the bundle only when it describes `version`.
+    async fn ensure_version(
+        &self,
+        op: Operation,
+        version: &str,
+        check: impl Fn(&KeyBundle) -> Result<()>,
+    ) -> Result<Option<Arc<KeyBundle>>> {
+        let describes = |b: &KeyBundle| b.info.version.eq_ignore_ascii_case(version);
+        let b = self
+            .ensure(op, |b| if describes(b) { check(b) } else { Ok(()) })
+            .await?;
+        Ok(b.filter(|b| describes(b)))
     }
 
     /// A write (`sign`, `wrapkey`, `encrypt`, HS* `sign`): on the URI's version, else
@@ -749,7 +771,7 @@ impl LocalVerifiers {
         if self.ttl.is_zero() {
             return;
         }
-        let exp = fetched + jittered_ttl(self.ttl);
+        let exp = expiry(fetched, self.ttl);
         insert_bounded(&mut self.state().keys, version, (exp, v));
     }
 
@@ -757,7 +779,7 @@ impl LocalVerifiers {
         if self.ttl.is_zero() {
             return;
         }
-        let exp = fetched + jittered_ttl(self.ttl);
+        let exp = expiry(fetched, self.ttl);
         insert_bounded(&mut self.state().unknown, version, (exp, e));
     }
 }
@@ -897,8 +919,9 @@ impl AzureDigestKey {
         let (version, raw) = self.verify_input(sig)?;
         let bundle = self
             .k
-            .ensure(op, check_signing(self.alg, Some("verify")))
+            .ensure_version(op, &version, check_signing(self.alg, Some("verify")))
             .await?;
+        // Exact size only against the signature's own version (review L20).
         if let Some(k) = modulus_len(bundle.as_ref())
             && raw.len() != k
         {
@@ -998,11 +1021,14 @@ async fn bundle_public_key(
     let version = match version {
         // Untrusted (often a JWT `kid`): checked before any I/O, never another key. A URI
         // that pins a version trusts that version only, as verification does.
+        // Only the canonical (lowercase) form, as Azure names its versions: the returned key
+        // carries the canonical version, and a caller comparing it with what it asked for
+        // (`CachedVerifier`) must never see a mismatch it would not remember (review L14(a)).
         Some(v) => {
-            let v = parse_version(v).ok_or_else(|| {
+            let v = parse_version(v).filter(|c| c == v).ok_or_else(|| {
                 invalid(
                     op,
-                    "malformed key version (Azure versions are 32 hex characters)",
+                    "malformed key version (Azure versions are 32 lowercase hex characters)",
                 )
             })?;
             if k.uri.version().is_some_and(|p| p != v) {
@@ -1208,6 +1234,12 @@ fn check_rsa_wrap(b: &KeyBundle) -> Result<()> {
     Ok(())
 }
 
+/// The key can unwrap, with whichever wrap algorithm its type has (input-independent: the
+/// frame's algorithm is compared separately).
+fn check_unwrap(b: &KeyBundle) -> Result<()> {
+    check_wrap(wrap_alg_of(b, Operation::Open)?, "unwrapKey")(b)
+}
+
 fn check_wrap(alg: FrameAlg, op_name: &'static str) -> impl Fn(&KeyBundle) -> Result<()> {
     move |b: &KeyBundle| {
         if wrap_alg_of(b, Operation::Open)? != alg {
@@ -1358,15 +1390,29 @@ impl AzureKeyWrapKey {
             ));
         }
         let version = self.k.input_version(frame.version(), op)?;
-        let bundle = self.k.ensure(op, check_wrap(alg, "unwrapKey")).await?;
-        if alg == FrameAlg::RsaOaep256
-            && let Some(k) = modulus_len(bundle.as_ref())
-            && frame.body().len() != k
-        {
-            return Err(decrypt_failed(
-                op,
-                "wrapped key has the wrong size for the key",
-            ));
+        // The key-type check depends on the key only (review L13): a frame's algorithm byte is
+        // input, so a mismatch with it is a failed decryption, never `KeyMismatch` with the
+        // cached bundle dropped.
+        let bundle = self.k.ensure_version(op, &version, check_unwrap).await?;
+        if let Some(b) = &bundle {
+            if wrap_alg_of(b, op).ok() != Some(alg) {
+                return Err(decrypt_failed(
+                    op,
+                    "wrapped key was made with another key type",
+                ));
+            }
+            if alg == FrameAlg::RsaOaep256
+                && let Some(k) = modulus_len(Some(b))
+                && frame.body().len() != k
+            {
+                return Err(decrypt_failed(
+                    op,
+                    "wrapped key has the wrong size for the key",
+                ));
+            }
+        } else if alg == FrameAlg::RsaOaep256 && !(256..=2048).contains(&frame.body().len()) {
+            // Another version (or TrustCaller): only the sizes an RSA key can have.
+            return Err(decrypt_failed(op, "wrapped key has the wrong size"));
         }
         let value = b64(frame.body());
         let req = OpReq::new(alg.azure_name(), &value);
@@ -1384,6 +1430,9 @@ impl AzureKeyWrapKey {
             self.k
                 .bad_response(op, "unexpected unwrapkey response format")
         })?;
+        // Like every other operation: the response names this key and the requested version.
+        self.k
+            .returned_version(r.kid.as_deref(), Some(&version), op)?;
         decode_secret(r.value).ok_or_else(|| {
             self.k
                 .bad_response(op, "unexpected unwrapkey response format")
@@ -1545,6 +1594,9 @@ impl AzureAeadKey {
             self.k
                 .bad_response(op, "unexpected decrypt response format")
         })?;
+        // Like every other operation: the response names this key and the requested version.
+        self.k
+            .returned_version(r.kid.as_deref(), Some(&version), op)?;
         decode_secret(r.value).ok_or_else(|| {
             self.k
                 .bad_response(op, "unexpected decrypt response format")

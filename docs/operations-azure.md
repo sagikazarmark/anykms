@@ -59,8 +59,10 @@ open, with no I/O. The token scope comes from the host suffix, never from a 401 
 - **Soft delete and purge protection on.** A deleted key is `NotFound` until recovered (see the
   runbook); with purge protection it cannot be destroyed by mistake.
 - **The key-type check** reads the key (`GET /keys/<name>`) before a handle's first operation
-  and caches it per provider (`key_cache_ttl`, default 10 minutes ±10%); concurrent first
-  operations on a key share one read. The cached bundle is
+  and caches it per provider (`key_cache_ttl`, default 10 minutes ±10%, at most one year);
+  concurrent first operations on a key share one read. Input naming an older version (a
+  signature, a wrapped key) is checked by the vault, not against the cached bundle: an older
+  version may have another size or key type. The cached bundle is
   dropped when a request for the handle's own key or version fails with `NotFound`,
   `KeyMismatch`, `Unsupported`, `KeyStateInvalid` or `PermissionDenied`; never by a version taken
   from input (a signature's or frame's version, `public_key_version`), so forged versions cannot
@@ -119,7 +121,8 @@ environment, never by probing the network:
 
 Credentials are lazy: nothing is read or fetched before the first operation. A malformed
 selection (an unknown `ANYKMS_AZURE_CREDENTIAL`, a selected credential missing its settings, an
-`AZURE_AUTHORITY_HOST` that is not `https://`) is a `Configuration` error from `from_env`.
+`AZURE_AUTHORITY_HOST` that is not a known Entra ID authority host, an empty
+`ANYKMS_AZURE_ALLOWED_VAULTS`) is a `Configuration` error from `from_env`.
 `AzureProvider::from_env_with(lookup)` (and `AzureProviderBuilder::from_env_with`,
 `credential_from_env_with`, `env_credential_kind_with`, and the facade's
 `with_default_providers_from`) reads the same variables, `AZURE_*` and `IDENTITY_*` included, from
@@ -169,9 +172,9 @@ through `AzureIdentity` as above.
 |---|---|
 | `ANYKMS_AZURE_CREDENTIAL` | forces a credential (`workload`, `managed`, `secret`) or disables Azure (`none`) |
 | `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` | Entra ID credentials (see above) |
-| `IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `ANYKMS_AZURE_MANAGED_IDENTITY=1` | managed identity |
-| `AZURE_AUTHORITY_HOST` | the Entra ID authority (sovereign clouds); `https://` only |
-| `ANYKMS_AZURE_ALLOWED_VAULTS` | comma-separated exact hosts tokens may go to (`contoso-prod.vault.azure.net`) |
+| `IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `ANYKMS_AZURE_MANAGED_IDENTITY=1` | managed identity; `IDENTITY_ENDPOINT` must be `https://`, or plain `http://` on `localhost` or a loopback, link-local or private address (as App Service, Functions and Container Apps set it) |
+| `AZURE_AUTHORITY_HOST` | the Entra ID authority (sovereign clouds): a known Entra ID host only (`login.microsoftonline.com`, `login.windows.net`, `login.partner.microsoftonline.cn`, `login.chinacloudapi.cn`, `login.microsoftonline.us`); any other authority is a builder setting (`authority_host`) |
+| `ANYKMS_AZURE_ALLOWED_VAULTS` | comma-separated exact hosts tokens may go to (`contoso-prod.vault.azure.net`); set but empty is `Configuration` |
 
 There is no environment variable for test hosts, custom CAs or a proxy: test hosts are a builder
 call (`test_host`), and TLS trust, the crypto provider, proxying and timeouts are settings of the
@@ -205,8 +208,10 @@ through `AzureProvider::digest_signing_key_with`, which verifies with the versio
 `local_verify()` trusts a version's public key for `key_cache_ttl` (±10%), counted from its
 fetch: a disabled or deleted version keeps verifying for at most that long, and when the re-read
 fails (vault unreachable, version disabled) verification fails with that error instead of using
-the stale key. Versions that came back unknown are remembered for the same time (at most 64),
-so a forged signature version costs at most one key read per `key_cache_ttl`. Local RSA
+the stale key. Versions that came back unknown are remembered for the same time, up to 64 of
+them: a forged signature version costs at most one key read per `key_cache_ttl` while fewer than
+64 are remembered; a 65th clears the list, so a flood of distinct forged versions costs about one
+read each. Local RSA
 verification needs the `rsa-aws-lc-rs` (default) or `rsa-rustcrypto` feature.
 
 ## Rotation and versions
