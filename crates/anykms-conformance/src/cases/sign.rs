@@ -359,28 +359,44 @@ pub(crate) async fn rejected_before_io<F: Fixture>(
     Ok(())
 }
 
-/// Another key's valid signature (with that key's own version label, unchanged) does not verify
-/// with this key's backend verifier: a backend must bind verification to the key it opened.
+/// Another key's valid signature does not verify with this key's backend verifier: a backend must
+/// bind verification to the key it opened. Checked twice: with the other key's own version label
+/// (which a backend whose labels name the key, AWS's key ARN or Azure's per-key version ids, may
+/// refuse before looking at the bytes), and relabeled with this key's own current version, so the
+/// bytes reach the cryptographic check: a backend that checks the label but verifies with another
+/// key fails the second. Where both keys label their signatures alike (a version number on both,
+/// or no label), the first check already reaches the bytes.
 pub(crate) async fn other_keys_signature<F: Fixture>(
     c: Ctx<F>,
     alg: SignatureAlgorithm,
 ) -> CaseResult {
     let [key, other] = two(c.keys(TestKeyKind::Signing(alg), 2).await?);
+    let mine = sign(&c, &key, alg, MSG).await.ctx("sign with the key")?;
     let theirs = sign(&c, &other, alg, MSG)
         .await
         .ctx("sign with another key")?;
     verify(&c, &other, alg, MSG, &theirs)
         .await
         .ctx("the other key verifies its own signature")?;
-    let e = expect_kind(
-        verify(&c, &key, alg, MSG, &theirs).await,
-        ErrorKind::VerificationFailed,
-        "another key's valid signature",
-    )?;
-    ensure!(
-        e.is_caller_error(),
-        "another key's valid signature: {e} is not a caller error"
-    );
+    let refused = async |sig: &Signature, what: &str| -> CaseResult {
+        let e = expect_kind(
+            verify(&c, &key, alg, MSG, sig).await,
+            ErrorKind::VerificationFailed,
+            what,
+        )?;
+        ensure!(e.is_caller_error(), "{what}: {e} is not a caller error");
+        Ok(())
+    };
+    refused(&theirs, "another key's valid signature").await?;
+    if theirs.key_version() != mine.key_version() {
+        let relabeled =
+            Signature::from_parts(alg, mine.key_version().cloned(), theirs.as_bytes().to_vec());
+        refused(
+            &relabeled,
+            "another key's valid signature, relabeled with this key's version",
+        )
+        .await?;
+    }
     Ok(())
 }
 
