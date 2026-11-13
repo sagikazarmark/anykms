@@ -268,7 +268,6 @@ async fn l1_remote_plain_http_credential_endpoints_are_refused() {
 /// so this passes only with it.
 #[cfg(unix)]
 #[test]
-#[ignore = "needs the anykms-http zbuf::read_file FIFO fix (L31); un-ignore when it lands"]
 fn l31_fifo_subject_token_file_does_not_hang() {
     let dir = std::env::temp_dir().join(format!("anykms-gcp-fifo-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
