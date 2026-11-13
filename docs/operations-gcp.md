@@ -205,10 +205,11 @@ without `cloudkms.cryptoKeyVersions.get`.
 `CachedVerifier` (`anykms-recipes`) keeps its own cache on top (default 5 minutes), and its
 lookups through a GCP handle are answered from the provider's cache first: a disabled version
 stops verifying through it at most `CachedVerifier`'s TTL plus `public_key_ttl` (+10 %) after
-the disable, Cloud KMS's own delay on top. `CachedVerifier::invalidate()` drops only the
-verifier's cache; to revoke at once, also call `GcpProvider::invalidate_public_keys()` (on the
-provider or a clone of it, kept when registering it), which drops the provider's public keys and
-remembered versions for every handle.
+the disable, Cloud KMS's own delay on top. To revoke at once, call `CachedVerifier::invalidate()`:
+it drops the verifier's cache and, through `PublicKeys::invalidate_public_keys`, the provider's
+public keys and remembered versions for every handle of the provider, so the next verification
+re-reads the version's state. `GcpProvider::invalidate_public_keys()` (on the provider or a clone
+of it) does the same for the provider alone, e.g. for handles used without a `CachedVerifier`.
 
 A signature or `public_key_version` naming a version that does not exist (`UnknownKeyVersion`;
 verifying with it is `VerificationFailed`) or that is disabled or destroyed

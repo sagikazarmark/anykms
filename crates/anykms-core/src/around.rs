@@ -414,6 +414,10 @@ impl PublicKeys for Arounded<dyn DynPublicKeys> {
         )
         .await
     }
+
+    fn invalidate_public_keys(&self) {
+        self.inner.dyn_invalidate_public_keys();
+    }
 }
 
 impl Describe for Arounded<dyn DynDescribe> {

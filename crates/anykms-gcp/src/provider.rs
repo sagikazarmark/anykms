@@ -382,14 +382,12 @@ impl GcpProvider {
     /// as unknown or unusable, and the latest versions it read, for every key and every handle
     /// opened from it or from a clone of it. A fetch in progress caches nothing.
     ///
-    /// Call it after disabling a version, together with
+    /// Every handle's [`PublicKeys::invalidate_public_keys`](anykms_core::PublicKeys::invalidate_public_keys)
+    /// does the same, so
     /// [`CachedVerifier::invalidate`](https://docs.rs/anykms-recipes/latest/anykms_recipes/struct.CachedVerifier.html#method.invalidate)
-    /// for verifiers whose source is a handle of this provider: the verifier's `invalidate`
-    /// drops its own cache only, and without this its next lookup is answered from the
-    /// provider's cache, so the disabled version keeps verifying for up to `public_key_ttl`
-    /// (+10 % jitter). With both, the next verification re-reads the version's state and
-    /// refuses it. Keep a clone of the provider for this when registering it:
-    /// `Registry::builder().provider(provider.clone())`.
+    /// on a verifier whose source is a handle of this provider already drops this cache: the
+    /// next verification re-reads the version's state and refuses a disabled one. Call this
+    /// directly after disabling a version when handles are used without a `CachedVerifier`.
     pub fn invalidate_public_keys(&self) {
         self.shared.invalidate_public_keys();
     }

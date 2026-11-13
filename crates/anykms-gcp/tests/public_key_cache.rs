@@ -6,45 +6,58 @@ mod common;
 use std::time::Duration;
 
 use anykms_core::prelude::*;
-use anykms_core::{Digest, ErrorKind, KeyVersion, SignatureAlgorithm};
+use anykms_core::{Digest, ErrorKind, KeyVersion, Registry, SignatureAlgorithm};
 use anykms_recipes::CachedVerifier;
 use common::fake::FakeKms;
 use common::{cached_builder, vuri};
 
 const ALG: SignatureAlgorithm = SignatureAlgorithm::EcdsaP256Sha256;
 
-/// M2: `CachedVerifier::invalidate()` drops the verifier's own cache only; the provider's
-/// public-key cache (`public_key_ttl`) still serves a version disabled since. Calling
-/// `GcpProvider::invalidate_public_keys()` as well makes the revocation immediate.
+/// M2: `CachedVerifier::invalidate()` drops the verifier's cache and, through
+/// `PublicKeys::invalidate_public_keys`, the provider's public-key cache (`public_key_ttl`), so a
+/// version disabled since is refused at once. Exercised through a registry handle, the path
+/// `with_default_providers` users have (no provider clone to call).
 #[tokio::test]
-async fn invalidating_both_caches_revokes_a_disabled_version_at_once() {
+async fn invalidate_revokes_a_disabled_version_at_once_through_a_registry_handle() {
     let fake = FakeKms::start().await;
     // Default public_key_ttl (60 s).
     let p = cached_builder(&fake).build().unwrap();
+    let reg = Registry::builder().provider(p).build().unwrap();
     let name = fake.create_key("EC_SIGN_P256_SHA256");
-    let v1 = p.digest_signing_key(vuri(&name, 1), ALG).unwrap();
+    let v1 = reg.digest_signer(vuri(&name, 1), ALG).unwrap();
     let d = Digest::sha256(b"m");
     let s1 = v1.sign_digest(&d).await.unwrap();
     fake.rotate(&name);
-    let cv = CachedVerifier::new(p.digest_signing_key(vuri(&name, 2), ALG).unwrap(), ALG);
+    let cv = CachedVerifier::new(reg.public_keys(vuri(&name, 2), ALG).unwrap(), ALG);
     cv.verify_digest(&d, &s1).await.unwrap();
 
     fake.set_state(&name, 1, "DISABLED");
-    // The verifier's cache alone: the provider still holds version 1's public key, for up to
-    // `public_key_ttl` (the documented stacked bound).
-    cv.invalidate();
+    // Without invalidation, both caches still serve version 1.
     cv.verify_digest(&d, &s1).await.unwrap();
-
-    // Both caches: the next verification re-reads the version's state and refuses it.
+    // `invalidate` alone: the next verification re-reads the version's state and refuses it.
     cv.invalidate();
-    p.invalidate_public_keys();
     let e = cv.verify_digest(&d, &s1).await.unwrap_err();
     assert_eq!(e.kind(), ErrorKind::KeyVersionUnusable, "{e}");
-    // Clones of the provider share the cache.
     fake.set_state(&name, 1, "ENABLED");
-    p.clone().invalidate_public_keys();
     cv.invalidate();
     cv.verify_digest(&d, &s1).await.unwrap();
+}
+
+/// M2: `GcpProvider::invalidate_public_keys()` drops the provider's cache for every handle of
+/// the provider and its clones.
+#[tokio::test]
+async fn provider_invalidation_reaches_every_handle() {
+    let fake = FakeKms::start().await;
+    let p = cached_builder(&fake).build().unwrap();
+    let name = fake.create_key("EC_SIGN_P256_SHA256");
+    let v1 = p.digest_signing_key(vuri(&name, 1), ALG).unwrap();
+    v1.public_key().await.unwrap();
+    fake.set_state(&name, 1, "DISABLED");
+    // Served from the provider's cache.
+    v1.public_key().await.unwrap();
+    p.clone().invalidate_public_keys();
+    let e = v1.public_key().await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::KeyStateInvalid, "{e}");
 }
 
 /// L17: once a lookup finds an input version missing, the key's latest version is read (one

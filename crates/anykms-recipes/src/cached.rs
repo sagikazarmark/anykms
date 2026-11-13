@@ -184,7 +184,8 @@ struct State {
 /// (transit: raising `min_decryption_version`, which also stops verification; disabling a key or
 /// version; deleting the key). Cached entries expire after a TTL (default 5 minutes), so a
 /// revocation takes effect locally within the TTL, plus whatever the source caches itself. Call
-/// [`CachedVerifier::invalidate`] to drop this verifier's cache at once.
+/// [`CachedVerifier::invalidate`] to drop this verifier's cache, and the source's through
+/// [`PublicKeys::invalidate_public_keys`], at once.
 ///
 /// This relies on the source refusing the public key of a disabled key or version, as the
 /// [`PublicKeys` contract](anykms_core::PublicKeys#contract) requires: `KeyStateInvalid` for a
@@ -193,10 +194,11 @@ struct State {
 /// `GetPublicKey` serves disabled keys); AWS, Azure and transit read the state on every lookup.
 /// **GCP** answers from its provider's public-key cache (`public_key_ttl`, default 60 s, +10 %
 /// jitter) without a state check, so through a GCP source the bound is this verifier's TTL plus
-/// `public_key_ttl`, and `invalidate` is immediate only together with
-/// `GcpProvider::invalidate_public_keys()`. A third-party [`PublicKeys`] source must honor the
+/// `public_key_ttl`; [`invalidate`](CachedVerifier::invalidate) drops both caches, so the next
+/// verification re-reads the version's state. A third-party [`PublicKeys`] source must honor the
 /// contract too, or a disabled key's signatures keep verifying here after the backend stopped
-/// accepting them; one that caches needs its own invalidation, as GCP's does.
+/// accepting them; one that caches must implement
+/// [`invalidate_public_keys`](PublicKeys::invalidate_public_keys), as GCP's handles do.
 ///
 /// # Errors
 ///
@@ -671,8 +673,11 @@ impl<P: PublicKeys> CachedVerifier<P> {
         self.alg
     }
 
-    /// Drops every cached public key and failed lookup (e.g. after revoking a key version).
+    /// Drops every cached public key and failed lookup (e.g. after revoking a key version), and
+    /// the source's own cache through [`PublicKeys::invalidate_public_keys`], so the next
+    /// verification reads the version's state from the backend.
     pub fn invalidate(&self) {
+        self.source.invalidate_public_keys();
         let mut st = self.lock();
         st.entries.clear();
         st.in_flight.clear();

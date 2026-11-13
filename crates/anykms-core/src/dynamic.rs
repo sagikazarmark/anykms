@@ -225,6 +225,7 @@ dyn_layer! {
 dyn_layer! {
     /// Object-safe [`PublicKeys`].
     PublicKeys => DynPublicKeys {
+        sync fn invalidate_public_keys / dyn_invalidate_public_keys() -> ();
         async fn public_key / dyn_public_key() -> Result<PublicKey>;
         async fn public_key_version / dyn_public_key_version(version: &KeyVersion) -> Result<PublicKey>;
     }
@@ -1258,6 +1259,12 @@ macro_rules! optional_part {
                     )),
                 }
             }
+
+            fn invalidate_public_keys(&self) {
+                if let Some(p) = &self.parts.public_keys {
+                    (**p).dyn_invalidate_public_keys();
+                }
+            }
         }
     };
     ($Name:ident . describe) => {
@@ -1506,6 +1513,10 @@ impl PublicKeys for PublicKeysKey {
         (*self.parts.public_keys)
             .dyn_public_key_version(version)
             .await
+    }
+
+    fn invalidate_public_keys(&self) {
+        (*self.parts.public_keys).dyn_invalidate_public_keys();
     }
 }
 

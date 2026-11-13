@@ -389,9 +389,9 @@ checks first:
 The `PublicKeys` rustdoc (`traits.rs:307-317`) states this contract, together with the A3(a)
 kinds. Every built-in backend then refuses a disabled version on a fresh lookup. GCP answers
 from its own public-key cache (`public_key_ttl`) without a state check, so through a GCP source
-`CachedVerifier`'s revocation bound is its TTL plus `public_key_ttl` (+10 % jitter), and its
-`invalidate()` is immediate only together with `GcpProvider::invalidate_public_keys()` (M2,
-security review 2026-11). Its rustdoc says third-party sources must honor the same contract.
+`CachedVerifier`'s revocation bound is its TTL plus `public_key_ttl` (+10 % jitter); its
+`invalidate()` reaches the source's cache through `PublicKeys::invalidate_public_keys`, which
+GCP's handles implement, so it is immediate (M2, security review 2026-11). Its rustdoc says third-party sources must honor the same contract.
 
 **Recipes:**
 

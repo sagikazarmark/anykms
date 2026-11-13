@@ -1406,6 +1406,10 @@ impl DigestVerifier for GcpDigestKey {
 }
 
 impl PublicKeys for GcpDigestKey {
+    fn invalidate_public_keys(&self) {
+        self.k.shared.invalidate_public_keys();
+    }
+
     async fn public_key(&self) -> Result<PublicKey> {
         self.k.scoped(public_key_raw(&self.k, self.alg, None)).await
     }
@@ -1502,6 +1506,10 @@ impl MessageVerifier for GcpEd25519Key {
 }
 
 impl PublicKeys for GcpEd25519Key {
+    fn invalidate_public_keys(&self) {
+        self.k.shared.invalidate_public_keys();
+    }
+
     async fn public_key(&self) -> Result<PublicKey> {
         self.k
             .scoped(public_key_raw(&self.k, SignatureAlgorithm::Ed25519, None))
@@ -1829,6 +1837,10 @@ fn oaep_alg_matches(vk: &VersionKey, op: Operation) -> Result<()> {
 /// before any request (open a handle on that version instead). A version that is not an
 /// `RSA_DECRYPT_OAEP_*_SHA256` key is `KeyMismatch`; a disabled one is refused.
 impl PublicKeys for GcpKeyWrapKey {
+    fn invalidate_public_keys(&self) {
+        self.k.shared.invalidate_public_keys();
+    }
+
     async fn public_key(&self) -> Result<PublicKey> {
         self.k
             .scoped(async { Ok(self.oaep_key(Operation::PublicKey).await?.key) })
