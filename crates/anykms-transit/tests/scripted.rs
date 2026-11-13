@@ -602,3 +602,159 @@ async fn a_type_read_from_before_the_type_was_dropped_stores_nothing() {
         "{seen:?}"
     );
 }
+
+/// What `encrypt/:name` answers in the [`ByPath`] tests.
+const CIPHERTEXT: &str = r#"{"data": {"ciphertext": "vault:v1:AAAA"}}"#;
+
+/// How long a [`ByPath`] answer is held before it is returned.
+#[derive(Clone, Copy, Debug)]
+enum Hold {
+    /// Answered at once.
+    No,
+    /// Woken at 1 s (as by the request timeout's timer), then held until `release`.
+    Release,
+}
+
+/// One scripted [`ByPath`] answer.
+#[derive(Debug)]
+struct Answer {
+    /// Answers the first request whose path ends with this.
+    suffix: &'static str,
+    hold: Hold,
+    status: u16,
+    body: String,
+}
+
+/// A transport that answers each request with the first answer left whose suffix the request's
+/// path ends with (a request with none left panics). It records each request's path, and bounds
+/// followers like `ReqwestTransport`.
+#[derive(Debug, Default)]
+struct ByPath {
+    answers: std::sync::Mutex<Vec<Answer>>,
+    seen: std::sync::Mutex<Vec<String>>,
+    release: tokio::sync::Notify,
+}
+
+impl ByPath {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::default()
+    }
+
+    /// Scripts the next answer to a request whose path ends with `suffix`.
+    fn answer(&self, suffix: &'static str, hold: Hold, status: u16, body: &str) -> &Self {
+        self.answers.lock().unwrap().push(Answer {
+            suffix,
+            hold,
+            status,
+            body: body.to_owned(),
+        });
+        self
+    }
+
+    /// The path of every request so far.
+    fn paths(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl HttpTransport for ByPath {
+    fn send(
+        &self,
+        req: anykms_transit::anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<
+        '_,
+        Result<anykms_transit::anykms_http::transport::Response, SendError>,
+    > {
+        let path = req.uri().path().to_owned();
+        self.seen.lock().unwrap().push(path.clone());
+        // Decided at send time, so answers follow the order requests are sent in.
+        let Answer {
+            hold, status, body, ..
+        } = {
+            let mut answers = self.answers.lock().unwrap();
+            let i = answers
+                .iter()
+                .position(|a| path.ends_with(a.suffix))
+                .unwrap_or_else(|| panic!("no answer scripted for {path}"));
+            answers.remove(i)
+        };
+        Box::pin(async move {
+            match hold {
+                Hold::No => {}
+                Hold::Release => {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    self.release.notified().await;
+                }
+            }
+            let mut r = anykms_transit::anykms_http::http::Response::new(zeroize::Zeroizing::new(
+                body.into_bytes(),
+            ));
+            *r.status_mut() = status.try_into().unwrap();
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            Ok(r)
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(std::time::Duration, anykms_core::SleepFn)> {
+        Some((
+            FOLLOWER_WAIT,
+            std::sync::Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
+    }
+}
+
+/// A provider over `t` with a static token.
+fn by_path_provider(t: &std::sync::Arc<ByPath>) -> TransitProvider {
+    TransitProvider::builder()
+        .server(
+            "default",
+            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
+                .token("s.token")
+                .http_transport(t.clone()),
+        )
+        .build()
+        .unwrap()
+}
+
+/// Dropping one key's cached type (a request found that key missing) does not discard a type
+/// read of another key that was in flight meanwhile: that key's type is cached, and its next
+/// request reads no metadata.
+#[tokio::test(start_paused = true)]
+async fn dropping_one_keys_type_keeps_a_concurrent_type_read_of_another_key() {
+    let t = ByPath::new();
+    t.answer("/keys/k", Hold::Release, 200, KEY_INFO)
+        .answer("/keys/k", Hold::No, 200, KEY_INFO)
+        .answer(
+            "/encrypt/k2",
+            Hold::No,
+            400,
+            r#"{"errors": ["encryption key not found"]}"#,
+        )
+        .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT)
+        .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
+    let p = by_path_provider(&t);
+    let key = p.aead_key(uri()).unwrap();
+    let mut reading = Box::pin(key.encrypt(b"x", b""));
+    assert!(poll_once(&mut reading).await.is_pending());
+    assert_eq!(t.paths(), ["/v1/transit/keys/k"]);
+
+    let other = p
+        .aead_key("hashivault:///transit/keys/k2")
+        .unwrap()
+        .with_key_type_check(KeyTypeCheck::TrustCaller);
+    let e = other.encrypt(b"y", b"").await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound, "{e}");
+
+    t.release.notify_one();
+    reading.await.unwrap();
+    let before = t.paths().len();
+    key.encrypt(b"z", b"").await.unwrap();
+    let paths = t.paths();
+    assert_eq!(
+        paths[before..],
+        ["/v1/transit/encrypt/k"],
+        "another key's dropped type discarded this key's read: {paths:?}"
+    );
+}

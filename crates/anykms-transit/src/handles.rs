@@ -1,7 +1,6 @@
 //! Typed key handles.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anykms_core::time::Instant;
@@ -35,24 +34,76 @@ pub(crate) type CacheKey = (String, Option<String>, String, String);
 /// A key's type, derived flag, and when the read that returned them was sent.
 pub(crate) type Typed = (TransitKeyType, bool, Instant);
 
-/// Cache of key types, shared per provider: key → (expiry, type, derived, sent).
+/// Cache of key types, shared per provider: key → slot (expiry, type, derived, sent, forget mark).
 ///
-/// A read stores what it returned only if no read sent later stored meanwhile and no entry was
-/// dropped since it started ([`generation`](Self::generation)), and a read that a stalled
-/// flight's replacement superseded stores nothing: an older type never replaces a newer one,
-/// nor comes back after the key was found deleted or recreated. Concurrent misses share one read
+/// A read stores what it returned only if no read of its key sent later stored meanwhile and its
+/// key was not forgotten since it started ([`KeyCtx::forget_type`]), and a read that a stalled
+/// flight's replacement superseded stores nothing: an older type never replaces a newer one, nor
+/// comes back after the key was found deleted or recreated. Concurrent misses share one read
 /// through their server's [`TypeFlights`].
+///
+/// # Per-key generations
+///
+/// A forget takes the next value of a provider-wide counter ([`epoch`](Self::epoch)) and marks
+/// its own key's slot with it; a read notes the counter when it starts and stores only if its
+/// key's mark is not newer. A forget therefore discards concurrent reads of its own key only:
+/// reads of other keys, on this server or another, still store. The mark is kept in the key's
+/// slot, which a forget empties rather than removes (and creates for a key with no entry), so it
+/// outlives the entry it dropped. Slots expire like entries (an emptied one a TTL after its
+/// forget) and are pruned with them, whenever a read stores or a key is forgotten, so the cache
+/// holds at most one slot per key used within a TTL, as it held one entry before. Pruning a mark
+/// raises `pruned` to it, and a read that started before `pruned` stores nothing: a forgotten
+/// key's read can never store once its mark is gone, and a read of another key loses its store
+/// to a pruned mark only when it was in flight for longer than that mark's TTL (it is then read
+/// again by the next request).
 #[derive(Default)]
 pub(crate) struct TypeCache {
-    entries: Mutex<HashMap<Arc<CacheKey>, (Instant, Typed)>>,
-    /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget_type`]).
-    generation: AtomicU64,
+    slots: Mutex<Slots>,
+}
+
+#[derive(Default)]
+struct Slots {
+    by_key: HashMap<Arc<CacheKey>, Slot>,
+    /// Bumped by every forget, under this lock: the epoch a read starts in.
+    epoch: u64,
+    /// The newest forget mark pruned with its slot.
+    pruned: u64,
+}
+
+/// One key's cached type and forget mark.
+struct Slot {
+    /// When the slot may be pruned: its entry's expiry, or a TTL after its forget.
+    expires: Instant,
+    /// The cached type, while `expires` is ahead; `None` once forgotten.
+    typed: Option<Typed>,
+    /// The epoch of the key's latest forget (0: never forgotten).
+    forgotten: u64,
+}
+
+impl Slots {
+    /// Drops expired slots, keeping their forget marks in `pruned`.
+    fn prune(&mut self, now: Instant) {
+        let pruned = &mut self.pruned;
+        self.by_key.retain(|_, slot| {
+            let keep = now < slot.expires;
+            if !keep {
+                *pruned = (*pruned).max(slot.forgotten);
+            }
+            keep
+        });
+    }
 }
 
 impl TypeCache {
-    /// The generation a read about to be sent stores under (see [`KeyCtx::store_type`]).
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Slots> {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The epoch a read about to be sent stores under (see [`KeyCtx::store_type`]).
+    fn epoch(&self) -> u64 {
+        self.lock().epoch
     }
 }
 
@@ -260,12 +311,11 @@ impl KeyCtx {
     fn cached(&self) -> Option<Typed> {
         let now = Instant::now();
         self.cache
-            .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_key
             .get(&*self.cache_key)
-            .filter(|(expires, _)| now < *expires)
-            .map(|(_, typed)| typed.clone())
+            .filter(|slot| now < slot.expires)
+            .and_then(|slot| slot.typed.clone())
     }
 
     /// The cached key type, if a check has run within the cache TTL.
@@ -273,15 +323,23 @@ impl KeyCtx {
         self.cached().map(|(t, _, _)| t)
     }
 
-    /// Drops the cached type; a read that started before cannot store its own.
+    /// Drops the cached type; a read of this key that started before cannot store its own.
+    /// Reads of other keys are unaffected (see [`TypeCache`]).
     fn forget_type(&self) {
-        let mut cache = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.cache.generation.fetch_add(1, Ordering::SeqCst);
-        cache.remove(&*self.cache_key);
+        let mut cache = self.cache.lock();
+        let now = Instant::now();
+        cache.prune(now);
+        cache.epoch += 1;
+        let epoch = cache.epoch;
+        // The slot stays, emptied, to keep the mark.
+        cache.by_key.insert(
+            self.cache_key.clone(),
+            Slot {
+                expires: now + TYPE_CACHE_TTL,
+                typed: None,
+                forgotten: epoch,
+            },
+        );
     }
 
     pub(crate) fn flavor(&self) -> Flavor {
@@ -316,9 +374,9 @@ impl KeyCtx {
         origin: Origin,
         version: Option<u64>,
     ) -> Result<TransitKeyInfo> {
-        let generation = self.cache.generation();
+        let epoch = self.cache.epoch();
         let (info, sent) = self.fetch_info(op, origin, version).await?;
-        self.store_type(generation, &(info.parsed_type.clone(), info.derived, sent));
+        self.store_type(epoch, &(info.parsed_type.clone(), info.derived, sent));
         Ok(info)
     }
 
@@ -349,30 +407,32 @@ impl KeyCtx {
         Ok((info, sent))
     }
 
-    /// Caches a read's type (see [`TypeCache`]): not if an entry was dropped since `generation`
-    /// was current, nor over an entry from a read sent later.
-    fn store_type(&self, generation: u64, typed: &Typed) {
-        let mut cache = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.cache.generation() != generation
-            || cache
-                .get(&*self.cache_key)
-                .is_some_and(|(_, (_, _, sent))| *sent >= typed.2)
+    /// Caches a read's type (see [`TypeCache`]): not if this key was forgotten since `epoch` was
+    /// current (or a mark newer than `epoch` was pruned), nor over an entry from a read sent
+    /// later.
+    fn store_type(&self, epoch: u64, typed: &Typed) {
+        let mut cache = self.cache.lock();
+        let slot = cache.by_key.get(&*self.cache_key);
+        if epoch < cache.pruned
+            || slot.is_some_and(|slot| {
+                epoch < slot.forgotten
+                    || slot
+                        .typed
+                        .as_ref()
+                        .is_some_and(|(_, _, sent)| *sent >= typed.2)
+            })
         {
             return;
         }
         let now = Instant::now();
-        cache.retain(|_, (expires, _)| now < *expires);
-        cache.insert(
-            self.cache_key.clone(),
-            (
-                now + anykms_http::cache::jittered_ttl(TYPE_CACHE_TTL),
-                typed.clone(),
-            ),
-        );
+        cache.prune(now);
+        let slot = cache.by_key.entry(self.cache_key.clone()).or_insert(Slot {
+            expires: now,
+            typed: None,
+            forgotten: 0,
+        });
+        slot.expires = now + anykms_http::cache::jittered_ttl(TYPE_CACHE_TTL);
+        slot.typed = Some(typed.clone());
     }
 
     /// The [`Preflight`] check: reads fresh metadata (refreshing the type cache), refuses a
@@ -421,7 +481,7 @@ impl KeyCtx {
         let (t, derived, _) = if let Some(c) = self.cached() {
             c
         } else {
-            let generation = self.cache.generation();
+            let epoch = self.cache.epoch();
             self.server
                 .type_flights
                 .run_and_commit(
@@ -436,7 +496,7 @@ impl KeyCtx {
                     },
                     |r| {
                         if let Ok(typed) = r {
-                            self.store_type(generation, typed);
+                            self.store_type(epoch, typed);
                         }
                     },
                 )
@@ -1580,6 +1640,47 @@ mod tests {
         // A short hint still yields the whole body (grown through the zeroizing path).
         let small = body(&serde_json::json!({"x": "y".repeat(5000)}), 0);
         assert_eq!(small.len(), 5008);
+    }
+
+    /// Expired slots are pruned, forget marks included, so the cache stays bounded; a pruned
+    /// mark is kept in `pruned`, which still stops a read from before it.
+    #[test]
+    fn expired_slots_and_their_forget_marks_are_pruned() {
+        let now = Instant::now();
+        let key = |n: &str| KeyCtx::cache_key_of("a", None, "transit", n);
+        let typed = (TransitKeyType::Aes256Gcm96, false, now);
+        let mut slots = Slots {
+            epoch: 3,
+            ..Slots::default()
+        };
+        slots.by_key.insert(
+            key("forgotten"),
+            Slot {
+                expires: now + TYPE_CACHE_TTL,
+                typed: None,
+                forgotten: 3,
+            },
+        );
+        slots.by_key.insert(
+            key("cached"),
+            Slot {
+                expires: now + 2 * TYPE_CACHE_TTL,
+                typed: Some(typed),
+                forgotten: 1,
+            },
+        );
+        slots.prune(now);
+        assert_eq!((slots.by_key.len(), slots.pruned), (2, 0));
+        slots.prune(now + TYPE_CACHE_TTL);
+        assert_eq!(slots.by_key.len(), 1);
+        assert!(slots.by_key.contains_key(&key("cached")));
+        assert_eq!(
+            slots.pruned, 3,
+            "a read from before the pruned mark stores nothing"
+        );
+        slots.prune(now + 2 * TYPE_CACHE_TTL);
+        assert!(slots.by_key.is_empty());
+        assert_eq!(slots.pruned, 3, "the newest pruned mark is kept");
     }
 
     #[test]
