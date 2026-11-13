@@ -547,9 +547,13 @@ transport you pass to the providers, or wrap the call in `tokio::time::timeout`.
 | `e.is_config_error()` | 500 | an operator must act. `NotFound` here is a configured key or mount that does not exist, not a missing resource of the request: never 404. `Unauthenticated` is the service's own KMS credential, never the client's: 500, not 401 |
 
 A hinted error that keeps coming back is the permanent condition (a key that does not exist):
-alert on its rate as for its class. A forged `kid`, above the latest version or naming a version
-or key that does not exist, is a caller error (401 when verifying a token), not a 503, and costs
-no backend request through `CachedVerifier` with its version checks on. A token naming a version
+alert on its rate as for its class. A forged `kid` above the latest version, or naming a version
+or key that does not exist, is a caller error (401 when verifying a token), not a 503. Through
+`CachedVerifier` with its version checks on, a numeric version above the latest costs no backend
+request; any other version it cannot rule out (a version below the latest that does not exist,
+any version of a source without numeric versions such as Azure, or with the checks off) costs one
+lookup per version per negative TTL (5 s by default), as does a disabled version
+(`KeyVersionUnusable`). A token naming a version
 the backend no longer publishes (below `min_decryption_version`) fails through `CachedVerifier`
 with `VerificationFailed` (the source's `UnknownKeyVersion`) or `KeyVersionUnusable`, both 401.
 Do not send `Display` output to clients: it names the backend, key URI and mount.

@@ -399,6 +399,13 @@ impl RetryLayer {
         &self.budget
     }
 
+    /// Sleeps for `d` with this layer's sleep function, without an attempt or a budget token:
+    /// for a recipe that waits out a condition of its own whose cost it bounds itself (what
+    /// `CachedVerifier` in `anykms-recipes` does for a version above the latest it knows).
+    pub async fn sleep(&self, d: Duration) {
+        (self.sleep)(d).await;
+    }
+
     /// Retries `f` with this layer's policy and budget: `f` starts one attempt and is called
     /// again for each retry. For a future that is not an operation of an opaque handle: a
     /// backend's extension method on its typed key, or a recipe's own operation (what

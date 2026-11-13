@@ -26,12 +26,10 @@ type Lookup = Result<Arc<LocalVerifier>>;
 /// Cache key: `None` is the key's current public key (unversioned signatures).
 type Key = Option<KeyVersion>;
 
-enum Slot {
-    Ready {
-        at: Instant,
-        verifier: Arc<LocalVerifier>,
-    },
-    InFlight(Arc<Flight<Lookup>>),
+/// A cached public key and when it was fetched.
+struct Cached {
+    at: Instant,
+    verifier: Arc<LocalVerifier>,
 }
 
 /// One in-progress backend request that concurrent callers wait on.
@@ -106,8 +104,11 @@ enum Latest {
 
 #[derive(Default)]
 struct State {
-    /// Public keys and in-flight lookups.
-    entries: HashMap<Key, Slot>,
+    /// Public keys (at most `max_entries`).
+    entries: HashMap<Key, Cached>,
+    /// Lookups in progress, kept apart from `entries` (and bounded only by concurrency) so that
+    /// lookups of forged versions in flight never evict cached public keys (L15).
+    in_flight: HashMap<Key, Arc<Flight<Lookup>>>,
     /// Failed lookups that will fail again (with when they failed and for how long they are
     /// remembered), kept apart (and bounded separately) so forged versions cannot evict real
     /// public keys.
@@ -165,28 +166,37 @@ struct State {
 /// }
 /// ```
 ///
-/// The hinted retry waits at least the interval, re-reads the latest version and verifies. A
-/// retry layer on the source (e.g. on the registry it was opened from) never sees this
+/// With such a layer the verifier waits out the interval itself (with the layer's sleep
+/// function), then re-reads the latest version and verifies once more. The wait is not one of
+/// the layer's retries: it spends no attempt and no budget token, so a flood of forged versions
+/// cannot drain a budget the layer shares with other operations (or with the rotation case
+/// itself). What bounds its cost is the latest-version read: at most one per refresh interval,
+/// coalesced across callers, however many requests wait. A request naming a version above the
+/// latest is held for up to one refresh interval. The verifier does not re-read the latest
+/// version without waiting: that would let every forged version cost a backend request again.
+/// A retry layer on the source (e.g. on the registry it was opened from) never sees this
 /// rejection, which the verifier makes itself; when the source already retries, give the
-/// verifier's layer `with_max_attempts(2)` so attempts on transient errors do not multiply. The
-/// verifier does not re-read the latest version inline instead: that would let every forged
-/// version cost a backend request again; with a retry layer, its budget bounds the sleeps a
-/// flood of forged versions can cause.
+/// verifier's layer `with_max_attempts(2)` so attempts on transient errors do not multiply.
 ///
 /// # Revocation
 ///
 /// The public key of a version never changes, but a version can be *revoked* on the backend
 /// (transit: raising `min_decryption_version`, which also stops verification; disabling a key or
 /// version; deleting the key). Cached entries expire after a TTL (default 5 minutes), so a
-/// revocation takes effect locally within the TTL. Call [`CachedVerifier::invalidate`] to force
-/// it immediately.
+/// revocation takes effect locally within the TTL, plus whatever the source caches itself. Call
+/// [`CachedVerifier::invalidate`] to drop this verifier's cache at once.
 ///
 /// This relies on the source refusing the public key of a disabled key or version, as the
 /// [`PublicKeys` contract](anykms_core::PublicKeys#contract) requires: `KeyStateInvalid` for a
-/// disabled key, `KeyVersionUnusable` for a disabled version. Every built-in backend honors it
-/// (AWS checks the key state with `DescribeKey`, because `GetPublicKey` serves disabled keys).
-/// A third-party [`PublicKeys`] source must honor it too, or a disabled key's signatures keep
-/// verifying here after the backend stopped accepting them.
+/// disabled key, `KeyVersionUnusable` for a disabled version. Every built-in backend refuses it
+/// on a lookup that reaches the backend (AWS checks the key state with `DescribeKey`, because
+/// `GetPublicKey` serves disabled keys); AWS, Azure and transit read the state on every lookup.
+/// **GCP** answers from its provider's public-key cache (`public_key_ttl`, default 60 s, +10 %
+/// jitter) without a state check, so through a GCP source the bound is this verifier's TTL plus
+/// `public_key_ttl`, and `invalidate` is immediate only together with
+/// `GcpProvider::invalidate_public_keys()`. A third-party [`PublicKeys`] source must honor the
+/// contract too, or a disabled key's signatures keep verifying here after the backend stopped
+/// accepting them; one that caches needs its own invalidation, as GCP's does.
 ///
 /// # Errors
 ///
@@ -230,15 +240,18 @@ struct State {
 ///   cannot vouch for with the read's error instead of fetching them, so an outage does not turn
 ///   each unique `kid` into a backend request; versions at or below the last known latest
 ///   version keep working from the cache;
-/// - caches failed lookups that will fail again (`UnknownKeyVersion`, `NotFound`,
-///   `InvalidArgument`, `KeyStateInvalid`, `KeyMismatch`, `Unsupported`) in a separate, smaller map (an eighth of the
-///   entry limit), so they never evict cached public keys: for the negative TTL (default
+/// - caches failed lookups that will fail again (`UnknownKeyVersion`, `KeyVersionUnusable`,
+///   `NotFound`, `InvalidArgument`, `KeyStateInvalid`, `KeyMismatch`, `Unsupported`, and its own
+///   refusal of a source that answers with another version than asked for) in a separate,
+///   smaller map (an eighth of the entry limit), so they never evict cached public keys: for the
+///   negative TTL (default
 ///   5 seconds), or, when the backend attached a [`retry_hint`](Error::retry_hint) (transit does
 ///   for a version above the latest it knows, as possible replication lag), for the shorter of
 ///   the negative TTL and the hint, so the hinted retry asks again; transient errors are not
 ///   cached;
 /// - coalesces concurrent lookups of one version into a single backend request (runtime-agnostic);
-/// - bounds the cache (default 1024 public keys, evicting expired, then the oldest entries).
+/// - bounds the cache (default 1024 public keys, evicting expired, then the oldest entries when
+///   a lookup has a public key to add); lookups in flight are kept apart and never evict them.
 ///
 /// Opt out of the version checks with
 /// [`allow_versions_above_latest`](CachedVerifier::allow_versions_above_latest) for sources whose
@@ -266,8 +279,10 @@ struct State {
 ///
 /// Cheap, and clones **share** the source and the cache (public keys, failed lookups, the latest
 /// version and the in-flight lookups), so cloning into request handlers or tasks keeps one cache
-/// per key. Configure before cloning: a builder method called on a clone gives that clone its own,
-/// empty cache, so verifiers with different settings never share entries.
+/// per key. Configure before cloning and before use: every builder method (except
+/// [`with_retry`](Self::with_retry)) gives the verifier its own, empty cache, so verifiers with
+/// different settings never share entries and no public key cached under the old settings is used
+/// under the new ones.
 pub struct CachedVerifier<P> {
     source: Arc<P>,
     alg: SignatureAlgorithm,
@@ -315,30 +330,26 @@ impl<P> std::fmt::Debug for CachedVerifier<P> {
 }
 
 /// Evicts expired, then the oldest entries of `map` until one more fits under `max`. Linear, but
-/// only runs when the map is full. `at` is an entry's insertion time (`None`: never evicted).
+/// only runs when the map is full. `at` is an entry's insertion time.
 fn make_room<V>(
     map: &mut HashMap<Key, V>,
     max: usize,
     expired: impl Fn(&V) -> bool,
-    at: impl Fn(&V) -> Option<Instant>,
+    at: impl Fn(&V) -> Instant,
 ) {
     if map.len() < max {
         return;
     }
     map.retain(|_, v| !expired(v));
     while map.len() >= max {
-        let oldest = map
+        let Some(oldest) = map
             .iter()
-            .filter_map(|(k, v)| at(v).map(|t| (t, k)))
-            .min_by_key(|(t, _)| *t)
-            .map(|(_, k)| k.clone());
-        match oldest {
-            Some(k) => {
-                map.remove(&k);
-            }
-            // Only in-flight lookups left: bounded by concurrency, allow it.
-            None => break,
-        }
+            .min_by_key(|(_, v)| at(v))
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        map.remove(&oldest);
     }
 }
 
@@ -357,18 +368,28 @@ impl<P> Drop for Lead<'_, P> {
         {
             let mut st = self.cv.lock();
             let ours = matches!(
-                st.entries.get(self.key),
-                Some(Slot::InFlight(f)) if Arc::ptr_eq(f, &self.flight)
+                st.in_flight.get(self.key),
+                Some(f) if Arc::ptr_eq(f, &self.flight)
             );
             if ours {
-                st.entries.remove(self.key);
+                st.in_flight.remove(self.key);
                 match &result {
                     Some(Ok(verifier)) => {
-                        let slot = Slot::Ready {
+                        // Only now, with a public key to cache, is room made: an expired entry
+                        // for this version, then other expired, then the oldest public keys.
+                        st.entries.remove(self.key);
+                        let ttl = self.cv.ttl;
+                        make_room(
+                            &mut st.entries,
+                            self.cv.max_entries,
+                            |c| c.at.elapsed() >= ttl,
+                            |c| c.at,
+                        );
+                        let cached = Cached {
                             at: Instant::now(),
                             verifier: verifier.clone(),
                         };
-                        st.entries.insert(self.key.clone(), slot);
+                        st.entries.insert(self.key.clone(), cached);
                     }
                     Some(Err(e)) => {
                         if let Some(ttl) = self.cv.negative_ttl_for(e) {
@@ -377,7 +398,7 @@ impl<P> Drop for Lead<'_, P> {
                                 &mut st.negative,
                                 max,
                                 |(t, ttl, _)| t.elapsed() >= *ttl,
-                                |(t, _, _)| Some(*t),
+                                |(t, _, _)| *t,
                             );
                             st.negative
                                 .insert(self.key.clone(), (Instant::now(), ttl, e.clone()));
@@ -450,9 +471,10 @@ impl<P> Drop for RecheckLead<'_, P> {
                         // Only while the entry re-fetched is still cached: a concurrent
                         // `invalidate` or refresh already made this answer moot.
                         let current = st.generation == self.generation
-                            && matches!(st.entries.get(self.key),
-                                Some(Slot::Ready { verifier, .. })
-                                    if Arc::ptr_eq(verifier, &self.cached));
+                            && st
+                                .entries
+                                .get(self.key)
+                                .is_some_and(|c| Arc::ptr_eq(&c.verifier, &self.cached));
                         if current && differs(st.entries.get(self.key), pk) {
                             forget(&mut st);
                         }
@@ -470,14 +492,15 @@ impl<P> Drop for RecheckLead<'_, P> {
 /// Drops every cached public key and failed lookup: the key was deleted and recreated.
 fn forget(st: &mut State) {
     st.entries.clear();
+    // A lookup in flight now hands its result to its waiters only, never to the cache.
+    st.in_flight.clear();
     st.negative.clear();
     st.generation += 1;
 }
 
-/// Whether `slot` holds a public key other than `pk`.
-fn differs(slot: Option<&Slot>, pk: &PublicKey) -> bool {
-    matches!(slot, Some(Slot::Ready { verifier, .. })
-        if verifier.public_key().spki_der() != pk.spki_der())
+/// Whether `cached` holds a public key other than `pk`.
+fn differs(cached: Option<&Cached>, pk: &PublicKey) -> bool {
+    cached.is_some_and(|c| c.verifier.public_key().spki_der() != pk.spki_der())
 }
 
 /// Records a successful read of the key's current public key. A latest version lower than the
@@ -511,12 +534,12 @@ impl<P> CachedVerifier<P> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Gives this verifier its own, empty cache if it shares one with clones: called by every
-    /// builder method, so verifiers with different settings never share entries.
+    /// Gives this verifier its own, empty cache: called by every builder method, so verifiers
+    /// with different settings never share entries, and public keys cached under the old
+    /// settings (e.g. lenient verifiers before `require_low_s`) are never used under the new
+    /// ones, also when this verifier was used before it was reconfigured.
     fn detach(mut self) -> Self {
-        if Arc::strong_count(&self.state) > 1 {
-            self.state = Arc::new(Mutex::new(State::default()));
-        }
+        self.state = Arc::new(Mutex::new(State::default()));
         self
     }
 
@@ -526,17 +549,20 @@ impl<P> CachedVerifier<P> {
 
     /// How long a failed lookup is remembered: `None` for transient failures (not at all),
     /// for at most the retry hint of hinted failures (so the hinted retry asks again), the
-    /// negative TTL otherwise.
+    /// negative TTL otherwise. Lasting failures are the ones the same lookup fails with again:
+    /// the source's caller errors (a disabled version, `KeyVersionUnusable`, included) and the
+    /// verifier's own refusal of a source that answers with another version than asked for.
     fn negative_ttl_for(&self, e: &Error) -> Option<Duration> {
         let lasting = matches!(
             e.kind(),
             ErrorKind::UnknownKeyVersion
+                | ErrorKind::KeyVersionUnusable
                 | ErrorKind::NotFound
                 | ErrorKind::InvalidArgument
                 | ErrorKind::KeyStateInvalid
                 | ErrorKind::KeyMismatch
                 | ErrorKind::Unsupported
-        );
+        ) || is_other_version(e);
         if !lasting {
             return None;
         }
@@ -627,10 +653,12 @@ impl<P: PublicKeys> CachedVerifier<P> {
 
     /// Retries each verification with `retry` (its policy, budget and deadline), as a retry
     /// layer on a handle does. With `RetryPolicy::with_retry_on_hint(true)` this is what makes
-    /// the verifier tolerate a rotation (see [Rotation](CachedVerifier#rotation)): the ceiling
-    /// rejection the verifier itself makes carries a hint that only a layer around the verifier
-    /// can act on. Transient errors of the source (throttling, failover) are retried too; when the
-    /// source already retries, give this layer `with_max_attempts(2)`.
+    /// the verifier tolerate a rotation (see [Rotation](CachedVerifier#rotation)): the verifier
+    /// then waits out its own rejection of a version above the latest with the layer's sleep
+    /// function (if the policy allows at least 2 attempts and its `cap` is at least the refresh
+    /// interval), spending no attempt and no budget token. Transient errors of the source
+    /// (throttling, failover) are retried by the layer as usual; when the source already
+    /// retries, give this layer `with_max_attempts(2)`.
     ///
     /// Does not detach the cache: clones with and without a retry layer share their entries.
     pub fn with_retry(mut self, retry: &RetryLayer) -> Self {
@@ -647,6 +675,7 @@ impl<P: PublicKeys> CachedVerifier<P> {
     pub fn invalidate(&self) {
         let mut st = self.lock();
         st.entries.clear();
+        st.in_flight.clear();
         st.negative.clear();
         st.latest = Latest::Unknown;
         st.latest_checked = None;
@@ -766,13 +795,7 @@ impl<P: PublicKeys> CachedVerifier<P> {
             return Err(e.clone());
         }
         match st.latest {
-            Latest::Numeric(_) => Err(Error::new(
-                ErrorKind::InvalidArgument,
-                BACKEND,
-                Operation::Verify,
-                "signature names a key version above the key's latest version",
-            )
-            .with_retry_hint(self.latest_refresh)),
+            Latest::Numeric(_) => Err(above_latest().with_retry_hint(self.latest_refresh)),
             // Only after a concurrent `invalidate`.
             _ => Err(Error::new(
                 ErrorKind::Unavailable,
@@ -788,15 +811,11 @@ impl<P: PublicKeys> CachedVerifier<P> {
             Some(v) => {
                 let pk = self.source.public_key_version(v).await?;
                 // A source that answers with another version (or none) would get this key cached
-                // under `v` and let signatures naming `v` verify under it. `Backend` is not a
-                // lasting failure, so it is not cached either.
+                // under `v` and let signatures naming `v` verify under it. The same lookup gets
+                // the same answer again (e.g. a source that canonicalizes the version, as Azure
+                // case-folds hex), so the refusal is remembered like an unknown version (L14).
                 if pk.key_version() != Some(v) {
-                    return Err(Error::new(
-                        ErrorKind::Backend,
-                        BACKEND,
-                        Operation::Verify,
-                        "public key source returned a different key version than requested",
-                    ));
+                    return Err(other_version());
                 }
                 pk
             }
@@ -833,27 +852,18 @@ impl<P: PublicKeys> CachedVerifier<P> {
                     }
                     st.negative.remove(&key);
                 }
-                match st.entries.get(&key) {
-                    Some(Slot::Ready { at, verifier }) if at.elapsed() < self.ttl => {
-                        return Ok((verifier.clone(), true));
-                    }
-                    Some(Slot::InFlight(f)) => (f.clone(), false),
-                    _ => {
-                        st.entries.remove(&key);
-                        let ttl = self.ttl;
-                        make_room(
-                            &mut st.entries,
-                            self.max_entries,
-                            |s| matches!(s, Slot::Ready { at, .. } if at.elapsed() >= ttl),
-                            |s| match s {
-                                Slot::Ready { at, .. } => Some(*at),
-                                Slot::InFlight(_) => None,
-                            },
-                        );
-                        let f = Arc::new(Flight::default());
-                        st.entries.insert(key.clone(), Slot::InFlight(f.clone()));
-                        (f, true)
-                    }
+                if let Some(c) = st.entries.get(&key)
+                    && c.at.elapsed() < self.ttl
+                {
+                    return Ok((c.verifier.clone(), true));
+                }
+                if let Some(f) = st.in_flight.get(&key) {
+                    (f.clone(), false)
+                } else {
+                    // Room in `entries` is made when the lookup has a public key to cache.
+                    let f = Arc::new(Flight::default());
+                    st.in_flight.insert(key.clone(), f.clone());
+                    (f, true)
                 }
             };
             if leader {
@@ -894,6 +904,38 @@ fn unknown_version_fails(e: Error) -> Error {
         f = f.with_retry_hint(h);
     }
     f.with_source(e)
+}
+
+/// The verifier's rejection of a version above the key's latest version (see
+/// [Rotation](CachedVerifier#rotation)).
+fn above_latest() -> Error {
+    Error::new(
+        ErrorKind::InvalidArgument,
+        BACKEND,
+        Operation::Verify,
+        "signature names a key version above the key's latest version",
+    )
+}
+
+/// Whether `e` is [`above_latest`] with its retry hint: the only hinted `InvalidArgument` the
+/// verifier itself makes.
+fn is_ceiling_rejection(e: &Error) -> bool {
+    e.kind() == ErrorKind::InvalidArgument && e.backend() == BACKEND && e.retry_hint().is_some()
+}
+
+/// The verifier's refusal of a source that answered with another version than asked for.
+fn other_version() -> Error {
+    Error::new(
+        ErrorKind::Backend,
+        BACKEND,
+        Operation::Verify,
+        "public key source returned a different key version than requested",
+    )
+}
+
+/// Whether `e` is [`other_version`]: the only `Backend` error the verifier itself makes.
+fn is_other_version(e: &Error) -> bool {
+    e.kind() == ErrorKind::Backend && e.backend() == BACKEND
 }
 
 /// Whether a failure under a cached public key is worth a [`CachedVerifier::recheck`].
@@ -940,10 +982,75 @@ impl<P: PublicKeys> CachedVerifier<P> {
     }
 }
 
+impl<P> CachedVerifier<P> {
+    /// How long to wait out `e` before trying once more, if it is the verifier's rejection of a
+    /// version above the latest and `retry`'s policy would honor its hint (L16). The verifier
+    /// waits itself instead of handing the hinted error to the layer, so the wait spends no
+    /// attempt and no budget token: what bounds its cost is the latest-version read it leads to,
+    /// at most one per refresh interval and coalesced across callers, so a flood of forged
+    /// versions neither reaches the backend nor drains a budget shared with other operations.
+    fn ceiling_wait(retry: &RetryLayer, e: &Error) -> Option<Duration> {
+        let p = retry.policy();
+        if !p.retry_on_hint || p.max_attempts < 2 || !is_ceiling_rejection(e) {
+            return None;
+        }
+        e.retry_hint().filter(|h| *h <= p.cap)
+    }
+}
+
+/// After the wait: a second rejection has nothing left for a retry layer to act on.
+fn waited(r: Result<()>) -> Result<()> {
+    r.map_err(|e| {
+        if is_ceiling_rejection(&e) {
+            above_latest()
+        } else {
+            e
+        }
+    })
+}
+
+impl<P: PublicKeys> CachedVerifier<P> {
+    async fn verify_digest_waiting(
+        &self,
+        retry: &RetryLayer,
+        digest: &Digest,
+        sig: &Signature,
+    ) -> Result<()> {
+        let r = self.verify_digest_once(digest, sig).await;
+        match r.as_ref().err().and_then(|e| Self::ceiling_wait(retry, e)) {
+            Some(wait) => {
+                retry.sleep(wait).await;
+                waited(self.verify_digest_once(digest, sig).await)
+            }
+            None => r,
+        }
+    }
+
+    async fn verify_message_waiting(
+        &self,
+        retry: &RetryLayer,
+        msg: &[u8],
+        sig: &Signature,
+    ) -> Result<()> {
+        let r = self.verify_message_once(msg, sig).await;
+        match r.as_ref().err().and_then(|e| Self::ceiling_wait(retry, e)) {
+            Some(wait) => {
+                retry.sleep(wait).await;
+                waited(self.verify_message_once(msg, sig).await)
+            }
+            None => r,
+        }
+    }
+}
+
 impl<P: PublicKeys> DigestVerifier for CachedVerifier<P> {
     async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
         match &self.retry {
-            Some(retry) => retry.call(|| self.verify_digest_once(digest, sig)).await,
+            Some(retry) => {
+                retry
+                    .call(|| self.verify_digest_waiting(retry, digest, sig))
+                    .await
+            }
             None => self.verify_digest_once(digest, sig).await,
         }
     }
@@ -952,7 +1059,11 @@ impl<P: PublicKeys> DigestVerifier for CachedVerifier<P> {
 impl<P: PublicKeys> MessageVerifier for CachedVerifier<P> {
     async fn verify_message(&self, msg: &[u8], sig: &Signature) -> Result<()> {
         match &self.retry {
-            Some(retry) => retry.call(|| self.verify_message_once(msg, sig)).await,
+            Some(retry) => {
+                retry
+                    .call(|| self.verify_message_waiting(retry, msg, sig))
+                    .await
+            }
             None => self.verify_message_once(msg, sig).await,
         }
     }
@@ -1623,7 +1734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_source_answering_another_version_is_refused_and_not_cached() {
+    async fn a_source_answering_another_version_is_refused_and_negatively_cached() {
         let cv = CachedVerifier::new(WrongVersion(Source::new(2)), ALG);
         let d = Digest::sha256(b"m");
         // Signed by version 2 but naming version 1: without the check, version 2's key would be
@@ -1632,9 +1743,14 @@ mod tests {
         let e = cv.verify_digest(&d, &sig).await.unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Backend);
         assert_eq!(len(&cv), 0);
-        // Not negatively cached: the next call asks again.
-        cv.verify_digest(&d, &sig).await.unwrap_err();
-        assert_eq!(cv.source.0.versions(), 2);
+        // L14: the source answers the same way next time (e.g. a version it canonicalizes, such
+        // as Azure's case-folded hex), so the refusal is remembered like an unknown version:
+        // replaying the signature costs no further lookup.
+        for _ in 0..5 {
+            let e = cv.verify_digest(&d, &sig).await.unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::Backend);
+        }
+        assert_eq!(cv.source.0.versions(), 1);
     }
 
     #[tokio::test]
@@ -1683,5 +1799,150 @@ mod tests {
         })
         .await;
         out.into_iter().map(Option::unwrap).collect()
+    }
+
+    /// L15: lookups in flight (forged versions under `allow_versions_above_latest`, or any
+    /// version of a non-numeric source) never evict cached public keys, however many there are.
+    #[tokio::test]
+    async fn in_flight_lookups_do_not_evict_public_keys() {
+        let cv = CachedVerifier::new(Source::new(2), ALG)
+            .allow_versions_above_latest()
+            .with_max_entries(4);
+        let d = Digest::sha256(b"m");
+        cv.verify_digest(&d, &signed(1, &d)).await.unwrap();
+        cv.verify_digest(&d, &signed(2, &d)).await.unwrap();
+        assert_eq!(cv.source.versions(), 2);
+        cv.source.hang.store(true, Ordering::SeqCst);
+        let base = signed(1, &d);
+        // Twice the entry limit, all in flight at once.
+        let forged: Vec<_> = (0..8)
+            .map(|i| with_version(&base, &format!("forged-{i}")))
+            .collect();
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        let mut futs: Vec<_> = forged
+            .iter()
+            .map(|s| Box::pin(cv.verify_digest(&d, s)))
+            .collect();
+        for f in &mut futs {
+            assert!(f.as_mut().poll(&mut cx).is_pending());
+        }
+        assert_eq!(len(&cv), 2, "both public keys still cached");
+        cv.source.hang.store(false, Ordering::SeqCst);
+        for f in futs {
+            f.await.unwrap_err();
+        }
+        let before = cv.source.versions();
+        cv.verify_digest(&d, &signed(1, &d)).await.unwrap();
+        cv.verify_digest(&d, &signed(2, &d)).await.unwrap();
+        assert_eq!(cv.source.versions(), before, "no re-fetch of a real key");
+        // The limit still holds for public keys.
+        let cv = CachedVerifier::new(Source::new(10), ALG).with_max_entries(3);
+        for v in 1..=10 {
+            cv.verify_digest(&d, &signed(v, &d)).await.unwrap();
+            assert!(len(&cv) <= 3, "{} entries", len(&cv));
+        }
+    }
+
+    /// L14(b): a disabled version (`KeyVersionUnusable`) fails again on every lookup, so it is
+    /// remembered like an unknown one.
+    #[tokio::test]
+    async fn unusable_versions_are_negatively_cached() {
+        let source = Source {
+            fail: Some(ErrorKind::KeyVersionUnusable),
+            ..Source::new(2)
+        };
+        let cv = CachedVerifier::new(source, ALG);
+        let d = Digest::sha256(b"m");
+        for _ in 0..5 {
+            let e = cv.verify_digest(&d, &signed(1, &d)).await.unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::KeyVersionUnusable);
+        }
+        assert_eq!(cv.source.versions(), 1, "one lookup per negative TTL");
+    }
+
+    /// L16: rejections of versions above the latest are waited out by the verifier itself (one
+    /// coalesced latest-version read per refresh interval), not by a hinted retry of the layer,
+    /// so a flood of forged versions does not drain the layer's retry budget: other retries
+    /// sharing the layer, and the rotation case the hint exists for, keep working.
+    #[tokio::test]
+    async fn forged_versions_do_not_drain_a_shared_retry_budget() {
+        use anykms_core::{RetryLayer, RetryPolicy};
+        let interval = Duration::from_millis(20);
+        let sleep: anykms_core::SleepFn = Arc::new(|d| Box::pin(tokio::time::sleep(d)));
+        let policy = RetryPolicy::default()
+            .with_retry_on_hint(true)
+            .with_backoff(Duration::from_millis(1), Duration::from_millis(50))
+            .with_max_attempts(3);
+        let retry = RetryLayer::new(sleep).with_policy(policy);
+        let source = Source::new(2);
+        let latest = source.latest.clone();
+        let cv = CachedVerifier::new(source, ALG)
+            .with_latest_refresh_interval(interval)
+            .with_retry(&retry);
+        let d = Digest::sha256(b"m");
+        cv.verify_digest(&d, &signed(1, &d)).await.unwrap();
+        let fetched = cv.source.versions();
+        let forged = with_version(&signed(1, &d), "999999");
+        for _ in 0..30 {
+            let e = cv.verify_digest(&d, &forged).await.unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+            // Already waited out: nothing left for a layer to retry.
+            assert!(!hinted(&e), "{e}");
+        }
+        assert_eq!(
+            cv.source.versions(),
+            fetched,
+            "forged versions are never fetched"
+        );
+        // An unrelated transient error on the same layer is still retried.
+        let calls = AtomicUsize::new(0);
+        let r: Result<()> = retry
+            .call(|| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err(Error::new(
+                        ErrorKind::Unavailable,
+                        "t",
+                        Operation::Verify,
+                        "x",
+                    ))
+                }
+            })
+            .await;
+        r.unwrap_err();
+        assert!(calls.load(Ordering::SeqCst) > 1, "transient error retried");
+        // And a version signed right after a rotation verifies once the latest is re-read.
+        latest.store(3, Ordering::SeqCst);
+        cv.verify_digest(&d, &signed(3, &d)).await.unwrap();
+        // Without a retry layer the rejection still carries the hint, for the caller to act on.
+        let bare = CachedVerifier::new(Source::new(2), ALG);
+        let e = bare.verify_digest(&d, &forged).await.unwrap_err();
+        assert_eq!(e.retry_hint(), Some(DEFAULT_LATEST_REFRESH));
+    }
+
+    /// A builder method called on a verifier that already cached public keys drops them, so the
+    /// new setting applies to every later verification, not only to versions fetched later.
+    #[tokio::test]
+    async fn builder_methods_on_a_used_verifier_reset_its_cache() {
+        let cv = CachedVerifier::new(Source::new(1), ALG);
+        let d = Digest::sha256(b"m");
+        let low: p256::ecdsa::Signature = Source::signing_key(0, 1)
+            .sign_prehash(d.as_bytes())
+            .unwrap();
+        let low = low.normalize_s();
+        let high = p256::ecdsa::Signature::from_scalars(low.r(), -low.s()).unwrap();
+        let sig = |s: p256::ecdsa::Signature| {
+            Signature::from_parts(
+                ALG,
+                Some(KeyVersion::from_u64(1)),
+                s.to_der().as_bytes().to_vec(),
+            )
+        };
+        cv.verify_digest(&d, &sig(high)).await.unwrap();
+        let strict = cv.require_low_s();
+        assert_eq!(len(&strict), 0);
+        let e = strict.verify_digest(&d, &sig(high)).await.unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::VerificationFailed);
+        strict.verify_digest(&d, &sig(low)).await.unwrap();
     }
 }

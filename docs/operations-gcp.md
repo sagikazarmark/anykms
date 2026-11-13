@@ -195,12 +195,28 @@ minutes after the disable; a re-fetch that fails does not extend the cached key 
 fails with the re-fetch's error). Every fetch first reads the version's state
 (`cryptoKeyVersions.get`) and refuses a version that is not `ENABLED`, so a disabled version's
 public key is never handed out, also if Cloud KMS would serve it; that lookup fails closed
-without `cloudkms.cryptoKeyVersions.get`. A signature or `public_key_version` naming a version
-that does not exist (`UnknownKeyVersion`; verifying with it is `VerificationFailed`) or that is
-disabled or destroyed (`KeyVersionUnusable`) is remembered for the same TTL (up to 64 versions),
-so forged versions cost at most one lookup each per TTL, and they never make the handle re-run
-its key-type check. A pending version (with its retry hint) is not remembered.
-`public_key_ttl(Duration::ZERO)` disables both caches. Destroying a version loses its data after
+without `cloudkms.cryptoKeyVersions.get`.
+
+`CachedVerifier` (`anykms-recipes`) keeps its own cache on top (default 5 minutes), and its
+lookups through a GCP handle are answered from the provider's cache first: a disabled version
+stops verifying through it at most `CachedVerifier`'s TTL plus `public_key_ttl` (+10 %) after
+the disable, Cloud KMS's own delay on top. `CachedVerifier::invalidate()` drops only the
+verifier's cache; to revoke at once, also call `GcpProvider::invalidate_public_keys()` (on the
+provider or a clone of it, kept when registering it), which drops the provider's public keys and
+remembered versions for every handle.
+
+A signature or `public_key_version` naming a version that does not exist (`UnknownKeyVersion`;
+verifying with it is `VerificationFailed`) or that is disabled or destroyed
+(`KeyVersionUnusable`) is remembered for the same TTL (up to 64 versions), and none of them
+make the handle re-run its key-type check. A version found missing also makes the provider read
+the key's latest version (one `cryptoKeyVersions.list`, at most once per key per TTL); until
+that read expires, every version above it is refused without a request. Forged versions above
+the latest therefore cost one lookup and one list per key per TTL in all, however many distinct
+versions arrive; forged versions below the latest (which exist, so only disabled or destroyed
+ones fail) cost one lookup each per TTL, of which only 64 are remembered. A version created
+after the read is refused (`UnknownKeyVersion`) until the read expires, at most `public_key_ttl`
+(+10 %) after the rotation. A pending version (with its retry hint) is not remembered.
+`public_key_ttl(Duration::ZERO)` disables all three caches. Destroying a version loses its data after
 `destroyScheduledDuration` (24 h by default); restore it while it is `DESTROY_SCHEDULED`.
 
 A disabled, destroyed or scheduled-for-destruction version fails differently by who chose it:

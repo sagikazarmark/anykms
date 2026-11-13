@@ -354,6 +354,22 @@ impl GcpProvider {
         GcpProviderBuilder::default()
     }
 
+    /// Drops the public keys this provider cached (`public_key_ttl`), the versions it remembers
+    /// as unknown or unusable, and the latest versions it read, for every key and every handle
+    /// opened from it or from a clone of it. A fetch in progress caches nothing.
+    ///
+    /// Call it after disabling a version, together with
+    /// [`CachedVerifier::invalidate`](https://docs.rs/anykms-recipes/latest/anykms_recipes/struct.CachedVerifier.html#method.invalidate)
+    /// for verifiers whose source is a handle of this provider: the verifier's `invalidate`
+    /// drops its own cache only, and without this its next lookup is answered from the
+    /// provider's cache, so the disabled version keeps verifying for up to `public_key_ttl`
+    /// (+10 % jitter). With both, the next verification re-reads the version's state and
+    /// refuses it. Keep a clone of the provider for this when registering it:
+    /// `Registry::builder().provider(provider.clone())`.
+    pub fn invalidate_public_keys(&self) {
+        self.shared.invalidate_public_keys();
+    }
+
     /// A provider configured from the environment (see [`GcpProviderBuilder::from_env`]), with
     /// Application Default Credentials.
     pub fn from_env() -> Result<Self> {

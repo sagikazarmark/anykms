@@ -1,6 +1,7 @@
 //! Typed key handles.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -72,6 +73,10 @@ pub(crate) struct VersionKey {
     pub(crate) alg: Alg,
 }
 
+/// A read of a key's latest version: (expiry, the latest version and the error a version above
+/// it fails with), `None` while the read is in progress or after it failed.
+type LatestRead = (Instant, Option<(u64, Error)>);
+
 /// State shared by every handle of one provider.
 pub(crate) struct Shared {
     pub(crate) client: Client,
@@ -87,6 +92,16 @@ pub(crate) struct Shared {
     /// name: (expiry, the error). At most [`MAX_UNKNOWN_VERSIONS`], each for `public_key_ttl`,
     /// so a forged or disabled version costs at most one request per TTL.
     unknown_versions: Mutex<HashMap<String, (Instant, Error)>>,
+    /// The latest version of each key whose input version was found missing, per key resource
+    /// name: (expiry, the latest version and the error a version above it fails with). Read
+    /// with one `cryptoKeyVersions.list` at most once per `public_key_ttl` (jittered); `None`
+    /// while the read is in progress or after it failed. Versions are numbered densely, so every
+    /// version above the latest is missing: they are refused without a request until the entry
+    /// expires (L17).
+    latest_versions: Mutex<HashMap<String, LatestRead>>,
+    /// Bumped by [`Shared::invalidate_public_keys`], so a fetch that started before cannot put
+    /// its (possibly stale) answer back into the caches.
+    generation: AtomicU64,
     pub(crate) public_key_ttl: Duration,
     /// The handles' semantics (verification depends on `public_key_ttl`).
     pub(crate) semantics: crate::semantics::GcpSemantics,
@@ -109,10 +124,29 @@ impl Shared {
             check_flights: SingleFlight::new(),
             public_keys: Mutex::default(),
             unknown_versions: Mutex::default(),
+            latest_versions: Mutex::default(),
+            generation: AtomicU64::new(0),
             public_key_ttl,
             semantics: crate::semantics::GcpSemantics::new(public_key_ttl),
         }
     }
+
+    /// Drops every cached public key, remembered refused version and latest-version read (see
+    /// [`GcpProvider::invalidate_public_keys`](crate::GcpProvider::invalidate_public_keys)).
+    pub(crate) fn invalidate_public_keys(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        lock(&self.public_keys).clear();
+        lock(&self.unknown_versions).clear();
+        lock(&self.latest_versions).clear();
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Everything a handle needs to reach one key.
@@ -424,11 +458,19 @@ impl KeyCtx {
                 {
                     return Err(e.clone().with_operation(op));
                 }
+                drop(unknown);
+                if let Some(e) = self.above_latest(v, now) {
+                    return Err(e.with_operation(op));
+                }
             }
         }
-        match self.fetch_public_key(v, &name, op, origin).await {
+        let generation = self.shared.generation();
+        let r = self.fetch_public_key(v, &name, op, origin).await;
+        // An invalidation while the fetch ran: answer the caller, but cache nothing from it.
+        let current = self.shared.generation() == generation;
+        match r {
             Ok(k) => {
-                if !ttl.is_zero() {
+                if !ttl.is_zero() && current {
                     let now = Instant::now();
                     let mut cache = self
                         .shared
@@ -470,11 +512,63 @@ impl KeyCtx {
                     )
                     && e.retry_hint().is_none()
                     && !ttl.is_zero()
+                    && current
                 {
                     self.remember_unknown(name, &e, ttl);
+                    if e.kind() == ErrorKind::UnknownKeyVersion {
+                        self.read_latest(&e, op, ttl, generation).await;
+                    }
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// The error for input version `v` if the key's latest version is known (read within
+    /// `public_key_ttl`) and `v` is above it (L17).
+    fn above_latest(&self, v: u64, now: Instant) -> Option<Error> {
+        match lock(&self.shared.latest_versions).get(&self.key.key_name()) {
+            Some((expires, Some((latest, e)))) if now < *expires && v > *latest => Some(e.clone()),
+            _ => None,
+        }
+    }
+
+    /// After input version lookup found `missing` (`UnknownKeyVersion`): reads the key's latest
+    /// version with one `cryptoKeyVersions.list`, unless it was read (or a read started) within
+    /// `public_key_ttl`, so that versions above it are refused without a request (see
+    /// [`above_latest`](Self::above_latest)). Without this, only the 64 versions the negative
+    /// cache holds were remembered, and more distinct forged versions in rotation each cost a
+    /// lookup. A failed read is not repeated before the entry expires.
+    async fn read_latest(&self, missing: &Error, op: Operation, ttl: Duration, generation: u64) {
+        let key = self.key.key_name();
+        let now = Instant::now();
+        {
+            let mut latest = lock(&self.shared.latest_versions);
+            if latest.get(&key).is_some_and(|(expires, _)| now < *expires) {
+                return;
+            }
+            latest.retain(|_, (expires, _)| now < *expires);
+            latest.insert(
+                key.clone(),
+                (now + anykms_http::cache::jittered_ttl(ttl), None),
+            );
+        }
+        let Ok(versions) = self.list_versions(op).await else {
+            return;
+        };
+        let prefix = format!("{key}/cryptoKeyVersions/");
+        let Some(max) = versions
+            .iter()
+            .filter_map(|j| j.name.strip_prefix(&prefix)?.parse::<u64>().ok())
+            .max()
+        else {
+            return;
+        };
+        if self.shared.generation() != generation {
+            return;
+        }
+        if let Some((_, slot)) = lock(&self.shared.latest_versions).get_mut(&key) {
+            *slot = Some((max, missing.clone()));
         }
     }
 
