@@ -291,6 +291,16 @@ impl KeyCtx {
     /// ciphertext of another key) never drops it, so it cannot force a metadata read on every
     /// caller.
     pub(crate) async fn send(&self, call: Call<'_>, origin: Origin) -> Result<Zeroizing<Vec<u8>>> {
+        self.send_sent(call, origin).await.map(|(body, _)| body)
+    }
+
+    /// [`send`](Self::send), also returning when the attempt that got the response was sent
+    /// ([`Server::call`]).
+    async fn send_sent(
+        &self,
+        call: Call<'_>,
+        origin: Origin,
+    ) -> Result<(Zeroizing<Vec<u8>>, Instant)> {
         let r = self.server.call(call).await;
         if let Err(e) = &r
             && origin == Origin::Handle
@@ -380,18 +390,19 @@ impl KeyCtx {
         Ok(info)
     }
 
-    /// Reads fresh metadata, without caching it; with the instant the read was sent.
+    /// Reads fresh metadata, without caching it; with the instant the read was sent: by the
+    /// attempt that got the response, after any wait for a token or 403 retry, so reads are
+    /// ordered by when they actually went out.
     async fn fetch_info(
         &self,
         op: Operation,
         origin: Origin,
         version: Option<u64>,
     ) -> Result<(TransitKeyInfo, Instant)> {
-        let sent = Instant::now();
         let mut call = self.call(Method::GET, self.path("keys"), None, op);
         call.key_read = true;
         call.key_version = version;
-        let body = self.send(call, origin).await?;
+        let (body, sent) = self.send_sent(call, origin).await?;
         let info = TransitKeyInfo::parse(&body).map_err(|e| {
             if e.kind() == ErrorKind::Backend {
                 crate::errors::unusable_response(

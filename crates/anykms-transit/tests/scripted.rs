@@ -606,11 +606,16 @@ async fn a_type_read_from_before_the_type_was_dropped_stores_nothing() {
 /// What `encrypt/:name` answers in the [`ByPath`] tests.
 const CIPHERTEXT: &str = r#"{"data": {"ciphertext": "vault:v1:AAAA"}}"#;
 
+/// `keys/k` before the key was recreated as `aes256-gcm96` ([`KEY_INFO`]).
+const RSA_INFO: &str = r#"{"data": {"type": "rsa-2048", "latest_version": 1, "keys": {"1": 1}}}"#;
+
 /// How long a [`ByPath`] answer is held before it is returned.
 #[derive(Clone, Copy, Debug)]
 enum Hold {
     /// Answered at once.
     No,
+    /// Answered after this long.
+    For(std::time::Duration),
     /// Woken at 1 s (as by the request timeout's timer), then held until `release`.
     Release,
 }
@@ -651,6 +656,16 @@ impl ByPath {
         self
     }
 
+    /// Scripts the next login, handing out `token`.
+    fn login(&self, hold: Hold, token: &str) -> &Self {
+        self.answer(
+            "/login",
+            hold,
+            200,
+            &format!(r#"{{"auth": {{"client_token": "{token}", "lease_duration": 3600}}}}"#),
+        )
+    }
+
     /// The path of every request so far.
     fn paths(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
@@ -682,6 +697,7 @@ impl HttpTransport for ByPath {
         Box::pin(async move {
             match hold {
                 Hold::No => {}
+                Hold::For(d) => tokio::time::sleep(d).await,
                 Hold::Release => {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     self.release.notified().await;
@@ -757,4 +773,95 @@ async fn dropping_one_keys_type_keeps_a_concurrent_type_read_of_another_key() {
         ["/v1/transit/encrypt/k"],
         "another key's dropped type discarded this key's read: {paths:?}"
     );
+}
+
+/// A provider over `t` that logs in with a JWT (written under a directory named for `test`).
+fn by_path_login_provider(t: &std::sync::Arc<ByPath>, test: &str) -> (TransitProvider, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("anykms-scripted-{test}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let jwt = dir.join("jwt");
+    std::fs::write(&jwt, "eyJhbGciOiJFUzI1NiJ9.LOGINTESTJWT.c2ln\n").unwrap();
+    let p = TransitProvider::builder()
+        .server(
+            "default",
+            ServerConfig::new("https://vault.example:8200", Flavor::Vault)
+                .login(Login::jwt("ci", &jwt))
+                .http_transport(t.clone()),
+        )
+        .build()
+        .unwrap();
+    (p, dir)
+}
+
+/// A metadata read refused with a 403 is sent again after a new login, later than a read that
+/// started after it. It is ordered by when that retry was sent, not by when it started: the
+/// recreated key's type it returns replaces the older one the other read cached.
+#[tokio::test(start_paused = true)]
+async fn a_type_read_retried_after_a_403_is_ordered_by_its_retry() {
+    let t = ByPath::new();
+    t.login(Hold::No, "s.1")
+        .answer(
+            "/keys/k",
+            Hold::For(std::time::Duration::from_secs(5)),
+            403,
+            r#"{"errors": ["permission denied"]}"#,
+        )
+        .answer("/keys/k", Hold::No, 200, RSA_INFO)
+        .login(Hold::No, "s.2")
+        .answer("/keys/k", Hold::No, 200, KEY_INFO)
+        .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
+    let (p, dir) = by_path_login_provider(&t, "retried-type-read");
+    let key = p.aead_key(uri()).unwrap();
+    let earlier = tokio::spawn({
+        let key = key.clone();
+        async move { key.describe().await }
+    });
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(t.paths(), ["/v1/auth/jwt/login", "/v1/transit/keys/k"]);
+
+    // A later read, sent and answered while the earlier one waits for its 403.
+    key.describe().await.unwrap();
+    earlier.await.unwrap().unwrap();
+    assert_eq!(t.paths().len(), 5, "{:?}", t.paths());
+
+    let before = t.paths().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("the retried read's newer type was discarded");
+    assert_eq!(t.paths()[before..], ["/v1/transit/encrypt/k"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A metadata read that waits for a login is sent only after it, later than a read that
+/// started after it but logged in itself (the first login stalled). It is ordered by when it
+/// was sent: the recreated key's type it returns replaces the older one the other read cached.
+#[tokio::test(start_paused = true)]
+async fn a_type_read_that_waited_for_a_login_is_ordered_by_its_send() {
+    let t = ByPath::new();
+    t.login(Hold::Release, "s.stalled")
+        .login(Hold::No, "s.fresh")
+        .answer("/keys/k", Hold::No, 200, RSA_INFO)
+        .answer("/keys/k", Hold::No, 200, KEY_INFO)
+        .answer("/encrypt/k", Hold::No, 200, CIPHERTEXT);
+    let (p, dir) = by_path_login_provider(&t, "login-wait-type-read");
+    let key = p.aead_key(uri()).unwrap();
+    let mut earlier = Box::pin(key.describe());
+    assert!(poll_once(&mut earlier).await.is_pending());
+    assert_eq!(t.paths(), ["/v1/auth/jwt/login"]);
+
+    // A later read waits out the stalled login, logs in and reads the key first.
+    tokio::time::timeout(std::time::Duration::from_secs(600), key.describe())
+        .await
+        .expect("a read is blocked behind a login nobody polls")
+        .unwrap();
+    t.release.notify_one();
+    earlier.await.unwrap();
+    assert_eq!(t.paths().len(), 4, "{:?}", t.paths());
+
+    let before = t.paths().len();
+    key.encrypt(b"z", b"")
+        .await
+        .expect("the read that waited for its login had its newer type discarded");
+    assert_eq!(t.paths()[before..], ["/v1/transit/encrypt/k"]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
