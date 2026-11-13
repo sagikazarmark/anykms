@@ -33,21 +33,20 @@ const TYPE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 pub(crate) type CacheKey = (String, Option<String>, String, String);
 
 /// A key's type, derived flag, and when the read that returned them was sent.
-type Typed = (TransitKeyType, bool, Instant);
+pub(crate) type Typed = (TransitKeyType, bool, Instant);
 
 /// Cache of key types, shared per provider: key → (expiry, type, derived, sent).
 ///
 /// A read stores what it returned only if no read sent later stored meanwhile and no entry was
 /// dropped since it started ([`generation`](Self::generation)), and a read that a stalled
 /// flight's replacement superseded stores nothing: an older type never replaces a newer one,
-/// nor comes back after the key was found deleted or recreated.
+/// nor comes back after the key was found deleted or recreated. Concurrent misses share one read
+/// through their server's [`TypeFlights`].
 #[derive(Default)]
 pub(crate) struct TypeCache {
     entries: Mutex<HashMap<Arc<CacheKey>, (Instant, Typed)>>,
     /// Bumped, under `entries`' lock, whenever an entry is dropped ([`KeyCtx::forget_type`]).
     generation: AtomicU64,
-    /// One metadata read at a time for concurrent misses (R-34).
-    flights: SingleFlight<Arc<CacheKey>, Result<Typed>>,
 }
 
 impl TypeCache {
@@ -55,19 +54,13 @@ impl TypeCache {
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
-
-    /// Bounds how long followers wait for another caller's read (L29): the first of the
-    /// servers' transports that has a bound sets it.
-    pub(crate) fn bound_by(&self, transport: &dyn anykms_http::HttpTransport) {
-        self.flights.bound_by(transport);
-    }
-
-    /// The single-flight wait bound (tests).
-    #[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
-    pub(crate) fn wait_bound(&self) -> Option<std::time::Duration> {
-        self.flights.max_wait()
-    }
 }
+
+/// One metadata read at a time for concurrent type-cache misses of a key (R-34). One per server
+/// (`Server::type_flights`), bounded by that server's own transport (L29): a follower waits for
+/// another caller's read as long as the transport that read goes through allows, never another
+/// server's.
+pub(crate) type TypeFlights = SingleFlight<Arc<CacheKey>, Result<Typed>>;
 
 /// Everything a handle needs to reach one key.
 #[derive(Clone)]
@@ -429,8 +422,8 @@ impl KeyCtx {
             c
         } else {
             let generation = self.cache.generation();
-            self.cache
-                .flights
+            self.server
+                .type_flights
                 .run_and_commit(
                     &self.cache_key,
                     || async {

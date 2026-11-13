@@ -89,14 +89,10 @@ impl TransitProviderBuilder {
             None if servers.len() == 1 => servers.keys().next().cloned(),
             None => None,
         };
-        let cache: Arc<TypeCache> = Arc::default();
-        for s in servers.values() {
-            cache.bound_by(s.transport());
-        }
         Ok(TransitProvider {
             servers,
             default,
-            cache,
+            cache: Arc::default(),
         })
     }
 }
@@ -510,6 +506,62 @@ mod review_l29_tests {
             )
             .build()
             .unwrap();
-        assert_eq!(p.cache.wait_bound(), Some(Duration::from_secs(24)));
+        assert_eq!(
+            p.servers["default"].type_flights.max_wait(),
+            Some(Duration::from_secs(24))
+        );
+    }
+}
+
+#[cfg(test)]
+mod type_flight_tests {
+    use std::time::Duration;
+
+    use anykms_http::HttpTransport;
+    use anykms_http::transport::{Request, Response};
+
+    use super::*;
+
+    /// A transport that answers nothing and bounds followers by its `Duration`.
+    struct Bounded(Duration);
+
+    impl HttpTransport for Bounded {
+        fn send(
+            &self,
+            _: Request,
+            _: usize,
+        ) -> anykms_core::BoxFuture<'_, std::result::Result<Response, anykms_http::SendError>>
+        {
+            Box::pin(std::future::pending())
+        }
+
+        fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+            Some((self.0, anykms_core::instant_sleep()))
+        }
+    }
+
+    fn server(wait: Duration) -> ServerConfig {
+        ServerConfig::new("https://vault.example:8200", crate::Flavor::Vault)
+            .token("t")
+            .http_transport(Bounded(wait))
+    }
+
+    /// How long a key-type read on server `alias` keeps its followers waiting.
+    fn bound(p: &TransitProvider, alias: &str) -> Option<Duration> {
+        p.servers[alias].type_flights.max_wait()
+    }
+
+    /// Each server's key-type reads are bounded by its own transport, not by whichever server's
+    /// transport came first.
+    #[test]
+    fn each_server_bounds_its_own_type_reads() {
+        let (fast, slow) = (Duration::from_secs(2), Duration::from_secs(90));
+        let p = TransitProvider::builder()
+            .server("a", server(fast))
+            .server("b", server(slow))
+            .build()
+            .unwrap();
+        assert_eq!(bound(&p, "a"), Some(fast));
+        assert_eq!(bound(&p, "b"), Some(slow));
     }
 }

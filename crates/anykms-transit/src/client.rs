@@ -28,6 +28,8 @@ pub(crate) struct Server {
     token: Arc<dyn TokenSource>,
     /// The semantics of this server's handles, by key family.
     pub(crate) semantics: crate::semantics::ServerSemantics,
+    /// Concurrent key-type reads of this server's keys, bounded by `http` (L29).
+    pub(crate) type_flights: crate::handles::TypeFlights,
 }
 
 impl std::fmt::Debug for Server {
@@ -118,11 +120,6 @@ pub(crate) async fn send(
 }
 
 impl Server {
-    /// The transport this server's requests go through.
-    pub(crate) fn transport(&self) -> &dyn HttpTransport {
-        &*self.http
-    }
-
     pub(crate) fn new(alias: String, cfg: ServerConfig) -> Result<Self> {
         let base = cfg.validate()?;
         let http = match &cfg.http_transport {
@@ -140,6 +137,8 @@ impl Server {
             )),
             None => cfg.token.clone(),
         };
+        let type_flights = crate::handles::TypeFlights::new();
+        type_flights.bound_by(&*http);
         Ok(Self {
             alias,
             semantics: crate::semantics::ServerSemantics::new(cfg.flavor),
@@ -147,6 +146,7 @@ impl Server {
             base,
             http,
             token,
+            type_flights,
         })
     }
 
