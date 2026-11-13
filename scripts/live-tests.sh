@@ -11,8 +11,9 @@
 # What crosses from the build job to the run job is limited to the test binaries Cargo reported:
 # <dir> must not exist while Cargo runs (a build script could otherwise drop an extra executable
 # into it), it is created only after Cargo exits, and `run` executes only the files named after
-# the package's live test targets, never anything else it finds. The binaries themselves still
-# need the build to be trusted: a build script can influence what they contain.
+# the package's live test targets, exactly one per target (a missing one fails the step instead
+# of passing without running), and runs nothing if it finds any other file. The binaries
+# themselves still need the build to be trusted: a build script can influence what they contain.
 #
 # `just live <package>` builds and runs in one go, for local use.
 set -euo pipefail
@@ -33,6 +34,32 @@ expected_name() {
     [[ "$name" =~ ^${t}-[0-9a-f]{16}$ ]] && return 0
   done
   return 1
+}
+
+# Checks <dir> as a whole and sets `bins` to its binaries, one per live test target of <package>:
+# every file must be a regular file (not a symlink) named after one of those targets, and every
+# target must have exactly one binary. A missing target would otherwise pass a job without running.
+check_dir() {
+  local package="$1" dir="$2" exe t found
+  shopt -s nullglob
+  for exe in "$dir"/*; do
+    if ! [ -f "$exe" ] || [ -L "$exe" ] || ! expected_name "$package" "$(basename "$exe")"; then
+      echo "unexpected file in $dir: $(basename "$exe")" >&2
+      exit 1
+    fi
+  done
+  bins=()
+  for t in $(targets_for "$package"); do
+    found=()
+    for exe in "$dir"/*; do
+      [[ "$(basename "$exe")" =~ ^${t}-[0-9a-f]{16}$ ]] && found+=("$exe")
+    done
+    if [ "${#found[@]}" -ne 1 ]; then
+      echo "expected exactly one $t binary in $dir, found ${#found[@]}" >&2
+      exit 1
+    fi
+    bins+=("${found[0]}")
+  done
 }
 
 case "${1:-}" in
@@ -61,35 +88,20 @@ case "${1:-}" in
       }
       cp "$exe" "$dir/"
     done < "$list"
-    if [ -z "$(ls -A "$dir")" ]; then
-      echo "no test binaries built for $package" >&2
-      exit 1
-    fi
+    check_dir "$package" "$dir"
     ls -l "$dir"
     ;;
   run)
     package="$2"
     dir="$3"
     shift 3
-    targets_for "$package" >/dev/null
+    check_dir "$package" "$dir"
     status=0
-    ran=0
-    for exe in "$dir"/*; do
-      name="$(basename "$exe")"
-      if ! [ -f "$exe" ] || [ -L "$exe" ] || ! expected_name "$package" "$name"; then
-        echo "refusing to run unexpected file: $name" >&2
-        status=1
-        continue
-      fi
+    for exe in "${bins[@]}"; do
       chmod +x "$exe"
-      echo "== $name"
+      echo "== $(basename "$exe")"
       "$exe" "$@" || status=$?
-      ran=$((ran + 1))
     done
-    if [ "$ran" -eq 0 ]; then
-      echo "no test binaries for $package in $dir" >&2
-      exit 1
-    fi
     exit "$status"
     ;;
   *)
