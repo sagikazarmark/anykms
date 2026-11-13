@@ -25,7 +25,11 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   for key endpoints: plain HTTP only for literal loopback IPs, and only when opted in. The one
   plain-HTTP exception needs no opt-in: the built-in credential sources talk to the cloud
   metadata servers over `http://` on their link-local addresses (`169.254.169.254`,
-  `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`), as every cloud SDK does. Whatever the transport, the
+  `169.254.170.2`, `169.254.170.23`, `fd00:ec2::254`, `fd00:ec2::23`, `metadata.google.internal`),
+  as every cloud SDK does. AWS: the container source also accepts loopback and `localhost` (the
+  AWS SDK allowlist); an instance metadata endpoint from `AWS_EC2_METADATA_SERVICE_ENDPOINT` may
+  be `http://` only to loopback, `localhost` or a link-local address unless the code opts in
+  (`ImdsCredentials::allow_http_to_any_host`). Whatever the transport, the
   response limit is enforced twice (by the transport and again by the backend), so an oversized
   body never reaches a backend. Transport failures map to a fixed set of classes
   (`anykms_http::SendError`): a rejected or mismatched certificate is `Configuration` and not

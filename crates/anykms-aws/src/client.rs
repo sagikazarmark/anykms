@@ -3,10 +3,12 @@
 //! No retries (those belong to `anykms_core::Retry`) except one: when AWS rejects the
 //! credentials as expired or unknown, they are refetched and the request is sent once more if
 //! the new credentials differ. A clock-skew rejection records the server's clock offset (used to
-//! sign every later request) and is reported as retryable `Unavailable`.
+//! sign every later request to that endpoint; an offset beyond a day is ignored) and is reported
+//! as retryable `Unavailable`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anykms_core::time::{Instant, system_now};
@@ -151,12 +153,20 @@ impl CredsCache {
     }
 }
 
+/// The largest server clock offset adopted from a skew rejection.
+const MAX_SKEW: Duration = Duration::from_secs(24 * 3600);
+/// The most endpoints whose clock offset is kept (more clears the table).
+const MAX_SKEW_HOSTS: usize = 64;
+
 /// The KMS client of one provider: credentials, HTTP clients, the clock offset.
 pub(crate) struct Kms {
     pub(crate) http: Arc<Http>,
     pub(crate) creds: CredsCache,
-    /// Server clock minus local clock, in milliseconds, recorded from skew rejections.
-    skew_ms: AtomicI64,
+    /// Server clock minus local clock, in milliseconds, per endpoint host (`host[:port]`),
+    /// recorded from skew rejections (L27: one endpoint's clock never dates another's requests).
+    skew_ms: Mutex<HashMap<String, i64>>,
+    /// The offset of hosts with none recorded (only the A0 probe's `set_clock_offset` sets it).
+    default_skew_ms: AtomicI64,
     /// Counts KMS requests (test fixtures).
     pub(crate) requests: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
@@ -181,7 +191,8 @@ impl Kms {
         Self {
             http,
             creds: CredsCache::new(source),
-            skew_ms: AtomicI64::new(0),
+            skew_ms: Mutex::default(),
+            default_skew_ms: AtomicI64::new(0),
             requests: None,
         }
     }
@@ -192,9 +203,16 @@ impl Kms {
         }
     }
 
-    /// The signing time: the local clock corrected by the recorded skew.
-    fn now(&self) -> SystemTime {
-        let skew = self.skew_ms.load(Ordering::Relaxed);
+    /// The signing time for requests to `host`: the local clock corrected by the skew recorded
+    /// for that host.
+    fn now(&self, host: &str) -> SystemTime {
+        let skew = self
+            .skew_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host)
+            .copied()
+            .unwrap_or_else(|| self.default_skew_ms.load(Ordering::Relaxed));
         let now = system_now();
         let d = Duration::from_millis(skew.unsigned_abs());
         if skew >= 0 {
@@ -204,8 +222,10 @@ impl Kms {
         }
     }
 
-    /// Records the server's clock from a `Date` header.
-    fn record_skew(&self, headers: &HeaderMap) {
+    /// Records `host`'s clock from a `Date` header. An offset beyond [`MAX_SKEW`] is not a
+    /// clock that drifted but a broken or hostile server, and is ignored (L27); the table is
+    /// bounded by [`MAX_SKEW_HOSTS`].
+    fn record_skew(&self, host: &str, headers: &HeaderMap) {
         let Some(server) = headers
             .get(DATE)
             .and_then(|v| v.to_str().ok())
@@ -214,11 +234,29 @@ impl Kms {
             return;
         };
         let now = system_now();
-        let ms = match server.duration_since(now) {
-            Ok(ahead) => i64::try_from(ahead.as_millis()).unwrap_or(i64::MAX),
-            Err(e) => -i64::try_from(e.duration().as_millis()).unwrap_or(i64::MAX),
+        let (ahead, d) = match server.duration_since(now) {
+            Ok(d) => (true, d),
+            Err(e) => (false, e.duration()),
         };
-        self.skew_ms.store(ms, Ordering::Relaxed);
+        if d > MAX_SKEW {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                backend = BACKEND,
+                "AWS rejected the request time but its clock is more than a day off; ignored"
+            );
+            return;
+        }
+        // At most a day: fits.
+        let ms = i64::try_from(d.as_millis()).unwrap_or(0);
+        let ms = if ahead { ms } else { -ms };
+        let mut m = self
+            .skew_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if m.len() >= MAX_SKEW_HOSTS && !m.contains_key(host) {
+            m.clear();
+        }
+        m.insert(host.to_owned(), ms);
         #[cfg(feature = "tracing")]
         tracing::warn!(
             backend = BACKEND,
@@ -227,10 +265,14 @@ impl Kms {
         );
     }
 
-    /// Shifts the signing clock by `ms` (the A0 probe's clock-skew case).
+    /// Shifts the signing clock by `ms` for every host (the A0 probe's clock-skew case).
     #[cfg(feature = "__test-fixtures")]
     pub(crate) fn set_clock_offset(&self, ms: i64) {
-        self.skew_ms.store(ms, Ordering::Relaxed);
+        self.skew_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.default_skew_ms.store(ms, Ordering::Relaxed);
     }
 
     /// One signed request with the current credentials, returning the raw response (the A0
@@ -254,7 +296,7 @@ impl Kms {
         }
         let host = host_header(call.endpoint);
         let target = format!("TrentService.{}", call.target);
-        let time = self.now();
+        let time = self.now(&host);
         let date = crate::sigv4::amz_date(time);
         let mut headers: Vec<(&str, &str)> = vec![
             ("content-type", "application/x-amz-json-1.1"),
@@ -377,7 +419,7 @@ impl Kms {
         let (code, message) = parse_error(&headers, &body);
         drop(body);
         if crate::errors::is_skew(code.as_deref(), message.as_deref()) {
-            self.record_skew(&headers);
+            self.record_skew(&host_header(call.endpoint), &headers);
         }
         Err(classify(Failure {
             status: status.as_u16(),

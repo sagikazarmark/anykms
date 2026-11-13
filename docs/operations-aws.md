@@ -25,7 +25,7 @@ aws-kms://arn:aws:kms:eu-west-1:111122223333:alias/app-kek
 
 The region must have the AWS region shape (`eu-west-1`, `us-gov-west-1`, `ap-southeast-7`) and
 belong to the ARN's partition (`cn-*` only in `aws-cn`, `us-gov-*` only in `aws-us-gov`, the ISO
-and European Sovereign Cloud prefixes only in theirs); other labels are `InvalidArgument`, so a
+and European Sovereign Cloud prefixes only in theirs); other labels are `Configuration` (from opening the key), so a
 derived endpoint is always `kms.<region>.<partition suffix>`.
 
 Not supported: AWS managed keys (`alias/aws/...`), `ECC_SECG_P256K1`, `HMAC_224`, `SM2`,
@@ -126,7 +126,13 @@ data keys, signatures' messages and grant tokens are not logged by CloudTrail.
 - **Symmetric keys:** automatic or on-demand rotation keeps the ARN and old ciphertexts keep
   decrypting; anykms exposes no versions (`ciphertext_version` is `None`; `describe` lists the
   key ARN as its one version).
-- **Alias URIs follow repoints.** After `UpdateAlias`, ciphertexts made under the old key fail
+- **Alias URIs follow repoints.** Every handle opened on an alias adopts the newest target it
+  learns: from its own `DescribeKey` or response `KeyId`, or from the `DescribeKey` metadata any
+  other handle of the same provider fetched; an older observation never replaces a newer one.
+  Verification, `public_key_version` (also under `KeyTypeCheck::TrustCaller`) and RSA wraps
+  therefore move to the new key within the metadata cache window (about 11 minutes) at the latest,
+  and at once when another handle has already described the alias. An RSA wrap always uses the
+  public key of the target whose state it just checked. After `UpdateAlias`, ciphertexts made under the old key fail
   with `DecryptFailed` and the hint "alias repointed? route old ciphertexts with
   EnvelopeKeyring" (`IncorrectKeyException`): open the old key by its own ARN and route old
   envelopes to it with `EnvelopeKeyring`.
@@ -220,8 +226,10 @@ to `AwsProviderBuilder::credentials`.
 When AWS rejects credentials as expired or unknown (`ExpiredTokenException`,
 `UnrecognizedClientException`), they are refetched and the request is sent once more if they
 changed; no other retry happens in the backend. A clock-skew rejection ("Signature expired")
-records the server's clock offset from the response's `Date`, so the next attempt of your
-`Retry` signs with the corrected clock; keep hosts on NTP anyway.
+records that endpoint's clock offset from the response's `Date`, so the next attempt of your
+`Retry` signs requests to that endpoint with the corrected clock; other endpoints keep the local
+clock, and an offset of more than a day is ignored (a broken or hostile server, not drift). Keep
+hosts on NTP anyway.
 
 ## Environment
 
@@ -229,14 +237,18 @@ records the server's clock offset from the response's `Date`, so the next attemp
 
 | Variable | Effect |
 |---|---|
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`, `AWS_REGION`, `AWS_CONTAINER_CREDENTIALS_*`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `AWS_EC2_METADATA_DISABLED` | the credential chain (see Credentials) |
-| `AWS_USE_FIPS_ENDPOINT`, `AWS_USE_DUALSTACK_ENDPOINT` | `true`/`false`: FIPS or dual-stack derived endpoints |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN`, `AWS_ROLE_SESSION_NAME`, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `AWS_EC2_METADATA_DISABLED` | the credential chain (see Credentials) |
+| `AWS_REGION`, else `AWS_DEFAULT_REGION` | the region of the web identity source's regional STS endpoint (KMS takes the region from each key ARN) |
+| `AWS_ENDPOINT_URL_STS` | the STS endpoint of the web identity source; otherwise derived from the region and the role ARN's partition (`sts[-fips].<region>.amazonaws.com[.cn]`; the global `sts.amazonaws.com` only in `aws` without a region) |
+| `AWS_EC2_METADATA_SERVICE_ENDPOINT`, else `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE` (`IPv4`/`IPv6`) | the instance metadata endpoint; plain `http://` only to loopback, `localhost`, link-local addresses and `fd00:ec2::254` (other hosts need `https://`, or `ImdsCredentials::allow_http_to_any_host()` in code) |
+| `AWS_USE_FIPS_ENDPOINT`, `AWS_USE_DUALSTACK_ENDPOINT` | `true`/`false`: FIPS or dual-stack derived KMS endpoints (FIPS also selects `sts-fips`) |
 | `AWS_ENDPOINT_URL_KMS`, else `AWS_ENDPOINT_URL` | one endpoint for every region |
 | `AWS_CA_BUNDLE` | a PEM file that replaces the system roots (read by `from_env`) |
 | `ANYKMS_AWS_ALLOWED_ACCOUNTS`, `ANYKMS_AWS_ALLOWED_REGIONS` | comma-separated allowlists |
 | `ANYKMS_AWS_ALLOW_LOOPBACK_HTTP` | `1`/`true`: `http://` endpoints on literal loopback IPs (emulators) |
 
-No variable is required: the region comes from each key ARN. A malformed value is a
+No variable is required: the region comes from each key ARN. `AWS_STS_REGIONAL_ENDPOINTS` is not
+read: a known region always selects its regional STS endpoint. A malformed value is a
 `Configuration` error from `from_env`.
 
 `AwsProvider::from_env_with(lookup)` (and `AwsProviderBuilder::from_env_with`, and the facade's
@@ -300,8 +312,9 @@ public key, so no AWS request would refuse a disabled key: anykms checks the key
 cached `DescribeKey` metadata before each wrap and refuses one that is not `Enabled`
 (`KeyStateInvalid`; `Unavailable` while it is `Creating`, `Updating` or `Unavailable`). That
 metadata is cached for up to about 11 minutes (10 minutes ±10% jitter), so a key disabled or
-scheduled for deletion can keep wrapping in that window; `describe` or `preflight` on the handle
-refreshes the cache at once. Disable a KEK, wait out that window, and only then schedule its
+scheduled for deletion can keep wrapping in that window; `describe` or `preflight` on any handle of
+the provider refreshes the cache at once. For an alias, the wrap uses the public key of the key
+that metadata names, so a repoint reaches the wrap together with the state check. Disable a KEK, wait out that window, and only then schedule its
 deletion, so that no data key is wrapped to a key that is about to be deleted.
 `preflight` on every AWS handle sends a fresh `DescribeKey` and refuses a key that is not
 enabled, even under `KeyTypeCheck::TrustCaller`.

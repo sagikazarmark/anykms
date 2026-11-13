@@ -1863,6 +1863,99 @@ async fn clock_skew_is_recorded_and_retryable() {
     assert_eq!(hour(&date), ahead_hour, "{date} vs {expect}");
 }
 
+/// A skew rejection whose `Date` is `server_clock`, once, then `Encrypt` succeeds.
+async fn skew_once(server: &MockServer, server_clock: std::time::SystemTime) {
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .insert_header("Date", httpdate::fmt_http_date(server_clock).as_str())
+                .set_body_json(json!({"__type": "InvalidSignatureException", "message": "Signature expired: 20260101T000000Z is now earlier than 20260101T001000Z (20260101T010000Z - 5 min.)"})),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    on(
+        server,
+        "Encrypt",
+        None,
+        200,
+        json!({"CiphertextBlob": b64(b"b")}),
+    )
+    .await;
+}
+
+/// The `x-amz-date` of request `i`.
+async fn amz_date(server: &MockServer, i: usize) -> String {
+    let reqs = server.received_requests().await.unwrap();
+    reqs[i].headers["x-amz-date"].to_str().unwrap().to_owned()
+}
+
+/// L27: a `Date` far from the local clock (40 days ahead) is not adopted as the signing clock.
+#[tokio::test]
+async fn implausible_clock_skew_is_ignored() {
+    let server = MockServer::start().await;
+    skew_once(
+        &server,
+        std::time::SystemTime::now() + Duration::from_secs(40 * 86_400),
+    )
+    .await;
+    let k = provider(&server)
+        .aead_key(uri(SYM))
+        .unwrap()
+        .with_key_type_check(KeyTypeCheck::TrustCaller);
+    assert_eq!(
+        k.encrypt(b"x", b"").await.unwrap_err().kind(),
+        ErrorKind::Unavailable
+    );
+    k.encrypt(b"x", b"").await.unwrap();
+    let today = httpdate::fmt_http_date(std::time::SystemTime::now());
+    let date = amz_date(&server, 1).await;
+    assert_eq!(
+        &date[6..8],
+        &today[5..7],
+        "signed with the local clock: {date}"
+    );
+}
+
+/// L27: the offset is kept per endpoint: one endpoint's clock never shifts requests to another.
+#[tokio::test]
+async fn clock_skew_is_per_endpoint() {
+    let (a, b) = (MockServer::start().await, MockServer::start().await);
+    let ahead = std::time::SystemTime::now() + Duration::from_secs(3600);
+    skew_once(&a, ahead).await;
+    skew_once(&b, std::time::SystemTime::now()).await;
+    b.reset().await;
+    on(
+        &b,
+        "Encrypt",
+        None,
+        200,
+        json!({"CiphertextBlob": b64(b"b")}),
+    )
+    .await;
+    let p = builder(&a).endpoint("eu-west-1", b.uri()).build().unwrap();
+    let trust = KeyTypeCheck::TrustCaller;
+    let ka = p.aead_key(uri(SYM)).unwrap().with_key_type_check(trust);
+    let kb = p
+        .aead_key(uri(
+            "arn:aws:kms:eu-west-1:111122223333:key/11111111-1111-1111-1111-111111111111",
+        ))
+        .unwrap()
+        .with_key_type_check(trust);
+    ka.encrypt(b"x", b"").await.unwrap_err();
+    kb.encrypt(b"x", b"").await.unwrap();
+    ka.encrypt(b"x", b"").await.unwrap();
+    let hour = |d: &str| d[9..11].to_owned();
+    let now = httpdate::fmt_http_date(std::time::SystemTime::now());
+    let ahead = httpdate::fmt_http_date(ahead);
+    assert_eq!(
+        hour(&amz_date(&a, 1).await),
+        ahead[17..19],
+        "a: server clock"
+    );
+    assert_eq!(hour(&amz_date(&b, 0).await), now[17..19], "b: local clock");
+}
+
 #[tokio::test]
 async fn session_tokens_are_signed() {
     let server = MockServer::start().await;

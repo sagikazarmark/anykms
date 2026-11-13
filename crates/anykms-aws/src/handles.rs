@@ -36,13 +36,17 @@ pub(crate) const MAX_CIPHERTEXT: usize = 6144;
 /// How long cached key metadata is trusted before `DescribeKey` runs again (±10% jitter).
 const DESCRIBE_TTL: Duration = Duration::from_secs(600);
 
-/// Key metadata cache, shared per provider: URI ARN → (expiry, metadata).
+/// Metadata and when its `DescribeKey` was sent (for an alias, the target it names is at least
+/// as new as that instant).
+type Described = (Instant, Arc<AwsKeyInfo>);
+
+/// Key metadata cache, shared per provider: URI ARN → (expiry, (sent, metadata)).
 #[derive(Default)]
 pub(crate) struct DescribeCache {
-    entries: Mutex<HashMap<String, (Instant, Arc<AwsKeyInfo>)>>,
+    entries: Mutex<HashMap<String, (Instant, Described)>>,
     /// One `DescribeKey` at a time for concurrent misses (R-34), per URI ARN and grant tokens
     /// (a failure with one handle's grant tokens says nothing about another's).
-    flights: SingleFlight<(String, usize), Result<Arc<AwsKeyInfo>>>,
+    flights: SingleFlight<(String, usize), Result<Described>>,
 }
 
 /// Public keys of RSA wrapping keys, shared per provider: key ARN → SPKI DER. A key ARN's
@@ -81,9 +85,10 @@ pub(crate) struct KeyCtx {
     pub(crate) public_keys: Arc<PublicKeyCache>,
     pub(crate) resource: Arc<str>,
     pub(crate) grant_tokens: Option<GrantTokens>,
-    /// The key ARN this handle resolves to: the URI's for key URIs, the alias target (from
-    /// `DescribeKey` or a response's `KeyId`) for alias URIs.
-    pub(crate) resolved: Arc<Mutex<Option<String>>>,
+    /// The key ARN this handle resolves to and when it was learned: the URI's for key URIs, the
+    /// alias target (from `DescribeKey`, this or another handle's, or a response's `KeyId`) for
+    /// alias URIs. The newest observation wins (M1).
+    pub(crate) resolved: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl std::fmt::Debug for KeyCtx {
@@ -424,7 +429,8 @@ impl KeyCtx {
             self.resolved
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
+                .as_ref()
+                .map(|(arn, _)| arn.clone())
         })
         .flatten();
         let r = self
@@ -462,7 +468,7 @@ impl KeyCtx {
             .remove(&self.key.arn);
     }
 
-    fn cached(&self) -> Option<Arc<AwsKeyInfo>> {
+    fn cached(&self) -> Option<Described> {
         let now = Instant::now();
         self.cache
             .entries
@@ -470,7 +476,7 @@ impl KeyCtx {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.key.arn)
             .filter(|(exp, _)| now < *exp)
-            .map(|(_, i)| i.clone())
+            .map(|(_, d)| d.clone())
     }
 
     /// One uncached `DescribeKey` of `key_id` (the URI's key or alias, or the resolved key
@@ -503,6 +509,13 @@ impl KeyCtx {
 
     /// Fresh `DescribeKey` metadata (refreshes the cache and the resolved ARN).
     pub(crate) async fn describe(&self, op: Operation) -> Result<Arc<AwsKeyInfo>> {
+        Ok(self.describe_at(op).await?.1)
+    }
+
+    /// [`describe`](Self::describe), with the instant the request was sent: an alias target
+    /// in the response is at least that new (a `KeyId` observed after it is newer).
+    async fn describe_at(&self, op: Operation) -> Result<Described> {
+        let sent = Instant::now();
         let info = self.describe_key(Origin::Handle, self.arn(), op).await?;
         let now = Instant::now();
         {
@@ -516,19 +529,20 @@ impl KeyCtx {
                 self.key.arn.clone(),
                 (
                     now + anykms_http::cache::jittered_ttl(DESCRIBE_TTL),
-                    info.clone(),
+                    (sent, info.clone()),
                 ),
             );
         }
-        self.note_resolved(&info.arn);
-        Ok(info)
+        self.note_resolved(&info.arn, sent);
+        Ok((sent, info))
     }
 
     /// The cached or fresh metadata. Concurrent misses for the key share one `DescribeKey` and
-    /// its result, a failure included (R-34).
+    /// its result, a failure included (R-34). The handle adopts the metadata's alias target
+    /// when it is newer than what the handle knows, whichever handle fetched it (M1).
     async fn info(&self, op: Operation) -> Result<Arc<AwsKeyInfo>> {
-        let i = if let Some(i) = self.cached() {
-            i
+        let (sent, i) = if let Some(d) = self.cached() {
+            d
         } else {
             let flight = (
                 self.key.arn.clone(),
@@ -539,22 +553,17 @@ impl KeyCtx {
                 .run(&flight, || async {
                     // A flight that landed after the miss above has filled the cache.
                     match self.cached() {
-                        Some(i) => Ok(i),
-                        None => self.describe(op).await,
+                        Some(d) => Ok(d),
+                        None => self.describe_at(op).await,
                     }
                 })
                 .await
                 // The flight may have been another operation's.
                 .map_err(|e| e.with_operation(op))?
         };
-        // A response may have resolved an alias more recently than the cached metadata.
-        let mut r = self
-            .resolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if r.is_none() {
-            *r = Some(i.arn.clone());
-        }
+        // A response may have resolved the alias more recently than this metadata: the newer
+        // observation wins.
+        self.note_resolved(&i.arn, sent);
         Ok(i)
     }
 
@@ -581,36 +590,51 @@ impl KeyCtx {
         .await
     }
 
-    /// Records the key ARN an alias resolves to (a change is logged; the old ARN stops being
-    /// accepted as a version).
-    fn note_resolved(&self, arn: &str) {
+    /// Records the key ARN an alias resolves to, observed by a request sent at `at`. An older
+    /// observation than the one held never replaces it, so stale cached metadata cannot undo a
+    /// newer response (no flapping); a change is logged and the old ARN stops being accepted as
+    /// a version.
+    fn note_resolved(&self, arn: &str, at: Instant) {
         let mut r = self
             .resolved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if r.as_deref() != Some(arn) {
-            #[cfg(feature = "tracing")]
-            if r.is_some() {
-                tracing::info!(
-                    backend = BACKEND,
-                    resource = &*self.resource,
-                    key_version = arn,
-                    "alias now resolves to another key"
-                );
+        match r.as_mut() {
+            Some((cur, seen)) if cur == arn => *seen = (*seen).max(at),
+            Some((_, seen)) if *seen > at => {}
+            _ => {
+                #[cfg(feature = "tracing")]
+                if r.is_some() {
+                    tracing::info!(
+                        backend = BACKEND,
+                        resource = &*self.resource,
+                        key_version = arn,
+                        "alias now resolves to another key"
+                    );
+                }
+                *r = Some((arn.to_owned(), at));
             }
-            *r = Some(arn.to_owned());
         }
     }
 
     /// A response's `KeyId`: must be a key ARN; for key URIs, the URI's; for alias URIs, a key
     /// of the alias's partition, region and account (an alias never names another account's
-    /// key).
-    fn response_key(&self, key_id: String, op: Operation) -> Result<KeyVersion> {
+    /// key). It is the alias's target only when the request named the URI's key (`requested`),
+    /// not a key ARN.
+    fn response_key(
+        &self,
+        key_id: String,
+        requested: &str,
+        sent: Instant,
+        op: Operation,
+    ) -> Result<KeyVersion> {
         if !is_key_arn(&key_id) {
             return Err(bad_response(op));
         }
         self.check_response_arn(&key_id, op)?;
-        self.note_resolved(&key_id);
+        if requested == self.key.arn {
+            self.note_resolved(&key_id, sent);
+        }
         Ok(KeyVersion::new(key_id))
     }
 
@@ -638,18 +662,21 @@ impl KeyCtx {
         }
     }
 
-    /// The resolved key ARN; for an alias not yet resolved, one `DescribeKey` (even under
-    /// `KeyTypeCheck::TrustCaller`).
+    /// The resolved key ARN. A key URI is its own. An alias is re-resolved through the shared
+    /// metadata cache (no I/O while it is fresh, one `DescribeKey` once it expires, even under
+    /// `KeyTypeCheck::TrustCaller`), so a repoint reaches every handle within the cache TTL
+    /// whichever handle observed it; a newer target from a response is kept (M1).
     async fn resolved_arn(&self, op: Operation) -> Result<String> {
-        if let Some(r) = self
+        if !self.key.is_alias() {
+            return Ok(self.key.arn.clone());
+        }
+        let info = self.info(op).await?;
+        Ok(self
             .resolved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            return Ok(r);
-        }
-        Ok(self.info(op).await?.arn.clone())
+            .as_ref()
+            .map_or_else(|| info.arn.clone(), |(arn, _)| arn.clone()))
     }
 
     /// A caller-supplied version (signature or tag): `None` verifies with this handle's key
@@ -806,10 +833,11 @@ impl KeyCtx {
             signature: None,
             grant_tokens: self.grants(),
         };
+        let sent = Instant::now();
         let resp = self.call("Sign", op, body(&req, m.len())).await?;
         let r: SignResp = serde_json::from_slice(&resp).map_err(|_| bad_response(op))?;
         let bytes = decode_blob(&r.signature, op)?;
-        let v = self.response_key(r.key_id, op)?;
+        let v = self.response_key(r.key_id, self.arn(), sent, op)?;
         Ok(Signature::from_parts(alg, Some(v), bytes))
     }
 
@@ -867,6 +895,7 @@ impl KeyCtx {
             key_id,
             grant_tokens: self.grants(),
         };
+        let sent = Instant::now();
         let resp = self
             .call_from(origin, "GetPublicKey", op, body(&req, 0))
             .await?;
@@ -883,7 +912,7 @@ impl KeyCtx {
             ));
         }
         let der = decode_blob(&r.public_key, op)?;
-        let v = self.response_key(r.key_id, op)?;
+        let v = self.response_key(r.key_id, key_id, sent, op)?;
         Ok(PublicKey::new(t, der, Some(v)))
     }
 }
@@ -1133,9 +1162,8 @@ impl AwsKeyWrapKey {
         Ok((kek_kind(&info, op)?, Some(info)))
     }
 
-    /// The pinned public key of the resolved key ARN.
-    async fn rsa_public_key(&self, op: Operation) -> Result<Arc<[u8]>> {
-        let arn = self.k.resolved_arn(op).await?;
+    /// The pinned public key of `arn`, a key ARN this handle resolves to.
+    async fn rsa_public_key(&self, arn: String, op: Operation) -> Result<Arc<[u8]>> {
         if let Some(p) = self
             .k
             .public_keys
@@ -1210,10 +1238,17 @@ impl KeyWrap for AwsKeyWrapKey {
                         // The wrap is local and AWS serves `GetPublicKey` for a disabled key, so
                         // nothing else refuses a disabled or pending-deletion key: check the
                         // state of the metadata the kind was read from, before the public key.
-                        if let Some(info) = info {
-                            check_enabled(&info, op)?;
-                        }
-                        let spki = self.rsa_public_key(op).await?;
+                        // Wrap to the target whose state was just checked, not to a target
+                        // this handle resolved earlier (M1): after a repoint another handle
+                        // observed, the metadata names the new key.
+                        let arn = match info {
+                            Some(info) => {
+                                check_enabled(&info, op)?;
+                                info.arn.clone()
+                            }
+                            None => self.k.resolved_arn(op).await?,
+                        };
+                        let spki = self.rsa_public_key(arn, op).await?;
                         let wrapped =
                             anykms_recipes::rsa_oaep_sha256_encrypt(&spki, key).map_err(|e| {
                                 Error::new(e.kind(), BACKEND, op, e.message().to_owned())
@@ -1658,13 +1693,14 @@ impl Mac for AwsMacKey {
                     mac: None,
                     grant_tokens: self.k.grants(),
                 };
+                let sent = Instant::now();
                 let resp = self.k.call("GenerateMac", op, body(&req, m.len())).await?;
                 let r: MacResp = serde_json::from_slice(&resp).map_err(|_| bad_response(op))?;
                 let tag = decode_blob(&r.mac, op)?;
                 if tag.len() != alg.tag_len() {
                     return Err(bad_response(op));
                 }
-                let v = self.k.response_key(r.key_id, op)?;
+                let v = self.k.response_key(r.key_id, self.k.arn(), sent, op)?;
                 Ok(Tag::from_parts(alg, Some(v), tag))
             })
             .await

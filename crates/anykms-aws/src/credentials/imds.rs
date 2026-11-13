@@ -26,6 +26,7 @@ const TOKEN_TTL: &str = "21600";
 #[derive(Clone)]
 pub struct ImdsCredentials {
     endpoint: Option<String>,
+    any_http: bool,
     vars: Vars,
 }
 
@@ -48,9 +49,19 @@ impl ImdsCredentials {
         Self::from_vars(Vars::from_env())
     }
 
-    /// Uses this endpoint (`http://host[:port]`).
+    /// Uses this endpoint (`http(s)://host[:port]`; see
+    /// [`allow_http_to_any_host`](Self::allow_http_to_any_host) for plain HTTP).
     pub fn endpoint(mut self, url: impl Into<String>) -> Self {
         self.endpoint = Some(url.into());
+        self
+    }
+
+    /// Allows plain `http://` to any host (a metadata proxy on a private address). Without it,
+    /// `http://` is accepted only for loopback, `localhost`, link-local addresses
+    /// (169.254.0.0/16, fe80::/10) and the IMDS and container IPv6 addresses (`fd00:ec2::254`,
+    /// `fd00:ec2::23`), since the session token and the credentials cross it in clear text.
+    pub fn allow_http_to_any_host(mut self) -> Self {
+        self.any_http = true;
         self
     }
 
@@ -63,6 +74,7 @@ impl ImdsCredentials {
     pub(crate) fn from_vars(vars: Vars) -> Self {
         Self {
             endpoint: None,
+            any_http: false,
             vars,
         }
     }
@@ -93,6 +105,13 @@ impl ImdsCredentials {
         {
             return Err(config_err(
                 "the instance metadata endpoint must be http(s)://host[:port]",
+            ));
+        }
+        if url.scheme() == "http" && !self.any_http && !local_http_ok(&url) {
+            return Err(config_err(
+                "the instance metadata endpoint: plain http:// is only allowed to loopback, \
+                 localhost and link-local addresses; use https:// or \
+                 ImdsCredentials::allow_http_to_any_host()",
             ));
         }
         Ok(url)
@@ -242,6 +261,24 @@ impl CredentialSource for ImdsCredentials {
     }
 }
 
+/// Hosts plain HTTP may reach without the opt-in (L1): loopback, `localhost`, link-local
+/// (169.254.0.0/16, fe80::/10) and the IMDS and container IPv6 addresses.
+fn local_http_ok(url: &anykms_http::url::Url) -> bool {
+    use anykms_http::url::Host;
+    match url.host() {
+        Some(Host::Ipv4(ip)) => ip.is_loopback() || ip.is_link_local(),
+        Some(Host::Ipv6(ip)) => {
+            let s = ip.segments();
+            ip.is_loopback()
+                || (s[0] & 0xffc0) == 0xfe80
+                || s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254]
+                || s == [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23]
+        }
+        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +310,54 @@ mod tests {
         );
         assert!(v(Some("ipv5"), None).base().is_err());
         assert!(v(None, Some("ftp://x")).base().is_err());
+    }
+
+    /// L1: plain HTTP only to loopback, `localhost`, link-local addresses and the IMDS and
+    /// container IPv6 addresses, unless the caller opts in; HTTPS to any host.
+    #[test]
+    fn plain_http_needs_a_local_host() {
+        let ep = |e: &str| {
+            let e = e.to_owned();
+            ImdsCredentials::from_vars(Vars::from_fn(move |k| {
+                (k == "AWS_EC2_METADATA_SERVICE_ENDPOINT").then(|| e.clone())
+            }))
+        };
+        for ok in [
+            "http://169.254.169.254",
+            "http://169.254.1.2:8080",
+            "http://[fd00:ec2::254]",
+            "http://[fd00:ec2::23]",
+            "http://[fe80::1]",
+            "http://127.0.0.1:1338",
+            "http://[::1]:1338",
+            "http://localhost:1338",
+            "https://imds-proxy.internal",
+        ] {
+            assert!(ep(ok).base().is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://imds-proxy.internal",
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://[::ffff:169.254.169.254]",
+            "http://metadata.google.internal",
+            "http://localhost.evil.example",
+        ] {
+            let e = ep(bad).base().unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::Configuration, "{bad}");
+        }
+        // The explicit opt-in, on the builder only.
+        assert!(
+            ep("http://10.0.0.1")
+                .allow_http_to_any_host()
+                .base()
+                .is_ok()
+        );
+        assert!(
+            ImdsCredentials::from_vars(Vars::from_fn(|_| None))
+                .endpoint("http://imds-proxy.internal")
+                .base()
+                .is_err()
+        );
     }
 }

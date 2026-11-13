@@ -122,7 +122,7 @@ medium issue is a credential-exfiltration path through GCP credential files.
 **Key binding**
 - AWS:
   - `Decrypt` sends `KeyId = self.arn()`, and `ReEncrypt` sends Source = Destination = `self.arn()` (`handles.rs:572-606`).
-  - Verify, VerifyMac and `public_key_version` compare the version to the resolved ARN before any I/O, then re-check the response `KeyId`.
+  - Verify, VerifyMac and `public_key_version` compare the version to the resolved ARN before any I/O; the request names that ARN. The `Verify` and `VerifyMac` responses' `KeyId` is not parsed (the request already names one key), unlike `Sign`, `GenerateMac` and `GetPublicKey`, whose `KeyId` is checked.
 - GCP:
   - Response `name` is checked on every operation. Versions are decimal only and are always placed under `self.key.version_name(v)`.
 - Azure:

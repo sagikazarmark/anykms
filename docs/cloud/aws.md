@@ -25,7 +25,7 @@ Where the implementation differs from the plan below (rows A1–A10 of
 - **Region grammar (security review L3):** a region must have the AWS region shape
   (`<area>-<name>…-<n>`, e.g. `eu-west-1`, `us-gov-west-1`) and belong to the ARN's partition
   (`cn-*` only in `aws-cn`, `us-gov-*` only in `aws-us-gov`, the ISO and European Sovereign Cloud
-  prefixes only in theirs). A label such as `s3` is `InvalidArgument`, so a derived host is always
+  prefixes only in theirs). A label such as `s3` is `Configuration` (from opening the key), so a derived host is always
   a KMS endpoint. `allowed_regions` and per-region endpoints use the same rule.
 - **Endpoints (L4):** configured endpoints are validated once at build; derived ones are computed
   on each open (a `format!`). There is no endpoint cache that grows with the regions of opened

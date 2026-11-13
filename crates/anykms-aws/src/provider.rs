@@ -208,7 +208,7 @@ impl AwsProvider {
             return Err(open_err("the key's region is not in the allowed regions"));
         }
         let endpoint = self.endpoint_for(&r)?;
-        let resolved = (!r.is_alias()).then(|| r.arn.clone());
+        let resolved = (!r.is_alias()).then(|| (r.arn.clone(), anykms_core::time::Instant::now()));
         Ok(KeyCtx {
             kms: i.kms.clone(),
             endpoint,
