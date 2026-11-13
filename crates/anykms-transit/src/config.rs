@@ -437,19 +437,25 @@ fn read_config_file(
     }
 }
 
-/// Reads a certificate file (public data: the buffer is unwrapped without a copy).
-fn read_cert_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    read_config_file(path, MAX_CERT_FILE, None).map(|mut b| std::mem::take(&mut *b))
+/// A PEM buffer read from a file a variable names. Zeroizing although certificates are public: a
+/// combined PEM file may hold a private key next to them.
+type Pem = zeroize::Zeroizing<Vec<u8>>;
+
+/// Reads a certificate file, kept zeroizing ([`Pem`]).
+fn read_cert_file(path: &std::path::Path) -> std::io::Result<Pem> {
+    read_config_file(path, MAX_CERT_FILE, None)
 }
 
 /// Reads a `*_CACERT` PEM file; `var` names the setting in errors.
-fn read_ca_file(path: &std::path::Path, var: &str) -> Result<Vec<u8>> {
+fn read_ca_file(path: &std::path::Path, var: &str) -> Result<Pem> {
     read_cert_file(path).map_err(|e| file_err("CA certificate file", var, path, e))
 }
 
 /// Concatenates the PEM files in a `*_CAPATH` directory (sorted by name, symlinks followed,
-/// subdirectories skipped). Every file must hold at least one certificate.
-fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
+/// subdirectories skipped) into a zeroizing buffer that grows without leaving unwiped copies;
+/// every file read is wiped when dropped, on error paths too. Every file must hold at least one
+/// certificate.
+fn read_ca_dir(dir: &str, var: &str) -> Result<Pem> {
     use rustls_pki_types::CertificateDer;
     use rustls_pki_types::pem::PemObject;
 
@@ -460,7 +466,7 @@ fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(dir_err)?;
     paths.sort();
-    let mut pem = Vec::new();
+    let mut pem = Pem::default();
     for path in paths {
         let file_err = |e| file_err("CA certificate file", var, &path, e);
         if std::fs::metadata(&path).map_err(file_err)?.is_dir() {
@@ -483,13 +489,13 @@ fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
                 path.display()
             )));
         }
-        if pem.len() + file.len() + 1 > MAX_CA_DIR {
+        if !(anykms_http::zbuf::extend(&mut pem, &file, MAX_CA_DIR)
+            && anykms_http::zbuf::extend(&mut pem, b"\n", MAX_CA_DIR))
+        {
             return Err(config_err(format!(
                 "{var}: the certificates in {dir} are too large together (over 16 MiB)"
             )));
         }
-        pem.extend_from_slice(&file);
-        pem.push(b'\n');
     }
     if pem.is_empty() {
         return Err(config_err(format!(
@@ -764,16 +770,18 @@ impl EnvConfig {
 /// The TLS settings [`EnvConfig`] reads (`*_CACERT` or `*_CAPATH`, `*_CLIENT_CERT` with
 /// `*_CLIENT_KEY`), which configure the built-in transport. From [`EnvConfig::tls`], for an
 /// application that builds its own transport and must keep these settings. `Debug` never prints
-/// the key.
+/// the key. Every PEM it holds stays in a zeroizing buffer (a CA or certificate file may also carry a
+/// private key), from the file read through [`into_transport_builder`](Self::into_transport_builder),
+/// which moves each into the builder's zeroizing buffers without a copy.
 pub struct EnvTls {
-    ca_pem: Option<Vec<u8>>,
-    client_identity: Option<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>)>,
+    ca_pem: Option<Pem>,
+    client_identity: Option<(Pem, Pem)>,
 }
 
 impl fmt::Debug for EnvTls {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EnvTls")
-            .field("ca_pem_len", &self.ca_pem.as_ref().map(Vec::len))
+            .field("ca_pem_len", &self.ca_pem.as_ref().map(|p| p.len()))
             .field(
                 "client_cert_len",
                 &self.client_identity.as_ref().map(|(c, _)| c.len()),
@@ -841,12 +849,12 @@ impl EnvTls {
     }
 
     /// The CA bundle (`*_CACERT`, or the `*_CAPATH` files concatenated), which replaces the
-    /// system roots.
+    /// system roots. Held in a zeroizing buffer.
     pub fn ca_pem(&self) -> Option<&[u8]> {
-        self.ca_pem.as_deref()
+        self.ca_pem.as_deref().map(Vec::as_slice)
     }
 
-    /// The client certificate chain (`*_CLIENT_CERT`).
+    /// The client certificate chain (`*_CLIENT_CERT`), held in a zeroizing buffer.
     pub fn client_cert_pem(&self) -> Option<&[u8]> {
         self.client_identity.as_ref().map(|(c, _)| c.as_slice())
     }
@@ -862,12 +870,13 @@ impl EnvTls {
     #[cfg(feature = "reqwest")]
     pub fn into_transport_builder(self) -> anykms_http::ReqwestTransportBuilder {
         let mut b = anykms_http::ReqwestTransport::builder();
-        if let Some(pem) = self.ca_pem {
-            b = b.ca_pem(pem);
+        // Each PEM moves out of its zeroizing buffer into the builder's (which wraps the `Vec`
+        // it is given without copying it), leaving an empty one behind.
+        if let Some(mut pem) = self.ca_pem {
+            b = b.ca_pem(std::mem::take(&mut *pem));
         }
-        if let Some((cert, mut key)) = self.client_identity {
-            // The key moves out of its zeroizing buffer into the builder's.
-            b = b.client_identity(cert, std::mem::take(&mut *key));
+        if let Some((mut cert, mut key)) = self.client_identity {
+            b = b.client_identity(std::mem::take(&mut *cert), std::mem::take(&mut *key));
         }
         b
     }
@@ -1223,6 +1232,31 @@ mod tests {
         EnvTls::load("VAULT", &get, false)
             .unwrap()
             .and_then(|t| t.ca_pem)
+            .map(|p| p.to_vec())
+    }
+
+    /// Every PEM buffer `EnvTls` holds or builds is zeroizing (a combined PEM may carry a
+    /// private key): its fields, and what each file reader returns, so a buffer dropped on an
+    /// error path (a client key that fails to load, a `*_CAPATH` file that does not parse) is
+    /// wiped too.
+    #[test]
+    fn tls_pem_buffers_are_zeroizing() {
+        fn z(_: &zeroize::Zeroizing<Vec<u8>>) {}
+        let tls = EnvTls {
+            ca_pem: Some(Pem::new(b"ca".to_vec())),
+            client_identity: Some((Pem::new(b"cert".to_vec()), Pem::new(b"key".to_vec()))),
+        };
+        z(tls.ca_pem.as_ref().unwrap());
+        let (cert, key) = tls.client_identity.as_ref().unwrap();
+        z(cert);
+        z(key);
+        assert_eq!(tls.ca_pem(), Some(&b"ca"[..]));
+        assert_eq!(tls.client_cert_pem(), Some(&b"cert"[..]));
+        assert_eq!(tls.client_key_pem(), Some(&b"key"[..]));
+        let _: fn(&std::path::Path) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> =
+            read_cert_file;
+        let _: fn(&std::path::Path, &str) -> Result<zeroize::Zeroizing<Vec<u8>>> = read_ca_file;
+        let _: fn(&str, &str) -> Result<zeroize::Zeroizing<Vec<u8>>> = read_ca_dir;
     }
 
     /// The TLS variables build a transport of their own, which a shared one must not replace;
