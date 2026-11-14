@@ -76,7 +76,10 @@ impl KeyUri {
     /// URI of a built-in backend has userinfo or a fragment, so the label of a valid URI is the
     /// URI without its query. A third-party scheme that puts an `@` in the authority (say
     /// `scheme://name@version`) gets labels without what precedes the `@`: the label cannot
-    /// tell a name from a pasted credential, and errs on the side of the credential.
+    /// tell a name from a pasted credential, and errs on the side of the credential. For the
+    /// same reason, an authority with an `@` after a `?` or `#` (a pasted password containing
+    /// one, as in `scheme://app:pa#ss@db`, or a query or fragment containing an `@`) is
+    /// replaced whole by `<redacted>`, with everything after it.
     ///
     /// ```
     /// let uri: anykms_core::KeyUri = "local://default/kek?opt=1".parse().unwrap();
@@ -88,17 +91,30 @@ impl KeyUri {
     /// different URIs, and name the same key only when the provider's default server is the one
     /// called `default`.
     pub fn without_query(&self) -> String {
-        let end = self.rest.find(['?', '#']).unwrap_or(self.rest.len());
-        let rest = &self.rest[..end];
-        // Userinfo: the authority (after `//`, up to the next `/`) up to its last `@`. Working on
-        // the raw string: `url::Url` cannot parse every key URI (an AWS ARN is not a port).
-        if let Some(after) = rest.strip_prefix("//") {
-            let auth_end = after.find('/').unwrap_or(after.len());
-            if let Some(at) = after[..auth_end].rfind('@') {
-                return format!("{}://{}", self.scheme, &after[at + 1..]);
-            }
+        let query = |s: &str| s.find(['?', '#']).unwrap_or(s.len());
+        // Working on the raw string: `url::Url` cannot parse every key URI (an AWS ARN is not a
+        // port).
+        let Some(after) = self.rest.strip_prefix("//") else {
+            return format!("{}:{}", self.scheme, &self.rest[..query(&self.rest)]);
+        };
+        // The authority as written, up to the first `/` only, so a `?` or `#` in a pasted
+        // password does not end it early and leave the password's start in the label.
+        let raw = &after[..after.find('/').unwrap_or(after.len())];
+        let end = query(raw);
+        if raw[end..].contains('@') {
+            // A password with a `?` or `#`, or a query or fragment with an `@`: which part is
+            // the credential is ambiguous, so none of it is shown.
+            return format!("{}://<redacted>", self.scheme);
         }
-        format!("{}:{rest}", self.scheme)
+        // Userinfo: the authority up to its last `@`.
+        let auth = &raw[..end];
+        let host = auth.rfind('@').map_or(auth, |at| &auth[at + 1..]);
+        if end < raw.len() {
+            // The query or fragment starts in the authority: there is no path.
+            return format!("{}://{host}", self.scheme);
+        }
+        let path = &after[raw.len()..];
+        format!("{}://{host}{}", self.scheme, &path[..query(path)])
     }
 }
 
@@ -215,6 +231,15 @@ mod review_l21_tests {
             ("x://a@b@host/p?q=1", "x://host/p"),
             ("x://host/p#frag@x", "x://host/p"),
             ("x://host/p?q=a@b", "x://host/p"),
+            ("x://u:p@host?q=1", "x://host"),
+            ("x://u:p@host#f", "x://host"),
+            ("x://host?q=1/p", "x://host"),
+            // A `?` or `#` in a pasted password, or an `@` in a query or fragment that starts
+            // in the authority: nothing of the authority or what follows is shown.
+            ("aws-kms://app:pa#ss@db/app", "aws-kms://<redacted>"),
+            ("aws-kms://app:pa?ss@db/app", "aws-kms://<redacted>"),
+            ("x://host?q=a@b", "x://<redacted>"),
+            ("x://host#frag@x/p", "x://<redacted>"),
             (
                 "aws-kms://arn:aws:kms:us-east-1:111122223333:key/abcd",
                 "aws-kms://arn:aws:kms:us-east-1:111122223333:key/abcd",
