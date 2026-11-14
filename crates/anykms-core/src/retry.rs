@@ -111,7 +111,7 @@ pub fn std_clock() -> ClockFn {
 
 /// Retry-After values and retry hints above this are treated as this (and then exceed any sane
 /// cap).
-const MAX_RETRY_AFTER: Duration = Duration::from_hours(24);
+const MAX_RETRY_AFTER: Duration = crate::Error::MAX_RETRY_AFTER;
 
 /// Retry limits.
 #[non_exhaustive]
@@ -397,6 +397,13 @@ impl RetryLayer {
     /// The retry budget.
     pub fn budget(&self) -> &RetryBudget {
         &self.budget
+    }
+
+    /// Sleeps for `d` with this layer's sleep function, without an attempt or a budget token:
+    /// for a recipe that waits out a condition of its own whose cost it bounds itself (what
+    /// `CachedVerifier` in `anykms-recipes` does for a version above the latest it knows).
+    pub async fn sleep(&self, d: Duration) {
+        (self.sleep)(d).await;
     }
 
     /// Retries `f` with this layer's policy and budget: `f` starts one attempt and is called

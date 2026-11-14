@@ -158,6 +158,8 @@ impl AzureCredential for StaticToken {
 pub(crate) struct Tokens {
     cred: Arc<dyn AzureCredential>,
     caches: Mutex<HashMap<String, Arc<CredentialCache<Arc<AccessToken>>>>>,
+    /// The provider's transport: its follower bound applies to every cache (L29).
+    http: Arc<dyn HttpTransport>,
 }
 
 impl fmt::Debug for Tokens {
@@ -176,6 +178,7 @@ impl Tokens {
         Self {
             cred,
             caches: Mutex::default(),
+            http: http.clone(),
         }
     }
 
@@ -183,12 +186,19 @@ impl Tokens {
         &*self.cred
     }
 
-    fn cache(&self, scope: &str) -> Arc<CredentialCache<Arc<AccessToken>>> {
+    pub(crate) fn cache(&self, scope: &str) -> Arc<CredentialCache<Arc<AccessToken>>> {
         self.caches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(scope.to_owned())
-            .or_insert_with(|| Arc::new(CredentialCache::new()))
+            .or_insert_with(|| {
+                // Callers waiting for another caller's token fetch replace it once it stalls:
+                // woken, then left unpolled for the transport's bound (L29). A slow exchange
+                // (up to `TOKEN_REQUEST_TIMEOUT`) that is being polled is waited for.
+                let c = CredentialCache::new();
+                c.bound_by(&*self.http);
+                Arc::new(c)
+            })
             .clone()
     }
 
@@ -648,5 +658,76 @@ mod tests {
             &form_body(&[("a b", "c&d=e/f"), ("x", "y")])[..],
             b"a+b=c%26d%3De%2Ff&x=y"
         );
+    }
+
+    /// The Entra ID token endpoint, answering after 28 s of tokio time: within the token
+    /// request timeout (30 s), past the 24 s follower bound (what the built-in transport uses).
+    #[derive(Debug, Default)]
+    struct SlowEntra {
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    impl HttpTransport for SlowEntra {
+        fn send(
+            &self,
+            req: anykms_http::transport::Request,
+            _: usize,
+        ) -> BoxFuture<
+            '_,
+            std::result::Result<anykms_http::transport::Response, anykms_http::SendError>,
+        > {
+            assert_eq!(req.uri().path(), "/t/oauth2/v2.0/token");
+            self.requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(28)).await;
+                let body = br#"{"token_type":"Bearer","expires_in":3599,"access_token":"slow"}"#;
+                let mut r = anykms_http::http::Response::new(Zeroizing::new(body.to_vec()));
+                r.headers_mut().insert(
+                    anykms_http::http::header::CONTENT_TYPE,
+                    anykms_http::http::HeaderValue::from_static("application/json"),
+                );
+                Ok(r)
+            })
+        }
+
+        fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+            Some((
+                Duration::from_secs(24),
+                Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+            ))
+        }
+    }
+
+    /// A token exchange slower than the follower bound but within its own request timeout is
+    /// not duplicated: callers waiting for it, whenever they came, wait it out, because its
+    /// caller keeps polling it. One token request, one token for all.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_entra_exchange_is_not_duplicated() {
+        let entra = Arc::new(SlowEntra::default());
+        let http: Arc<dyn HttpTransport> = entra.clone();
+        let cred = crate::ClientSecret::new("t", "c", "s")
+            .unwrap()
+            .authority_host("http://127.0.0.1:9")
+            .unwrap();
+        let tokens = Arc::new(Tokens::new(Arc::new(cred), &http));
+        let started = tokio::time::Instant::now();
+        // Callers at 0 s (one fetches, two wait), then waiters at 10, 20 and 25 s.
+        let callers: Vec<_> = [0, 0, 0, 10, 20, 25]
+            .into_iter()
+            .map(|at| {
+                let tokens = tokens.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(at)).await;
+                    tokens.get("https://vault.azure.net/.default").await
+                })
+            })
+            .collect();
+        for c in callers {
+            let t = c.await.unwrap().unwrap();
+            assert_eq!((t.value().secret(), t.generation()), ("slow", 1));
+        }
+        assert_eq!(started.elapsed(), Duration::from_secs(28));
+        assert_eq!(entra.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

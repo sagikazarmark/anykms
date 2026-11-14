@@ -4,14 +4,19 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
 [operator guides](operations.md) cover the server side.
 
 - **Zeroization is defense in depth, not a guarantee.** anykms zeroizes the buffers it owns:
-  request JSON, response bodies, decoded plaintexts, data keys, tokens and the mTLS key PEM
-  (`Zeroizing`, grown without leaving unwiped copies). Requests reach the `HttpTransport` with
-  their body in a zeroizing buffer and responses come back in one; whether the bytes are wiped
-  beyond that is the transport's business. The built-in `ReqwestTransport` cannot zeroize the
-  copies reqwest/hyper/rustls make (including the request body reqwest sends and the token's
-  `X-Vault-Token` header value). anykms also cannot zeroize the token in the process environment
-  (`VAULT_TOKEN`), the parsed mTLS key inside the crypto provider (ring does not wipe it; aws-lc
-  does), kernel socket buffers, or the server.
+  request JSON, response bodies, decoded plaintexts, data keys, tokens, and the TLS PEMs read from
+  the environment: CA bundle, client certificate and mTLS key (`Zeroizing`, grown without leaving
+  unwiped copies). Requests reach the `HttpTransport` with their body in a zeroizing buffer and
+  responses come back in one; whether the bytes are wiped beyond that is the transport's business.
+  The built-in `ReqwestTransport` cannot zeroize the copies reqwest/hyper/rustls make (including
+  the request body reqwest sends and the token's `X-Vault-Token` header value). anykms also cannot
+  zeroize the token in the process environment (`VAULT_TOKEN`), the parsed mTLS key inside the
+  crypto provider (ring does not wipe it; aws-lc does), the PEM sections rustls-pki-types decodes
+  while it looks for certificates (a private key in a CA or certificate file is decoded, then
+  dropped unwiped), kernel socket buffers, or the server. Nor can it wipe the stack temporaries of
+  the crypto crates it calls: deriving an envelope's keys leaves copies of key-derived blocks (one
+  equal to the encryption key) and of HMAC's padded key on the stack inside `hkdf` and `hmac`,
+  until the stack is reused; how long that is depends on the optimizer.
 - **Transport.** Every HTTP backend moves bytes through one `anykms_http::HttpTransport`,
   injected with the builder's `.http_transport(..)` or, by default, the built-in
   `ReqwestTransport` (feature `reqwest`; without it, building a backend fails with
@@ -19,13 +24,32 @@ What anykms promises, what it cannot promise, and the limits to plan around. The
   provider, proxying, timeouts and the HTTP version are properties of the transport
   (`ReqwestTransportBuilder`), not of the backends; the guarantees below hold for the built-in
   one, and a third-party transport is responsible for its own. `ReqwestTransport`: rustls (see
-  [Cargo features](features.md#cargo-features)); `ca_pem` replaces the system roots; there is no
-  way to skip verification; redirects are never followed; a configured proxy is bypassed for
-  link-local and loopback hosts (the cloud metadata servers). The backends keep the host policy
-  for key endpoints: plain HTTP only for literal loopback IPs, and only when opted in. The one
+  [Cargo features](features.md#cargo-features)); the system roots are the platform store, or only
+  the files `SSL_CERT_FILE` / `SSL_CERT_DIR` name when either is set (so whoever controls the
+  process environment controls trust: pin it with `ca_pem`); `ca_pem` replaces the system roots;
+  there is no way to skip verification; redirects are never followed; a configured proxy carries
+  only HTTPS, as an end-to-end `CONNECT` tunnel, and is bypassed for link-local and loopback
+  hosts: plain-HTTP requests (the cloud metadata and credential endpoints) never go through it.
+  The backends keep the host policy for key endpoints: plain HTTP only for literal loopback IPs,
+  and only when opted in (for transit, an `http://` loopback address in `VAULT_ADDR`/`BAO_ADDR`
+  read by `EnvConfig` is that opt-in; `ServerConfig::allow_loopback_http` in code). The one
   plain-HTTP exception needs no opt-in: the built-in credential sources talk to the cloud
   metadata servers over `http://` on their link-local addresses (`169.254.169.254`,
-  `169.254.170.2`, `fd00:ec2::254`, `metadata.google.internal`), as every cloud SDK does. Whatever the transport, the
+  `169.254.170.2`, `169.254.170.23`, `fd00:ec2::254`, `fd00:ec2::23`, `metadata.google.internal`),
+  as every cloud SDK does, and to the local hosts each platform hands out:
+  - AWS: the container source also accepts loopback and `localhost` (the AWS SDK allowlist); an
+    instance metadata endpoint from `AWS_EC2_METADATA_SERVICE_ENDPOINT` may be `http://` only to
+    loopback, `localhost` or a link-local address unless the code opts in
+    (`ImdsCredentials::allow_http_to_any_host`).
+  - GCP: `GCE_METADATA_HOST` and an `external_account` file's `credential_source.url` may be
+    `http://` only to loopback, `localhost`, a link-local address, `metadata.google.internal` or
+    `fd20:ce::254` (the metadata server on IPv6-only VMs; no other unique local address) unless
+    the code opts in (`GcpProviderBuilder::allow_remote_http_credentials`).
+  - Azure: `IDENTITY_ENDPOINT` (App Service, Functions, Container Apps) may be `http://` only to
+    `localhost`, loopback, link-local or private (RFC 1918, `fc00::/7`) addresses, because App
+    Service on Linux hands out private addresses; any other host needs `https://`.
+
+  No environment variable widens these rules. Whatever the transport, the
   response limit is enforced twice (by the transport and again by the backend), so an oversized
   body never reaches a backend. Transport failures map to a fixed set of classes
   (`anykms_http::SendError`): a rejected or mismatched certificate is `Configuration` and not

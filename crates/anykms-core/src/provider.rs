@@ -548,28 +548,28 @@ impl Registry {
         self.providers.keys().copied()
     }
 
-    /// The provider of `uri`'s scheme; an error labeled with the URI if none is registered.
+    /// The provider of `uri`'s scheme; an error labeled with the scheme only (`postgres:`) if
+    /// none is registered: a string of an unknown scheme may be anything, a DSN with a password
+    /// included, so none of it but the scheme reaches the error.
     fn route(&self, uri: &KeyUri) -> Result<&dyn Provider> {
         let Some(p) = self.providers.get(uri.scheme()) else {
             let registered: Vec<_> = self.schemes().collect();
-            return Err(label(
-                Error::new(
-                    ErrorKind::Configuration,
-                    "registry",
-                    Operation::Open,
-                    format!(
-                        "no provider registered for scheme {:?} (registered: {}){}",
-                        uri.scheme(),
-                        if registered.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            registered.join(", ")
-                        },
-                        foreign_uri_hint(uri).unwrap_or_default(),
-                    ),
+            return Err(Error::new(
+                ErrorKind::Configuration,
+                "registry",
+                Operation::Open,
+                format!(
+                    "no provider registered for scheme {:?} (registered: {}){}",
+                    uri.scheme(),
+                    if registered.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        registered.join(", ")
+                    },
+                    foreign_uri_hint(uri).unwrap_or_default(),
                 ),
-                uri,
-            ));
+            )
+            .with_resource(format!("{}:", uri.scheme())));
         };
         Ok(&**p)
     }
@@ -717,7 +717,7 @@ mod tests {
             .unwrap();
         let e = r.aead("x://y").unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Configuration);
-        assert_eq!(e.resource(), Some("x://y"));
+        assert_eq!(e.resource(), Some("x:"));
         assert!(e.message().contains("registered: a, b"), "{e}");
         let owned: KeyUri = "a://y".parse().unwrap();
         let e = r.aead_with(&owned, &OpenOptions::new()).unwrap_err();
@@ -735,9 +735,11 @@ mod tests {
             (e.kind(), e.operation()),
             (ErrorKind::Configuration, Operation::ParseUri)
         );
-        // Query strings never reach the error.
+        // Query strings never reach the error (nor anything but the scheme of an unknown one).
         let e = r.aead("x://y?token=abc").unwrap_err();
-        assert_eq!(e.resource(), Some("x://y"));
+        assert_eq!(e.resource(), Some("x:"));
+        let e = r.aead("a://y?token=abc").unwrap_err();
+        assert_eq!(e.resource(), Some("a://y"));
     }
 
     /// R-39: a cloud's own key reference opened as a URI gets a hint naming the key URI to
@@ -933,7 +935,7 @@ mod tests {
         let e = r.pin("x://k", &KeyVersion::new("v")).unwrap_err();
         assert_eq!(
             (e.kind(), e.resource()),
-            (ErrorKind::Configuration, Some("x://k"))
+            (ErrorKind::Configuration, Some("x:"))
         );
         let e = r.pin("no scheme", &KeyVersion::new("v")).unwrap_err();
         assert_eq!(e.operation(), Operation::ParseUri);
@@ -997,5 +999,33 @@ mod tests {
             e.to_string(),
             "algs open [algs://k]: unsupported: provider does not open data-key sources"
         );
+    }
+}
+
+#[cfg(test)]
+mod review_l21_tests {
+    use super::*;
+
+    struct P;
+    impl Provider for P {
+        fn schemes(&self) -> &[&'static str] {
+            &["a"]
+        }
+    }
+
+    /// L21: an unknown scheme (a DSN in KEY_URI by mistake) is labeled with the scheme only, so
+    /// whatever else the string carries never reaches Display, Debug or `resource()`.
+    #[test]
+    fn unknown_scheme_errors_name_only_the_scheme() {
+        let r = Registry::builder().provider(P).build().unwrap();
+        let e = r.aead("postgres://app:s3cret@db/app").unwrap_err();
+        assert_eq!(e.resource(), Some("postgres:"));
+        for s in [e.to_string(), format!("{e:?}")] {
+            assert!(!s.contains("s3cret") && !s.contains("app:"), "{s}");
+        }
+        // A known scheme whose provider rejects the URI: the label has no userinfo.
+        let e = r.aead("a://tok3n@host/k").unwrap_err();
+        assert_eq!(e.resource(), Some("a://host/k"));
+        assert!(!e.to_string().contains("tok3n"), "{e}");
     }
 }

@@ -53,6 +53,9 @@ impl std::fmt::Debug for AzureProvider {
     }
 }
 
+/// The longest [`AzureProviderBuilder::key_cache_ttl`]: one year (longer values are clamped).
+pub const MAX_KEY_CACHE_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 /// Builds an [`AzureProvider`]. No I/O happens at build (without an injected transport the
 /// default one is built, which loads the system's root certificates).
 #[derive(Clone)]
@@ -105,7 +108,8 @@ impl AzureProviderBuilder {
     ///   lazy, as on AWS and GCP). A malformed selection (an unknown `ANYKMS_AZURE_CREDENTIAL`, a
     ///   selected credential missing its settings) and `ANYKMS_AZURE_CREDENTIAL=none` are
     ///   `Configuration` here;
-    /// - `ANYKMS_AZURE_ALLOWED_VAULTS` (comma-separated exact hosts) narrowing the allowlist.
+    /// - `ANYKMS_AZURE_ALLOWED_VAULTS` (comma-separated exact hosts) narrowing the allowlist; set
+    ///   but empty, [`build`](Self::build) fails with `Configuration`.
     ///
     /// Reads environment variables only.
     ///
@@ -137,9 +141,9 @@ impl AzureProviderBuilder {
                 .filter(|h| !h.is_empty())
                 .map(str::to_owned)
                 .collect();
-            if !hosts.is_empty() {
-                b = b.allowed_vaults(hosts);
-            }
+            // Set but empty (or only separators): `build` refuses the empty allowlist rather
+            // than allowing every vault (an empty allowlist variable is `Configuration`).
+            b = b.allowed_vaults(hosts);
         }
         Ok(b)
     }
@@ -201,8 +205,9 @@ impl AzureProviderBuilder {
     /// feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
     /// `ReqwestTransport` is built; without the `reqwest` feature, building fails with
     /// `Configuration`. The built-in credentials fetch their tokens through the same transport
-    /// ([`AzureCredential::bind_transport`]); IMDS requests carry a per-request timeout and are
-    /// never proxied by the built-in transport.
+    /// ([`AzureCredential::bind_transport`]); IMDS and other plain-HTTP identity endpoints carry a
+    /// per-request timeout and are never proxied by the built-in transport (its proxy carries
+    /// HTTPS only).
     pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
         self.http_transport = Some(Arc::new(transport));
         self
@@ -221,9 +226,10 @@ impl AzureProviderBuilder {
     /// follow a rotation within this time. Local verification
     /// ([`AzureOptions::local_verify`]) trusts a version's public key for the same time,
     /// counted from its fetch (a disabled version stops verifying within it), and remembers
-    /// versions that came back unknown for it too.
+    /// versions that came back unknown for it too. Values above [`MAX_KEY_CACHE_TTL`] (one
+    /// year) are treated as one year, so "cache forever" (`Duration::MAX`) is not a panic.
     pub fn key_cache_ttl(mut self, ttl: Duration) -> Self {
-        self.key_cache_ttl = ttl;
+        self.key_cache_ttl = ttl.min(MAX_KEY_CACHE_TTL);
         self
     }
 
@@ -277,10 +283,11 @@ impl AzureProviderBuilder {
             self.key_cache_ttl,
         );
         client.requests = self.request_counter;
+        let cache = Arc::new(DescribeCache::bounded_by(&*client.http));
         Ok(AzureProvider {
             client: Arc::new(client),
             policy: Arc::new(self.policy),
-            cache: Arc::default(),
+            cache,
         })
     }
 }
@@ -777,5 +784,89 @@ mod tests {
         b().max_response_bytes(anykms_http::client::MIN_RESPONSE_BYTES)
             .build()
             .unwrap();
+    }
+
+    /// Review L5: `ANYKMS_AZURE_ALLOWED_VAULTS` set but empty (or only separators) is
+    /// `Configuration`, never "every vault".
+    #[test]
+    fn review_l5_empty_allowed_vaults_is_configuration() {
+        for v in ["", " , ", ","] {
+            let r = AzureProvider::from_env_with(move |k| {
+                (k == "ANYKMS_AZURE_ALLOWED_VAULTS").then(|| v.to_owned())
+            });
+            let e = r.err().unwrap_or_else(|| panic!("{v:?} built"));
+            assert_eq!(e.kind(), ErrorKind::Configuration, "{v:?}: {e}");
+        }
+    }
+
+    /// Review L4: from the environment, `AZURE_AUTHORITY_HOST` must name a known Entra ID
+    /// authority; a custom or loopback authority is a builder setting only.
+    #[test]
+    fn review_l4_env_authority_host_must_be_a_known_entra_host() {
+        let run = |authority: &'static str| {
+            AzureProviderBuilder::from_env_with(move |k| {
+                match k {
+                    "AZURE_AUTHORITY_HOST" => Some(authority),
+                    "AZURE_TENANT_ID" => Some("00000000-0000-0000-0000-000000000001"),
+                    "AZURE_CLIENT_ID" => Some("00000000-0000-0000-0000-000000000002"),
+                    "AZURE_CLIENT_SECRET" => Some("s"),
+                    _ => None,
+                }
+                .map(str::to_owned)
+            })
+        };
+        for ok in [
+            "https://login.microsoftonline.com",
+            "https://login.microsoftonline.com/",
+            "https://login.windows.net",
+            "https://login.partner.microsoftonline.cn",
+            "https://login.chinacloudapi.cn",
+            "https://login.microsoftonline.us",
+            "HTTPS://LOGIN.MICROSOFTONLINE.US/",
+        ] {
+            assert!(run(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "https://login.evil.example",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "https://login.microsoftonline.com.evil.example",
+            "https://login.microsoftonline.com/tenant",
+        ] {
+            let e = run(bad).err().unwrap_or_else(|| panic!("{bad} accepted"));
+            assert_eq!(e.kind(), ErrorKind::Configuration, "{bad}: {e}");
+        }
+        // The builder still takes a custom or loopback authority (tests, private clouds).
+        for host in ["http://127.0.0.1:8080", "https://login.contoso.example"] {
+            crate::ClientSecret::new("t", "c", "s")
+                .unwrap()
+                .authority_host(host)
+                .unwrap();
+            crate::WorkloadIdentity::new("t", "c", "/var/run/token")
+                .unwrap()
+                .authority_host(host)
+                .unwrap();
+        }
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(test)]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// With the built-in transport, the key-bundle and token caches bound how long a caller
+    /// waits for another caller's request: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_caches() {
+        let p = AzureProvider::builder()
+            .credential(crate::StaticToken::new("t"))
+            .build()
+            .unwrap();
+        assert_eq!(p.cache.wait_bound(), Some(Duration::from_secs(24)));
+        let tokens = p.client.tokens.cache("https://vault.azure.net/.default");
+        assert_eq!(tokens.wait_bound(), Some(Duration::from_secs(24)));
     }
 }

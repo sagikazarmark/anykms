@@ -40,7 +40,7 @@ Grant roles **on the key or the key ring, never the project**.
 | RSA KEKs | `roles/cloudkms.publicKeyViewer` (wrap is local, with the public key; unwrap's key-type check reads it too) plus `roles/cloudkms.cryptoKeyDecrypter` or `cryptoKeyEncrypterDecrypter` (unwrap), plus `cloudkms.cryptoKeyVersions.get` (see below). IAM limits readers only: **every holder of the public key** can write envelopes that decrypt as genuine, so they give confidentiality only and the AAD does not authenticate the writer. Use an `ENCRYPT_DECRYPT` KEK where writers must be limited, and do not keep an RSA KEK in an `EnvelopeKeyring` with a symmetric primary |
 | Signing | `roles/cloudkms.signerVerifier`. It includes `viewPublicKey`, which the key-type check and local verification need; `roles/cloudkms.signer` alone works only with `KeyTypeCheck::TrustCaller` and no verification. Plus `cloudkms.cryptoKeyVersions.get` (see below) |
 | MAC | `roles/cloudkms.signerVerifier` (`useToSign` for `macSign`, `useToVerify` for `macVerify`) |
-| Verify-only services, JWKS publishers | `roles/cloudkms.publicKeyViewer`, plus `cloudkms.cryptoKeyVersions.get` (see below) |
+| Verify-only services, JWKS publishers | `roles/cloudkms.publicKeyViewer`, plus `cloudkms.cryptoKeyVersions.get` (see below) and `cloudkms.cryptoKeyVersions.list` (the latest-version read that bounds forged versions, see [Disabling and destroying versions](#disabling-and-destroying-versions); verification works without it, but forged versions above the latest then each cost a lookup) |
 | Every public-key read (signing's key-type check, local verification, `PublicKeys`, RSA wrap and its key-type check) | `cloudkms.cryptoKeyVersions.get`, through `roles/cloudkms.viewer` on the key or a custom role. Before each `getPublicKey` the backend checks that the version is `ENABLED`, so the public key of a disabled version is never handed out (Cloud KMS may serve it). Without the permission public keys **fail closed** with `PermissionDenied`. Whether `publicKeyViewer` grants it is **not verified** (probe T1 does not check it), so grant it explicitly |
 | `describe()` and the AEAD/MAC key-type check | `cloudkms.cryptoKeys.get`, `cloudkms.cryptoKeyVersions.get` and `cloudkms.cryptoKeyVersions.list`, through `roles/cloudkms.viewer` on the key or a custom role (the operational roles carry no metadata permissions) |
 | Never for applications | `roles/cloudkms.admin`, `cloudkms.cryptoKeyVersions.destroy`, `roles/cloudkms.cryptoOperator` (too broad) |
@@ -70,7 +70,13 @@ it. An empty allowlist (an empty list in code, or the variable set to an empty v
 2. the gcloud ADC file (`$CLOUDSDK_CONFIG/application_default_credentials.json`, by default
    `~/.config/gcloud/…`), written by `gcloud auth application-default login`;
 3. the metadata server (GCE, GKE Workload Identity, Cloud Run, Cloud Functions) at
-   `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 1 s connect timeout.
+   `GCE_METADATA_HOST` or `169.254.169.254`, probed with a 3 s request timeout (within it, the
+   built-in transport's 2 s connect timeout). `GCE_METADATA_HOST` is plain HTTP, so it must name a
+   loopback or link-local IP, `localhost`, `metadata.google.internal` or `fd20:ce::254` (the
+   metadata server on IPv6-only VMs, exactly that address); any other host (a
+   metadata proxy elsewhere on the network) is `Configuration` unless the provider opts in with
+   `GcpProviderBuilder::allow_remote_http_credentials()`. The same rule applies to an
+   `external_account` `credential_source.url` that uses `http://`.
 
 `GcpProvider::from_env_with(lookup)` (and `GcpProviderBuilder::from_env_with`, and the facade's
 `with_default_providers_from`) reads every variable from a lookup function instead of the process
@@ -155,8 +161,8 @@ check Google's list of regional endpoints. Every request (Cloud KMS, the token e
 metadata server) goes through one HTTP transport (`GcpProviderBuilder::http_transport`, or a
 default `ReqwestTransport`), which owns TLS trust, the crypto provider, proxying and timeouts.
 Proxy variables (`HTTPS_PROXY`) are ignored unless a proxy is configured on the transport
-(`ReqwestTransportBuilder::proxy`); the metadata server, a link-local host, is always reached
-directly and with a 3 s per-request timeout. Redirects are never followed.
+(`ReqwestTransportBuilder::proxy`); the proxy carries HTTPS only, so the metadata server (plain
+HTTP) is always reached directly, with a 3 s per-request timeout. Redirects are never followed.
 
 ## Limits and quotas
 
@@ -195,12 +201,35 @@ minutes after the disable; a re-fetch that fails does not extend the cached key 
 fails with the re-fetch's error). Every fetch first reads the version's state
 (`cryptoKeyVersions.get`) and refuses a version that is not `ENABLED`, so a disabled version's
 public key is never handed out, also if Cloud KMS would serve it; that lookup fails closed
-without `cloudkms.cryptoKeyVersions.get`. A signature or `public_key_version` naming a version
-that does not exist (`UnknownKeyVersion`; verifying with it is `VerificationFailed`) or that is
-disabled or destroyed (`KeyVersionUnusable`) is remembered for the same TTL (up to 64 versions),
-so forged versions cost at most one lookup each per TTL, and they never make the handle re-run
-its key-type check. A pending version (with its retry hint) is not remembered.
-`public_key_ttl(Duration::ZERO)` disables both caches. Destroying a version loses its data after
+without `cloudkms.cryptoKeyVersions.get`.
+
+`CachedVerifier` (`anykms-recipes`) keeps its own cache on top (default 5 minutes), and its
+lookups through a GCP handle are answered from the provider's cache first: a disabled version
+stops verifying through it at most `CachedVerifier`'s TTL plus `public_key_ttl` (+10 %) after
+the disable, Cloud KMS's own delay on top. To revoke at once, call `CachedVerifier::invalidate()`:
+it drops the verifier's cache and, through `PublicKeys::invalidate_public_keys`, the provider's
+public keys and remembered versions for every handle of the provider, so the next verification
+re-reads the version's state. `GcpProvider::invalidate_public_keys()` (on the provider or a clone
+of it) does the same for the provider alone, e.g. for handles used without a `CachedVerifier`.
+
+A signature or `public_key_version` naming a version that does not exist (`UnknownKeyVersion`;
+verifying with it is `VerificationFailed`) or that is disabled or destroyed
+(`KeyVersionUnusable`) is remembered for the same TTL (up to 64 versions), and none of them
+make the handle re-run its key-type check. A version found missing also makes the provider read
+the key's latest version, started at most once per key per TTL: a full `cryptoKeyVersions.list`
+(one request per 1,000 versions, at most 100). Once that read has succeeded, and until it
+expires, every version above the latest is refused without a request. Forged versions above the
+latest therefore cost, per key per TTL, one lookup each for those that arrive before the read
+completes (concurrent misses each send theirs), plus the list, however many distinct versions
+arrive after it. The read needs `cloudkms.cryptoKeyVersions.list`, which a role granted only for
+verifying may lack: grant it to the identity that verifies. Without it, or when the list fails
+for another reason, no version is refused this way until the read is tried again a TTL later,
+and each forged version costs a lookup, of which only 64 are remembered. Forged versions below
+the latest (which exist, so only disabled or destroyed ones fail) cost one lookup each per TTL,
+of which only 64 are remembered. A version created
+after the read is refused (`UnknownKeyVersion`) until the read expires, at most `public_key_ttl`
+(+10 %) after the rotation. A pending version (with its retry hint) is not remembered.
+`public_key_ttl(Duration::ZERO)` disables all three caches. Destroying a version loses its data after
 `destroyScheduledDuration` (24 h by default); restore it while it is `DESTROY_SCHEDULED`.
 
 A disabled, destroyed or scheduled-for-destruction version fails differently by who chose it:
@@ -241,7 +270,7 @@ to a keyed fingerprint.
 | `Unauthenticated` | config | the token was refused after one refresh; a revoked refresh token (`invalid_grant`); a bad subject token | check the credential source, the workload identity pool and provider |
 | `KeyMismatch` | config | the key's purpose or algorithm does not fit the handle (an HMAC key opened as AEAD, a P-256 key as P-384, PSS as PKCS#1, an EKM key for signing, a `RAW_ENCRYPT_DECRYPT` key, an RSA KEK version that is not OAEP-SHA-256); the server's `FAILED_PRECONDITION` "incorrect key purpose"; a URI with or without a version where the other is required | fix the URI or the algorithm in the configuration |
 | `Unsupported` | config | `rewrap` or data keys on a GCP key (not native); the server answered `UNIMPLEMENTED` | use the recipes |
-| `Configuration` | config | a malformed key URI (`Error::operation()` is `ParseUri`); no credentials found; an unsupported or malformed credential file (the error names the path); an unusable subject token file (unreadable, empty, malformed); an empty allowlist; `max_response_bytes` under 64 KiB; a credential file naming a token URL other than the fixed one for its field; Cloud KMS API or billing disabled, or a token without the `cloud-platform` scope (`SERVICE_DISABLED`, `BILLING_DISABLED`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`); a project or location outside the allowlists; plain-`http://` custom endpoints without `allow_loopback_http()`; a redirect; a refused TLS certificate; `Provider::pin` with a malformed version or a URI that names another version (`Error::operation()` is `Open`) | fix the environment, project setup or configured key version |
+| `Configuration` | config | a malformed key URI (`Error::operation()` is `ParseUri`); no credentials found; an unsupported or malformed credential file (the error names the path); an unusable subject token file (unreadable, empty, malformed); an empty allowlist; `max_response_bytes` under 64 KiB; a credential file naming a token URL other than the fixed one for its field; Cloud KMS API or billing disabled, or a token without the `cloud-platform` scope (`SERVICE_DISABLED`, `BILLING_DISABLED`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`); a project or location outside the allowlists; plain-`http://` custom endpoints without `allow_loopback_http()`; a plain-`http://` `GCE_METADATA_HOST` or `credential_source.url` on a remote host without `allow_remote_http_credentials()`; a redirect; a refused TLS certificate; `Provider::pin` with a malformed version or a URI that names another version (`Error::operation()` is `Open`) | fix the environment, project setup or configured key version |
 | `KeyStateInvalid` | config | the version the handle chose (its pinned version, or the primary version for encrypt) is `DISABLED`, `DESTROYED` or `DESTROY_SCHEDULED`, for every operation including `public_key()`; `PENDING_GENERATION`/`PENDING_IMPORT` (with a 2 s retry hint) | re-enable or restore the version, or move the URI (or the primary) to an enabled one |
 | `KeyVersionUnusable` | caller | a version taken from the input (the ciphertext's, a signature's or tag's, `public_key_version`) is `DISABLED`, `DESTROYED`, `DESTROY_SCHEDULED` or pending (with a 2 s retry hint) | rewrap or re-sign old data before disabling |
 | `UnknownKeyVersion` | caller | `public_key_version` names a version this key does not have (a forged or stale `kid`); on an RSA KEK, any version other than the pinned one (refused before any request: the handle unwraps with its pinned version only) | expected for forged input; to wrap offline to another version, open a KEK on that version |

@@ -25,6 +25,9 @@ for arg in "$@"; do
       docker compose --profile sealed run --rm vault-sealed-init
       ;;
     --tls)
+      # The servers run as a non-root uid inside their containers and write their dev CA and key
+      # into these bind mounts, which the host user owns: they must be writable by any uid. Dev
+      # certificates only; .dev/ is ignored by git.
       mkdir -p .dev/tls/vault .dev/tls/openbao
       chmod 0777 .dev/tls/vault .dev/tls/openbao
       docker compose --profile tls up -d --wait vault-tls openbao-tls

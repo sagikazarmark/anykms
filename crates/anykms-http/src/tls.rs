@@ -198,17 +198,35 @@ impl<'a> TlsOptions<'a> {
                 return Err(err("the CA certificate PEM contains no certificates"));
             }
         } else {
+            // With `SSL_CERT_FILE` or `SSL_CERT_DIR` set, rustls-native-certs reads only those
+            // paths, not the platform store.
             let loaded = rustls_native_certs::load_native_certs();
+            let (found, load_errors) = (loaded.certs.len(), loaded.errors.len());
             for cert in loaded.certs {
                 let _ = roots.add(cert);
             }
-        }
-        if roots.is_empty() && self.require_roots {
-            // Only the system roots can come up empty here: an empty `ca_pem` failed above.
-            return Err(
-                err("no trusted CA certificates (system roots unavailable and no ca_pem)")
-                    .with_source(NoSystemRoots),
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                backend,
+                found,
+                usable = roots.len(),
+                load_errors,
+                ssl_cert_file = std::env::var_os("SSL_CERT_FILE").is_some(),
+                ssl_cert_dir = std::env::var_os("SSL_CERT_DIR").is_some(),
+                "system trust roots loaded"
             );
+            let _ = found;
+            if roots.is_empty() && self.require_roots {
+                // Only the system roots can come up empty here: an empty `ca_pem` failed above.
+                let m = if load_errors > 0 {
+                    "no trusted CA certificates: the system roots could not be loaded (check \
+                     SSL_CERT_FILE and SSL_CERT_DIR, which replace the platform store when set) \
+                     and no ca_pem"
+                } else {
+                    "no trusted CA certificates (the system trust store is empty and no ca_pem)"
+                };
+                return Err(err(m).with_source(NoSystemRoots));
+            }
         }
         let provider = crypto_provider(
             backend,
@@ -225,8 +243,9 @@ impl<'a> TlsOptions<'a> {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|_| err("cannot parse the client certificate PEM"))?;
                 let key = private_key_from_pem(backend, key)?;
+                // rustls wipes the copy it is given; `key` is wiped on drop.
                 builder
-                    .with_client_auth_cert(chain, key)
+                    .with_client_auth_cert(chain, key.clone_key())
                     .map_err(|_| err("invalid client certificate or key"))?
             }
             None => builder.with_no_client_auth(),
@@ -289,7 +308,7 @@ mod tests {
             let pem = data(name);
             let ours = private_key_from_pem("t", &pem).unwrap();
             let theirs = rustls_pki_types::PrivateKeyDer::from_pem_slice(&pem).unwrap();
-            assert_eq!(ours, theirs);
+            assert_eq!(*ours, theirs);
         }
         let crlf = String::from_utf8(data("server-key.pem"))
             .unwrap()
@@ -381,5 +400,45 @@ mod tests {
             .build("t")
             .unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Configuration);
+    }
+}
+
+/// Regression test for the security review (L6): a `SSL_CERT_FILE` naming a missing file must
+/// not be reported as an empty system trust store. Runs itself in a child process with the
+/// variable set (`set_var` is `unsafe` in edition 2024, which the workspace forbids).
+#[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+mod review_tests {
+    use super::*;
+
+    const CHILD: &str = "ANYKMS_HTTP_REVIEW_L6_CHILD";
+
+    #[test]
+    fn review_l6_unloadable_ssl_cert_file_is_named() {
+        if std::env::var_os(CHILD).is_some() {
+            let e = TlsOptions::new().build("t").unwrap_err();
+            // Still the error the facade recognizes (it skips the cloud provider)...
+            assert!(is_missing_system_roots(&e), "{e}");
+            // ...but it says what happened.
+            let m = e.message();
+            assert!(m.contains("could not be loaded"), "{m}");
+            assert!(m.contains("SSL_CERT_FILE"), "{m}");
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tls::review_tests::review_l6_unloadable_ssl_cert_file_is_named",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("SSL_CERT_FILE", "/nonexistent/anykms-review/ca.pem")
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "{text}");
     }
 }

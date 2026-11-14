@@ -40,6 +40,9 @@ fn config_err(m: &'static str) -> Error {
     Error::new(ErrorKind::Configuration, BACKEND, Operation::Configure, m)
 }
 
+/// A PEM bundle held in a zeroizing buffer.
+type Pem = Zeroizing<Vec<u8>>;
+
 /// Builds a [`ReqwestTransport`].
 ///
 /// Defaults: system roots (required), no client certificate, the crypto provider of
@@ -51,8 +54,9 @@ fn config_err(m: &'static str) -> Error {
 /// userinfo may carry credentials. Key material is never printed.
 #[derive(Clone)]
 pub struct ReqwestTransportBuilder {
-    ca_pem: Option<Vec<u8>>,
-    client_identity: Option<(Vec<u8>, Zeroizing<Vec<u8>>)>,
+    // Zeroizing although public: a PEM bundle may carry a private key next to the certificates.
+    ca_pem: Option<Zeroizing<Vec<u8>>>,
+    client_identity: Option<(Pem, Pem)>,
     crypto_provider: Option<Arc<CryptoProvider>>,
     require_roots: bool,
     connect_timeout: Duration,
@@ -78,7 +82,10 @@ impl fmt::Debug for ReqwestTransportBuilder {
             .field("http2", &self.http2)
             .field(
                 "proxy",
-                &self.proxy.as_deref().map(crate::redact::url_origin),
+                &self.proxy.as_deref().map(|p| match normalize_proxy(p) {
+                    Ok(u) => crate::redact::url_origin(u.as_str()),
+                    Err(_) => "<invalid URL>".to_owned(),
+                }),
             )
             .field("user_agent", &self.user_agent)
             .finish()
@@ -109,23 +116,28 @@ impl ReqwestTransportBuilder {
         }
     }
 
-    /// Trusts only the certificates in `pem` instead of the system roots.
+    /// Trusts only the certificates in `pem` instead of the system roots. Kept in a zeroizing
+    /// buffer, in case the bundle also holds a private key.
     pub fn ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
-        self.ca_pem = Some(pem.into());
+        self.ca_pem = Some(Zeroizing::new(pem.into()));
         self
     }
 
     /// Presents a client certificate chain and its private key (PEM; PKCS#8, PKCS#1 or SEC1,
-    /// unencrypted). The key is kept in a zeroizing buffer and decoded into zeroizing buffers;
-    /// rustls wipes the DER after loading it. Pass an owned `Vec` (not a slice) so no unwiped copy
-    /// is made here. The parsed signing key then lives inside the crypto provider: aws-lc clears
-    /// it when freed, ring does not.
+    /// unencrypted). Both are kept in zeroizing buffers (a `cert_pem` may be a combined
+    /// certificate-and-key file) and the key is decoded into zeroizing buffers; rustls wipes the
+    /// DER after loading it. Pass owned `Vec`s (not slices) so no unwiped copy is made here. The
+    /// parsed signing key then lives inside the crypto provider: aws-lc clears it when freed,
+    /// ring does not.
     pub fn client_identity(
         mut self,
         cert_pem: impl Into<Vec<u8>>,
         key_pem: impl Into<Vec<u8>>,
     ) -> Self {
-        self.client_identity = Some((cert_pem.into(), Zeroizing::new(key_pem.into())));
+        self.client_identity = Some((
+            Zeroizing::new(cert_pem.into()),
+            Zeroizing::new(key_pem.into()),
+        ));
         self
     }
 
@@ -176,9 +188,18 @@ impl ReqwestTransportBuilder {
         self
     }
 
-    /// Sends requests through this proxy URL, except to link-local and loopback hosts (the cloud
-    /// metadata servers are always reached directly). `None` (the default) connects directly and
-    /// ignores proxy environment variables.
+    /// Sends **HTTPS** requests through this proxy (an end-to-end TLS tunnel with `CONNECT`),
+    /// except to link-local and loopback hosts. Plain-HTTP requests (the cloud metadata and
+    /// credential endpoints, loopback test servers) never go through a proxy, whatever their
+    /// host: a proxy would see their headers and responses (tokens) in clear text. A deployment
+    /// that can reach a plain-HTTP credential endpoint only through the proxy therefore fails to
+    /// connect instead.
+    ///
+    /// The URL is `http://` or `https://` with a host (userinfo, if any, is sent to the proxy as
+    /// Basic credentials); a string without a scheme gets `http://`, as reqwest does. Any other
+    /// scheme (`socks5://`, a typo) fails [`build`](Self::build) with `Configuration` rather than
+    /// silently connecting directly. `None` (the default) connects directly and ignores proxy
+    /// environment variables.
     pub fn proxy(mut self, url: Option<String>) -> Self {
         self.proxy = url;
         self
@@ -197,8 +218,14 @@ impl ReqwestTransportBuilder {
         if self.http2 && !cfg!(feature = "http2") {
             return Err(config_err("http2 needs the anykms-http `http2` feature"));
         }
+        let proxy = self
+            .proxy
+            .as_deref()
+            .map(normalize_proxy)
+            .transpose()
+            .map_err(config_err)?;
         let tls = TlsOptions::new()
-            .ca_pem(self.ca_pem.as_deref())
+            .ca_pem(self.ca_pem.as_ref().map(|p| &p[..]))
             .client_identity(self.client_identity.as_ref().map(|(c, k)| (&c[..], &k[..])))
             .crypto_provider(
                 self.crypto_provider.clone(),
@@ -214,11 +241,22 @@ impl ReqwestTransportBuilder {
             .pool_idle_timeout(self.pool_idle_timeout)
             .tcp_keepalive(self.tcp_keepalive)
             .user_agent(self.user_agent.as_str())
+            // Pinned off, whatever reqwest features another crate enables (features unify):
+            // transparent decompression would pass secret-bearing bodies through unwiped
+            // decompressor buffers, and the resolver stays the system one.
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate()
+            .no_hickory_dns()
             .use_preconfigured_tls(tls);
-        b = match &self.proxy {
+        b = match proxy {
             None => b.no_proxy(),
+            // HTTPS only: reqwest tunnels HTTPS destinations through `CONNECT` but forwards
+            // plain-HTTP ones to the proxy in clear text (absolute-form requests). The bypass
+            // list still applies to HTTPS (a loopback test server with its own CA).
             Some(u) => b.proxy(
-                ::reqwest::Proxy::all(u.as_str())
+                ::reqwest::Proxy::https(u.as_str())
                     .map_err(|_| config_err("invalid proxy URL"))?
                     .no_proxy(::reqwest::NoProxy::from_string(NO_PROXY)),
             ),
@@ -229,8 +267,37 @@ impl ReqwestTransportBuilder {
         let client = b
             .build()
             .map_err(|_| config_err("cannot build the HTTP client"))?;
-        Ok(ReqwestTransport { client })
+        Ok(ReqwestTransport {
+            client,
+            // How long a woken request may go unpolled before a follower replaces it: twice
+            // one request's whole life (connect, then the request timeout), far above any
+            // scheduling delay.
+            follower_wait: self
+                .connect_timeout
+                .saturating_add(self.request_timeout)
+                .saturating_mul(2),
+        })
     }
+}
+
+/// The proxy URL as reqwest will use it: `http://` prefixed when the string names no scheme (as
+/// reqwest itself does), then parsed, with an `http` or `https` scheme and a host required.
+/// reqwest accepts any URL with a host and hyper-util then silently drops a proxy with another
+/// scheme (`socks://`, `ftp://`, a typo), so such a string would mean "connect directly".
+fn normalize_proxy(raw: &str) -> std::result::Result<url::Url, &'static str> {
+    const BAD: &str = "invalid proxy URL: expected http:// or https:// with a host";
+    let owned;
+    let s = if raw.contains("://") {
+        raw
+    } else {
+        owned = format!("http://{raw}");
+        &owned
+    };
+    let u = url::Url::parse(s).map_err(|_| BAD)?;
+    if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none_or(str::is_empty) {
+        return Err(BAD);
+    }
+    Ok(u)
 }
 
 /// The built-in transport: a reqwest client over a preconfigured rustls configuration (no
@@ -244,6 +311,8 @@ impl ReqwestTransportBuilder {
 #[derive(Clone)]
 pub struct ReqwestTransport {
     client: ::reqwest::Client,
+    /// [`HttpTransport::follower_wait`]: twice the connect plus request timeout.
+    follower_wait: Duration,
 }
 
 impl fmt::Debug for ReqwestTransport {
@@ -316,6 +385,16 @@ impl HttpTransport for ReqwestTransport {
             return Err(SendError::NoRuntime);
         }
         Ok(())
+    }
+
+    /// Twice the connect plus request timeout, on Tokio's timer (reqwest's own timeouts already
+    /// need a Tokio runtime with its time driver): how long a follower lets a woken request go
+    /// unpolled before sending its own.
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        Some((
+            self.follower_wait,
+            Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
     }
 }
 
@@ -712,5 +791,135 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
+/// Regression tests for the security review's transport findings (L2, L3, L24).
+#[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+mod review_tests {
+    use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::test_support::get;
+    use super::*;
+
+    /// A proxy on loopback that records the request line of every connection and answers 502.
+    fn recording_proxy() -> (String, mpsc::Receiver<String>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let mut req = Vec::new();
+                let mut b = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut b) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req.extend_from_slice(&b[..k]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&req)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                let _ = s.write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// L2: a plain-HTTP destination (a credential endpoint on a host outside the bypass list)
+    /// must never be sent to the proxy, where its headers and response would cross the network
+    /// in clear text; HTTPS still goes through it as a CONNECT tunnel.
+    #[tokio::test]
+    async fn review_l2_plain_http_never_reaches_the_proxy() {
+        let (proxy, seen) = recording_proxy();
+        let t = ReqwestTransport::builder()
+            .require_roots(false)
+            .connect_timeout(Duration::from_millis(500))
+            .request_timeout(Duration::from_secs(2))
+            .proxy(Some(proxy))
+            .build()
+            .unwrap();
+        // `.invalid` never resolves: sent directly, the request fails at DNS.
+        let _ = t
+            .send(get("http://imds-proxy.example.invalid/token"), 1024)
+            .await;
+        let plain = seen.recv_timeout(Duration::from_millis(300));
+        assert!(
+            plain.is_err(),
+            "plain-HTTP request reached the proxy: {plain:?}"
+        );
+        let _ = t.send(get("https://kms.example.invalid/"), 1024).await;
+        let tunnel = seen.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            tunnel.starts_with("CONNECT kms.example.invalid:443 "),
+            "{tunnel}"
+        );
+    }
+
+    /// L3: a proxy URL whose scheme reqwest/hyper-util would silently ignore (connecting
+    /// directly) is a configuration error, not "no proxy".
+    #[test]
+    fn review_l3_unsupported_proxy_schemes_are_refused() {
+        for bad in [
+            "socks://egress:1080",
+            "ftp://egress:21",
+            "htttp://egress:3128",
+            "http://",
+            "http://:3128",
+        ] {
+            let r = ReqwestTransport::builder()
+                .require_roots(false)
+                .proxy(Some(bad.into()))
+                .build();
+            match r {
+                Err(e) => assert_eq!(e.kind(), ErrorKind::Configuration, "{bad}: {e}"),
+                Ok(_) => panic!("{bad}: accepted"),
+            }
+        }
+        for good in [
+            "http://egress:3128",
+            "https://egress:3128",
+            "egress:3128",
+            "alice:pw@egress:3128",
+        ] {
+            ReqwestTransport::builder()
+                .require_roots(false)
+                .proxy(Some(good.into()))
+                .build()
+                .unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
+    }
+
+    /// L23(c): a combined certificate-and-key PEM passed as `cert_pem` or `ca_pem` is wiped too.
+    #[test]
+    fn review_l23c_cert_and_ca_pem_are_zeroizing() {
+        fn z(_: &Zeroizing<Vec<u8>>) {}
+        let b = ReqwestTransport::builder()
+            .ca_pem(b"ca".to_vec())
+            .client_identity(b"cert".to_vec(), b"key".to_vec());
+        z(b.ca_pem.as_ref().unwrap());
+        let (c, k) = b.client_identity.as_ref().unwrap();
+        z(c);
+        z(k);
+    }
+
+    /// L24: a scheme-less proxy string (which reqwest accepts by prefixing `http://`) must not
+    /// print its username as the "scheme" of the origin.
+    #[test]
+    fn review_l24_scheme_less_proxy_debug_hides_the_userinfo() {
+        let o = ReqwestTransport::builder().proxy(Some("alice:pw@proxy.example:3128".into()));
+        let d = format!("{o:?}");
+        assert!(!d.contains("alice") && !d.contains("pw@"), "{d}");
+        assert!(d.contains("http://proxy.example:3128"), "{d}");
     }
 }

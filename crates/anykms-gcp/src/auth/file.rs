@@ -105,14 +105,17 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
                 None => ctx.endpoints.oauth2_token.clone(),
             };
             Ok(Built {
-                source: Arc::new(Cached::new(AuthorizedUser {
-                    http: ctx.http.clone(),
-                    token_url,
-                    client_id: require(f.client_id, &kind, "client_id")?,
-                    client_secret: require(f.client_secret, &kind, "client_secret")?,
-                    refresh_token: require(f.refresh_token, &kind, "refresh_token")?,
-                    quota_project: quota,
-                })),
+                source: Arc::new(
+                    Cached::new(AuthorizedUser {
+                        http: ctx.http.clone(),
+                        token_url,
+                        client_id: require(f.client_id, &kind, "client_id")?,
+                        client_secret: require(f.client_secret, &kind, "client_secret")?,
+                        refresh_token: require(f.refresh_token, &kind, "refresh_token")?,
+                        quota_project: quota,
+                    })
+                    .bounded_by(&*ctx.http),
+                ),
                 kind: "authorized_user",
             })
         }
@@ -135,14 +138,17 @@ pub(crate) fn build(f: CredFile, ctx: &AuthCtx, depth: u8) -> Result<Built> {
             let src = require(f.source_credentials, &kind, "source_credentials")?;
             let source = build(*src, ctx, depth + 1)?.source;
             Ok(Built {
-                source: Arc::new(Cached::new(impersonated::Impersonate {
-                    http: ctx.http.clone(),
-                    source,
-                    url,
-                    delegates: f.delegates.unwrap_or_default(),
-                    lifetime: Duration::from_secs(3600),
-                    quota_project: quota,
-                })),
+                source: Arc::new(
+                    Cached::new(impersonated::Impersonate {
+                        http: ctx.http.clone(),
+                        source,
+                        url,
+                        delegates: f.delegates.unwrap_or_default(),
+                        lifetime: Duration::from_secs(3600),
+                        quota_project: quota,
+                    })
+                    .bounded_by(&*ctx.http),
+                ),
                 kind: "impersonated_service_account",
             })
         }
@@ -175,6 +181,16 @@ fn service_account(_f: CredFile, _ctx: &AuthCtx) -> Result<Built> {
     ))
 }
 
+/// The credential file `type`s Google defines (built in or not), the only ones errors name.
+const KNOWN_TYPES: [&str; 6] = [
+    "service_account",
+    "authorized_user",
+    "external_account",
+    "impersonated_service_account",
+    "external_account_authorized_user",
+    "gdch_service_account",
+];
+
 /// Parses a credential document (the `expected` type, when given) and builds its source.
 pub(crate) fn parse(json: &[u8], expected: Option<&str>, ctx: &AuthCtx) -> Result<Built> {
     let f: CredFile = serde_json::from_slice(json)
@@ -182,9 +198,11 @@ pub(crate) fn parse(json: &[u8], expected: Option<&str>, ctx: &AuthCtx) -> Resul
     if let (Some(want), Some(got)) = (expected, f.kind.as_deref())
         && want != got
     {
-        return Err(config_err(format!(
-            "credential file has type `{got}`, expected `{want}`"
-        )));
+        // The file's contents are never echoed: a type is named only if it is a known one.
+        return Err(config_err(match KNOWN_TYPES.iter().find(|t| **t == got) {
+            Some(got) => format!("credential file has type `{got}`, expected `{want}`"),
+            None => format!("credential file has an unknown type, expected `{want}`"),
+        }));
     }
     build(f, ctx, 0)
 }

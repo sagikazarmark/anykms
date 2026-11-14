@@ -11,10 +11,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anykms::prelude::*;
 use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
-use anykms::transit::{EnvConfig, TransitProvider};
+use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
 use tower::ServiceBuilder;
 
 #[tokio::main]
@@ -31,8 +32,11 @@ async fn main() -> anykms::Result<()> {
     };
 
     // The hardened client (TLS, no redirects, timeouts) as a tower service, with the caller's
-    // layers on top. Every request the backend sends passes through the stack; the counters
-    // around the limit show it holding.
+    // layers on top. It is built from the TLS variables (`VAULT_CACERT`, `VAULT_CAPATH`,
+    // `VAULT_CLIENT_CERT`/`VAULT_CLIENT_KEY`) `EnvConfig` reads: the transport passed to
+    // `http_transport` below replaces the one `load` built from them, so building it from
+    // anything else would silently drop a pinned CA or client certificate. Every request the
+    // backend sends passes through the stack; the counters around the limit show it holding.
     let in_flight = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let service = ServiceBuilder::new()
@@ -52,8 +56,21 @@ async fn main() -> anykms::Result<()> {
                 req
             }
         })
-        .service(ReqwestTransport::new()?.into_service());
-    let server = env.load()?.http_transport(TowerTransport::new(service));
+        .service(
+            env.tls()?
+                .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+                .build()?
+                .into_service(),
+        );
+    // `TowerTransport` has no timer of its own, so it does not bound how long a backend's
+    // single-flight followers wait on another caller's credential or metadata request that has
+    // stalled; the built-in transport does (24 s with the defaults). Without a bound, a caller that
+    // stops polling its request mid-flight leaves later callers waiting for as long as that future
+    // lives. With one, a follower sends its own request once the stalled one has been woken and left
+    // unpolled that long; a request that is being polled is waited for however long it takes.
+    let transport = TowerTransport::new(service)
+        .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
+    let server = env.load()?.http_transport(transport);
 
     let registry = anykms::Registry::builder()
         .provider(

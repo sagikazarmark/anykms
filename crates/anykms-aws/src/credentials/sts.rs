@@ -18,7 +18,10 @@ use crate::BACKEND;
 /// Configured from `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_ARN` and `AWS_ROLE_SESSION_NAME` by
 /// [`from_env`](Self::from_env) (and by the default chain). The STS endpoint is
 /// `AWS_ENDPOINT_URL_STS`, else the regional endpoint of [`region`](Self::region) /
-/// `AWS_REGION` / `AWS_DEFAULT_REGION`, else the global `https://sts.amazonaws.com`.
+/// `AWS_REGION` / `AWS_DEFAULT_REGION` in the role ARN's partition (`sts-fips` with
+/// `AWS_USE_FIPS_ENDPOINT=true`), else, in the `aws` partition, the global
+/// `https://sts.amazonaws.com`. `AWS_STS_REGIONAL_ENDPOINTS` is not read: a known region always
+/// selects its regional endpoint (the SDKs' `regional` default).
 #[derive(Clone)]
 pub struct WebIdentityCredentials {
     token_file: PathBuf,
@@ -117,6 +120,58 @@ impl WebIdentityCredentials {
         self
     }
 
+    /// The STS endpoint of the role's partition (L8), always regional when a region is known:
+    ///
+    /// | Partition | Regional | FIPS | No region |
+    /// |---|---|---|---|
+    /// | `aws` | `sts.<r>.amazonaws.com` | `sts-fips.<r>.amazonaws.com` | `sts.amazonaws.com` |
+    /// | `aws-us-gov` | `sts.<r>.amazonaws.com` | `sts-fips.<r>.amazonaws.com` | — |
+    /// | `aws-cn` | `sts.<r>.amazonaws.com.cn` | — | — |
+    ///
+    /// The region must have the AWS region shape and belong to the partition; other partitions
+    /// and the cells marked — need `AWS_ENDPOINT_URL_STS` or [`endpoint`](Self::endpoint).
+    fn derived_endpoint(&self) -> Result<String> {
+        let partition = self
+            .role_arn
+            .strip_prefix("arn:")
+            .and_then(|r| r.split(':').next())
+            .filter(|p| crate::uri::partition_ok(p))
+            .ok_or_else(|| config_err("the web identity role is not an ARN"))?;
+        let fips = self.vars.flag("AWS_USE_FIPS_ENDPOINT")?.unwrap_or(false);
+        let region = self
+            .region
+            .as_deref()
+            .or_else(|| self.vars.get("AWS_REGION"))
+            .or_else(|| self.vars.get("AWS_DEFAULT_REGION"));
+        let none = |m: &'static str| {
+            Err(config_err(format!(
+                "{m}; configure the STS endpoint with AWS_ENDPOINT_URL_STS"
+            )))
+        };
+        let Some(r) = region else {
+            return match (partition, fips) {
+                ("aws", false) => Ok("https://sts.amazonaws.com".to_owned()),
+                (_, true) => none("the FIPS STS endpoint needs a region"),
+                _ => none("this partition has no global STS endpoint; set AWS_REGION"),
+            };
+        };
+        if !crate::uri::region_ok(r) {
+            return Err(config_err("malformed STS region"));
+        }
+        if !crate::uri::region_in_partition(partition, r) {
+            return Err(config_err(
+                "the STS region does not belong to the web identity role's partition",
+            ));
+        }
+        match (partition, fips) {
+            ("aws" | "aws-us-gov", false) => Ok(format!("https://sts.{r}.amazonaws.com")),
+            ("aws" | "aws-us-gov", true) => Ok(format!("https://sts-fips.{r}.amazonaws.com")),
+            ("aws-cn", false) => Ok(format!("https://sts.{r}.amazonaws.com.cn")),
+            ("aws-cn", true) => none("the aws-cn partition has no FIPS STS endpoints"),
+            _ => none("no built-in STS endpoint for this partition"),
+        }
+    }
+
     pub(crate) fn endpoint_url(&self, allow_loopback_http: bool) -> Result<anykms_http::url::Url> {
         let raw = match self
             .endpoint
@@ -124,29 +179,7 @@ impl WebIdentityCredentials {
             .or_else(|| self.vars.get("AWS_ENDPOINT_URL_STS"))
         {
             Some(e) => e.to_owned(),
-            None => match self
-                .region
-                .as_deref()
-                .or_else(|| self.vars.get("AWS_REGION"))
-                .or_else(|| self.vars.get("AWS_DEFAULT_REGION"))
-            {
-                Some(r) => {
-                    if !r
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                        || r.is_empty()
-                    {
-                        return Err(config_err("malformed STS region"));
-                    }
-                    let suffix = if r.starts_with("cn-") {
-                        "amazonaws.com.cn"
-                    } else {
-                        "amazonaws.com"
-                    };
-                    format!("https://sts.{r}.{suffix}")
-                }
-                None => "https://sts.amazonaws.com".to_owned(),
-            },
+            None => self.derived_endpoint()?,
         };
         crate::endpoint::validate_url(&raw, allow_loopback_http, "the STS endpoint")
     }
@@ -354,6 +387,77 @@ impl CredentialSource for WebIdentityCredentials {
 mod tests {
     use super::*;
 
+    /// L8: the derived STS endpoint has the region shape, the role ARN's partition suffix and
+    /// honours FIPS; anything without a built-in endpoint needs `AWS_ENDPOINT_URL_STS`.
+    #[test]
+    fn derives_sts_endpoints() {
+        fn ep(role: &str, vars: &[(&'static str, &'static str)]) -> Result<String> {
+            let vars = vars.to_vec();
+            WebIdentityCredentials::new("/t", role)
+                .with_vars(Vars::from_fn(move |k| {
+                    vars.iter()
+                        .find(|(n, _)| *n == k)
+                        .map(|(_, v)| (*v).to_owned())
+                }))
+                .endpoint_url(false)
+                .map(|u| u.to_string())
+        }
+        let aws = "arn:aws:iam::111122223333:role/app";
+        let gov = "arn:aws-us-gov:iam::111122223333:role/app";
+        let cn = "arn:aws-cn:iam::111122223333:role/app";
+        let iso = "arn:aws-iso:iam::111122223333:role/app";
+        let fips = ("AWS_USE_FIPS_ENDPOINT", "true");
+        fn ok(role: &str, vars: &[(&'static str, &'static str)]) -> String {
+            ep(role, vars).unwrap()
+        }
+        assert_eq!(ok(aws, &[]), "https://sts.amazonaws.com/");
+        assert_eq!(
+            ok(aws, &[("AWS_REGION", "eu-west-1")]),
+            "https://sts.eu-west-1.amazonaws.com/"
+        );
+        assert_eq!(
+            ok(aws, &[("AWS_DEFAULT_REGION", "eu-west-1")]),
+            "https://sts.eu-west-1.amazonaws.com/"
+        );
+        assert_eq!(
+            ok(cn, &[("AWS_REGION", "cn-north-1")]),
+            "https://sts.cn-north-1.amazonaws.com.cn/"
+        );
+        assert_eq!(
+            ok(gov, &[("AWS_REGION", "us-gov-west-1")]),
+            "https://sts.us-gov-west-1.amazonaws.com/"
+        );
+        assert_eq!(
+            ok(aws, &[("AWS_REGION", "us-east-1"), fips]),
+            "https://sts-fips.us-east-1.amazonaws.com/"
+        );
+        assert_eq!(
+            ok(gov, &[("AWS_REGION", "us-gov-west-1"), fips]),
+            "https://sts-fips.us-gov-west-1.amazonaws.com/"
+        );
+        // Not region-shaped: `s3` would be the virtual host of an S3 bucket named `sts`.
+        for r in ["s3", "sts", "a-b", "eu-west-01", "eu-west-1.x"] {
+            assert!(ep(aws, &[("AWS_REGION", r)]).is_err(), "{r}");
+        }
+        // The region must belong to the role's partition.
+        assert!(ep(aws, &[("AWS_REGION", "cn-north-1")]).is_err());
+        assert!(ep(cn, &[("AWS_REGION", "eu-west-1")]).is_err());
+        assert!(ep(aws, &[("AWS_REGION", "us-gov-west-1")]).is_err());
+        // Only `aws` has a global endpoint; FIPS needs a region; aws-cn has no FIPS STS.
+        assert!(ep(cn, &[]).is_err());
+        assert!(ep(gov, &[]).is_err());
+        assert!(ep(aws, &[fips]).is_err());
+        assert!(ep(cn, &[("AWS_REGION", "cn-north-1"), fips]).is_err());
+        // No built-in endpoint for other partitions, or for a role that is not an ARN.
+        assert!(ep(iso, &[("AWS_REGION", "us-iso-east-1")]).is_err());
+        assert!(ep("role/app", &[("AWS_REGION", "eu-west-1")]).is_err());
+        // An explicit endpoint wins.
+        assert_eq!(
+            ok(iso, &[("AWS_ENDPOINT_URL_STS", "https://sts.example")]),
+            "https://sts.example/"
+        );
+    }
+
     const OK: &str = "<AssumeRoleWithWebIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>ASIA1</AccessKeyId><SecretAccessKey>s+e/c&amp;r</SecretAccessKey><SessionToken>tok==</SessionToken><Expiration>2999-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>";
 
     #[test]
@@ -427,13 +531,9 @@ mod tests {
                 .as_str(),
             "https://sts.eu-west-1.amazonaws.com/"
         );
-        assert_eq!(
-            s(Some("cn-north-1"), None)
-                .endpoint_url(false)
-                .unwrap()
-                .as_str(),
-            "https://sts.cn-north-1.amazonaws.com.cn/"
-        );
+        // L8: an `aws` role is never sent to another partition's STS (the aws-cn case is in
+        // `derives_sts_endpoints`).
+        assert!(s(Some("cn-north-1"), None).endpoint_url(false).is_err());
         assert!(
             s(None, Some("http://127.0.0.1:9/"))
                 .endpoint_url(false)

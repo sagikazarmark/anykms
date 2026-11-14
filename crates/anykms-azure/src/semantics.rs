@@ -41,7 +41,8 @@ pub(crate) fn base(k: &KeyCtx) -> KeySemantics {
 pub(crate) fn digest(k: &KeyCtx, local: Option<Duration>) -> Arc<KeySemantics> {
     let s = base(k);
     Arc::new(match local {
-        Some(ttl) => s.with_verification(Verification::local(ttl.mul_f64(1.1))),
+        // The jitter adds at most 10 %; integer arithmetic, so no TTL can panic here.
+        Some(ttl) => s.with_verification(Verification::local(ttl.saturating_add(ttl / 10))),
         None => s,
     })
 }

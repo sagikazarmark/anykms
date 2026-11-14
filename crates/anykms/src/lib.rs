@@ -215,6 +215,13 @@ pub use anykms_transit as transit;
 /// takes a built-in scheme only while that backend is skipped (a registered one collides at
 /// `build`), or to a [`Registry::builder`] of your own, where every scheme is free.
 ///
+/// Every cloud provider registered here uses the ambient credentials and, without an
+/// `ANYKMS_*_ALLOWED_*` variable, accepts a key in any account, project or vault, including one
+/// an attacker owns. Because Cargo features unify, another crate in the build can turn a cloud
+/// backend on. An application that takes key URIs from anywhere it does not fully trust should
+/// name the backends it uses with [`DefaultProviders::only`] (or drop one with
+/// [`DefaultProviders::without`]) and set an allowlist on each cloud provider it keeps.
+///
 /// [`with_default_providers_from`] does the same with variables from a lookup function.
 pub fn with_default_providers() -> Result<DefaultProviders> {
     defaults(None)
@@ -223,8 +230,10 @@ pub fn with_default_providers() -> Result<DefaultProviders> {
 /// Like [`with_default_providers`], reading every variable from `lookup` instead of the process
 /// environment (`None` is unset). Each backend gets the lookup through its `from_env_with`, so
 /// variables a backend reads later (transit's `*_TOKEN`, GCP's Application Default Credentials
-/// variables) come from it too, and nothing falls back to the process environment. Files the
-/// variables name are still read from the file system.
+/// variables) come from it too. Files the variables name are still read from the file system.
+/// One exception: the default `ReqwestTransport` loads the system roots, and its TLS library
+/// reads `SSL_CERT_FILE` / `SSL_CERT_DIR` from the process environment (when set, only the files
+/// they name are trusted). Pass a backend a transport built with `ca_pem` to pin trust instead.
 ///
 /// ```no_run
 /// # fn demo() -> anykms::Result<()> {
@@ -261,6 +270,7 @@ fn defaults(lookup: Option<&Lookup>) -> Result<DefaultProviders> {
     let mut d = DefaultProviders {
         builder: Registry::builder(),
         claimed: Vec::new(),
+        defaults: Vec::new(),
         skipped: Vec::new(),
     };
     // One built-in transport for every HTTP backend (its TLS roots are loaded once).
@@ -469,6 +479,23 @@ pub enum SkipCause {
     /// The system trust store holds no usable root certificate, so a cloud provider cannot build
     /// its TLS client (see [`with_default_providers`]).
     TlsRoots,
+    /// The application removed the backend with [`DefaultProviders::only`] or
+    /// [`DefaultProviders::without`].
+    Excluded,
+}
+
+/// Refuses a backend name [`DefaultProviders::only`] or [`DefaultProviders::without`] does not
+/// know, whatever features are on, so that a typo cannot keep a provider registered.
+fn check_backends(names: &[&str]) -> Result<()> {
+    match names.iter().find(|n| !BACKENDS.contains(n)) {
+        None => Ok(()),
+        Some(n) => Err(Error::new(
+            ErrorKind::Configuration,
+            "registry",
+            Operation::Open,
+            format!("unknown default provider {n:?} (expected one of {BACKENDS:?})"),
+        )),
+    }
 }
 
 /// Without the `reqwest` feature the HTTP backends have no transport to be built on.
@@ -563,14 +590,49 @@ impl BuildProvider<anykms_azure::AzureProvider> for anykms_azure::AzureProviderB
 /// [`into_builder`](Self::into_builder) to build without placeholders.
 pub struct DefaultProviders {
     builder: RegistryBuilder,
+    /// Schemes of the providers added with [`DefaultProviders::provider`].
     claimed: Vec<&'static str>,
+    /// The default providers registered from the environment, kept apart until `build` so that
+    /// [`DefaultProviders::only`] and [`DefaultProviders::without`] can still drop them.
+    defaults: Vec<DefaultProvider>,
     skipped: Vec<SkippedProvider>,
 }
+
+/// A default provider [`with_default_providers`] registered: its backend name and schemes.
+#[cfg_attr(
+    not(any(
+        all(feature = "transit", feature = "reqwest"),
+        feature = "aws",
+        feature = "gcp",
+        feature = "azure"
+    )),
+    allow(dead_code, reason = "registered only with a backend feature")
+)]
+struct DefaultProvider {
+    backend: &'static str,
+    schemes: &'static [&'static str],
+    provider: std::sync::Arc<dyn Provider>,
+}
+
+/// The backend names [`DefaultProviders::only`] and [`DefaultProviders::without`] accept, whether or
+/// not their feature is on.
+const BACKENDS: &[&str] = &["transit", "aws", "gcp", "azure"];
+
+/// The skip reason of a backend [`DefaultProviders::only`] or [`DefaultProviders::without`] removed.
+const EXCLUDED: &str = "excluded by the application (DefaultProviders::only or without)";
 
 impl std::fmt::Debug for DefaultProviders {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultProviders")
-            .field("schemes", &self.claimed)
+            .field(
+                "schemes",
+                &self
+                    .defaults
+                    .iter()
+                    .flat_map(|d| d.schemes.iter())
+                    .chain(&self.claimed)
+                    .collect::<Vec<_>>(),
+            )
             .field("skipped", &self.skipped)
             .finish()
     }
@@ -626,7 +688,79 @@ impl DefaultProviders {
         let provider = anykms_transit::TransitProvider::builder()
             .server("default", server)
             .build()?;
-        Ok(self.provider(provider))
+        Ok(self.register("transit", anykms_transit::SCHEMES, provider))
+    }
+
+    /// Registers a default provider, which [`only`](Self::only) and [`without`](Self::without)
+    /// can still remove.
+    #[cfg(any(
+        all(feature = "transit", feature = "reqwest"),
+        feature = "aws",
+        feature = "gcp",
+        feature = "azure"
+    ))]
+    fn register(
+        mut self,
+        backend: &'static str,
+        schemes: &'static [&'static str],
+        provider: impl Provider + 'static,
+    ) -> Self {
+        self.defaults.push(DefaultProvider {
+            backend,
+            schemes,
+            provider: std::sync::Arc::new(provider),
+        });
+        self
+    }
+
+    /// Keeps only the named default providers (`"transit"`, `"aws"`, `"gcp"`, `"azure"`) and
+    /// removes the others, whatever features the build graph turned on: opening a key of a removed
+    /// backend's scheme then fails with `Configuration` before any I/O, as for a backend whose
+    /// feature is off. A removed backend is listed by [`skipped`](Self::skipped) with
+    /// [`SkipCause::Excluded`]. Providers added with [`provider`](Self::provider) are not affected.
+    ///
+    /// Cargo features unify across the dependency graph, so a crate elsewhere in the build can
+    /// compile a cloud backend into an application that never meant to use one. Every cloud
+    /// default provider is registered with ambient credentials and, unless an
+    /// `ANYKMS_*_ALLOWED_*` variable says otherwise, accepts any key in any account, project or
+    /// vault. An application that takes key URIs from anywhere it does not fully trust (a request,
+    /// a database row next to a ciphertext, a tenant's configuration) should name its backends
+    /// here, and configure an allowlist on the cloud providers it keeps.
+    ///
+    /// An unknown name is a `Configuration` error, so a typo cannot keep a provider registered.
+    ///
+    /// ```no_run
+    /// # fn demo() -> anykms::Result<()> {
+    /// let registry = anykms::with_default_providers()?.only(&["transit"])?.build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn only(self, backends: &[&str]) -> Result<Self> {
+        check_backends(backends)?;
+        Ok(self.exclude(|b| !backends.contains(&b)))
+    }
+
+    /// Removes the named default provider (`"transit"`, `"aws"`, `"gcp"` or `"azure"`); the
+    /// opposite of [`only`](Self::only), with the same effect on the removed backend. An unknown
+    /// name is a `Configuration` error.
+    pub fn without(self, backend: &str) -> Result<Self> {
+        check_backends(&[backend])?;
+        Ok(self.exclude(|b| b == backend))
+    }
+
+    fn exclude(mut self, drop: impl Fn(&str) -> bool) -> Self {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.defaults)
+            .into_iter()
+            .partition(|d| drop(d.backend));
+        self.defaults = kept;
+        for d in gone {
+            self.skipped.push(SkippedProvider {
+                backend: d.backend,
+                cause: SkipCause::Excluded,
+                reason: EXCLUDED,
+                schemes: d.schemes,
+            });
+        }
+        self
     }
 
     /// Registers a cloud provider configured from the environment (`builder`) over the shared
@@ -659,7 +793,7 @@ impl DefaultProviders {
         };
         match shared {
             SharedTransport::Ready(t) => {
-                Ok(self.provider(with(builder, t.clone()).build_provider()?))
+                Ok(self.register(backend, schemes, with(builder, t.clone()).build_provider()?))
             }
             // Only the built-in transport can fail for want of roots.
             #[cfg(feature = "reqwest")]
@@ -667,7 +801,7 @@ impl DefaultProviders {
                 cause: SkipCause::TlsRoots,
                 reason,
             } => match builder.build_provider() {
-                Ok(p) => Ok(self.provider(p)),
+                Ok(p) => Ok(self.register(backend, schemes, p)),
                 Err(e) if anykms_http::tls::is_missing_system_roots(&e) => {
                     Ok(skip(self, SkipCause::TlsRoots, reason))
                 }
@@ -679,13 +813,20 @@ impl DefaultProviders {
 
     /// The plain builder, without placeholders for skipped providers.
     pub fn into_builder(self) -> RegistryBuilder {
-        self.builder
+        let mut b = self.builder;
+        for d in self.defaults {
+            b = b.provider_arc(d.provider);
+        }
+        b
     }
 
     /// Builds the registry ([`RegistryBuilder::build`]), with placeholders that explain skipped
     /// providers.
     pub fn build(self) -> Result<Registry> {
         let mut b = self.builder;
+        for d in self.defaults {
+            b = b.provider_arc(d.provider);
+        }
         for s in self.skipped {
             let schemes: Vec<&'static str> = s
                 .schemes
@@ -708,6 +849,11 @@ struct Unconfigured {
 }
 
 impl Unconfigured {
+    /// The skip reason, naming the scheme only (`hashivault:`), as the registry does for a
+    /// scheme with no provider. A placeholder does not know its backend's grammar, so it cannot
+    /// tell which parts of the URI are safe to echo (transit, say, redacts an authority that is
+    /// not a configured server alias, since it may be a pasted token); left unnamed, the
+    /// registry would label the error with the whole URI.
     fn err<T>(&self, uri: &KeyUri) -> Result<T> {
         Err(Error::new(
             ErrorKind::Configuration,
@@ -719,7 +865,8 @@ impl Unconfigured {
                 self.skip.backend,
                 self.skip.reason
             ),
-        ))
+        )
+        .with_resource(format!("{}:", uri.scheme())))
     }
 }
 
@@ -784,6 +931,7 @@ mod tests {
         DefaultProviders {
             builder: Registry::builder(),
             claimed: Vec::new(),
+            defaults: Vec::new(),
             skipped: vec![SkippedProvider {
                 backend: "transit",
                 reason: "VAULT_ADDR/BAO_ADDR not set",
@@ -840,6 +988,65 @@ mod tests {
         assert_eq!(r.schemes().count(), 0);
     }
 
+    /// A placeholder names only the scheme of a URI it refuses: it does not know its backend's
+    /// grammar, and transit's authority may be a pasted token that fits the alias grammar. Holds
+    /// for a skipped backend and an excluded one, for every open method and `pin`.
+    #[test]
+    fn placeholder_errors_name_only_the_scheme() {
+        let excluded = DefaultProviders {
+            builder: Registry::builder(),
+            claimed: Vec::new(),
+            defaults: vec![DefaultProvider {
+                backend: "transit",
+                schemes: &["hashivault", "openbao"],
+                provider: Arc::new(Claims(&["hashivault", "openbao"])),
+            }],
+            skipped: Vec::new(),
+        }
+        .without("transit")
+        .unwrap();
+        assert_eq!(excluded.skipped()[0].cause(), SkipCause::Excluded);
+        let s = SignatureAlgorithm::EcdsaP256Sha256;
+        let m = SignatureAlgorithm::Ed25519;
+        for (d, why) in [
+            (skipped_transit(), "VAULT_ADDR/BAO_ADDR not set"),
+            (excluded, "excluded by the application"),
+        ] {
+            let r = d.build().unwrap();
+            for (uri, scheme) in [
+                ("hashivault://SECRET_TOKEN/transit/keys/k", "hashivault:"),
+                (
+                    "openbao://SECRET_TOKEN/transit/keys/k?namespace=a",
+                    "openbao:",
+                ),
+                (
+                    "hashivault://hvs.SECRET_TOKEN@vault/transit/keys/k",
+                    "hashivault:",
+                ),
+            ] {
+                for e in [
+                    r.pin(uri, &KeyVersion::new("1")).unwrap_err(),
+                    r.aead(uri).unwrap_err(),
+                    r.key_wrap(uri).unwrap_err(),
+                    r.data_keys(uri).unwrap_err(),
+                    r.digest_signer(uri, s).unwrap_err(),
+                    r.digest_verifier(uri, s).unwrap_err(),
+                    r.message_signer(uri, m).unwrap_err(),
+                    r.message_verifier(uri, m).unwrap_err(),
+                    r.mac(uri, MacAlgorithm::HmacSha256).unwrap_err(),
+                    r.public_keys(uri, s).unwrap_err(),
+                    r.describe(uri).unwrap_err(),
+                ] {
+                    assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
+                    assert!(e.message().contains(why), "{e}");
+                    assert_eq!(e.resource(), Some(scheme), "{e}");
+                    let shown = format!("{e}\n{e:?}");
+                    assert!(!shown.contains("SECRET_TOKEN"), "{uri}: {shown}");
+                }
+            }
+        }
+    }
+
     /// Runs the calling test `name` (without the `tests::` prefix) again in a child process whose
     /// environment holds only `vars` (plus what a process needs to start), and runs `body` there:
     /// [`with_default_providers`] reads the process environment, which tests may not change
@@ -878,13 +1085,19 @@ mod tests {
     /// Azure is not under test: keeps an Azure build without credentials out of the way.
     const NO_AZURE: (&str, &str) = ("ANYKMS_AZURE_CREDENTIAL", "none");
 
-    /// Opening `uri` from the default registry fails with `Configuration` containing `needle`.
+    /// Opening `uri` from the default registry fails with `Configuration` containing `needle`,
+    /// naming only the scheme of the URI.
     fn open_explains(d: DefaultProviders, uri: &str, needle: &str) {
         let r = d.build().unwrap();
         let uri: KeyUri = uri.parse().unwrap();
         let e = r.aead(&uri).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::Configuration, "{e}");
         assert!(e.to_string().contains(needle), "{e}");
+        assert_eq!(
+            e.resource(),
+            Some(format!("{}:", uri.scheme()).as_str()),
+            "{e}"
+        );
     }
 
     // Unused in some feature combinations (e.g. `gcp` without a `rustls-*` feature).
@@ -1365,5 +1578,65 @@ mod tests {
             assert_eq!(e.backend(), "transit", "{e}");
             assert!(e.message().contains("no trusted CA certificates"), "{e}");
         });
+    }
+
+    /// L7: an application that only wants transit must be able to keep the cloud providers its
+    /// build graph compiled in from opening attacker-chosen keys.
+    #[cfg(all(feature = "aws", feature = "reqwest"))]
+    #[test]
+    fn l7_excluded_cloud_provider_fails_closed() {
+        const FOREIGN: &str =
+            "aws-kms://arn:aws:kms:us-east-1:999999999999:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+        for d in [
+            with_default_providers_from(lookup(&[NO_AZURE]))
+                .unwrap()
+                .only(&["transit"])
+                .unwrap(),
+            with_default_providers_from(lookup(&[NO_AZURE]))
+                .unwrap()
+                .without("aws")
+                .unwrap(),
+        ] {
+            let s = d.skipped().iter().find(|s| s.backend() == "aws").unwrap();
+            assert_eq!(s.cause(), SkipCause::Excluded);
+            assert_eq!(s.schemes(), ["aws-kms"]);
+            // The placeholder fails every open with `Configuration`: no handle, so no I/O.
+            open_explains(d, FOREIGN, "(aws: excluded by the application");
+        }
+        // `only` keeps the named backend.
+        let r = with_default_providers_from(lookup(&[NO_AZURE]))
+            .unwrap()
+            .only(&["aws"])
+            .unwrap()
+            .build()
+            .unwrap();
+        r.aead(FOREIGN).unwrap();
+        assert!(
+            r.aead(GCP_URI)
+                .unwrap_err()
+                .to_string()
+                .contains("excluded by the application"),
+        );
+        // A provider added after `without` may take the scheme.
+        let r = with_default_providers_from(lookup(&[NO_AZURE]))
+            .unwrap()
+            .without("aws")
+            .unwrap()
+            .provider(Claims(&["aws-kms"]))
+            .build()
+            .unwrap();
+        assert_eq!(r.aead(FOREIGN).unwrap_err().kind(), ErrorKind::Unsupported);
+        // A typo fails closed instead of keeping the provider.
+        let e = with_default_providers_from(lookup(&[NO_AZURE]))
+            .unwrap()
+            .without("asw")
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Configuration);
+        assert!(
+            with_default_providers_from(lookup(&[NO_AZURE]))
+                .unwrap()
+                .only(&["aws", "vault"])
+                .is_err()
+        );
     }
 }

@@ -145,8 +145,13 @@ pub(crate) async fn malformed<F: Fixture>(c: Ctx<F>, alg: SignatureAlgorithm) ->
             x.to_le_bytes()[0]
         })
         .collect();
-    let candidates: [(&str, Vec<u8>); 3] = [
+    // The real signature plus one byte: for ECDSA, valid DER followed by extra data (which a
+    // server may report with its own message, e.g. Vault's "contains extra data").
+    let mut trailing = sig.as_bytes().to_vec();
+    trailing.push(0x00);
+    let candidates: [(&str, Vec<u8>); 4] = [
         ("garbage bytes", garbage),
+        ("the signature plus a trailing byte", trailing),
         // A DER SEQUENCE header whose length runs past the end.
         ("truncated DER", vec![0x30, 0x45, 0x02, 0x21, 0x00]),
         ("a single zero byte", vec![0x00]),
@@ -352,6 +357,135 @@ pub(crate) async fn rejected_before_io<F: Fixture>(
         "the fixture's request counter did not count a real request"
     );
     Ok(())
+}
+
+/// Another key's valid signature does not verify with this key's backend verifier: a backend must
+/// bind verification to the key it opened. Checked twice: with the other key's own version label
+/// (which a backend whose labels name the key, AWS's key ARN or Azure's per-key version ids, may
+/// refuse before looking at the bytes), and relabeled with this key's own current version, so the
+/// bytes reach the cryptographic check: a backend that checks the label but verifies with another
+/// key fails the second. Where both keys label their signatures alike (a version number on both,
+/// or no label), the first check already reaches the bytes.
+pub(crate) async fn other_keys_signature<F: Fixture>(
+    c: Ctx<F>,
+    alg: SignatureAlgorithm,
+) -> CaseResult {
+    let [key, other] = two(c.keys(TestKeyKind::Signing(alg), 2).await?);
+    let mine = sign(&c, &key, alg, MSG).await.ctx("sign with the key")?;
+    let theirs = sign(&c, &other, alg, MSG)
+        .await
+        .ctx("sign with another key")?;
+    verify(&c, &other, alg, MSG, &theirs)
+        .await
+        .ctx("the other key verifies its own signature")?;
+    let refused = async |sig: &Signature, what: &str| -> CaseResult {
+        let e = expect_kind(
+            verify(&c, &key, alg, MSG, sig).await,
+            ErrorKind::VerificationFailed,
+            what,
+        )?;
+        ensure!(e.is_caller_error(), "{what}: {e} is not a caller error");
+        Ok(())
+    };
+    refused(&theirs, "another key's valid signature").await?;
+    if theirs.key_version() != mine.key_version() {
+        let relabeled =
+            Signature::from_parts(alg, mine.key_version().cloned(), theirs.as_bytes().to_vec());
+        refused(
+            &relabeled,
+            "another key's valid signature, relabeled with this key's version",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The algorithms one key of `alg` may also be opened as on some backends (AWS, transit and
+/// Azure RSA keys sign with either padding and any hash): the other padding with the same hash,
+/// and the same padding with another hash. Empty where the key type fixes the algorithm.
+pub(crate) fn substitutes(alg: SignatureAlgorithm) -> Vec<SignatureAlgorithm> {
+    use SignatureAlgorithm::{
+        RsaPkcs1v15Sha256, RsaPkcs1v15Sha384, RsaPkcs1v15Sha512, RsaPssSha256, RsaPssSha384,
+        RsaPssSha512,
+    };
+    match alg {
+        RsaPssSha256 => vec![RsaPkcs1v15Sha256, RsaPssSha512],
+        RsaPssSha384 => vec![RsaPkcs1v15Sha384, RsaPssSha256],
+        RsaPssSha512 => vec![RsaPkcs1v15Sha512, RsaPssSha256],
+        RsaPkcs1v15Sha256 => vec![RsaPssSha256, RsaPkcs1v15Sha512],
+        RsaPkcs1v15Sha384 => vec![RsaPssSha384, RsaPkcs1v15Sha256],
+        RsaPkcs1v15Sha512 => vec![RsaPssSha512, RsaPkcs1v15Sha256],
+        _ => Vec::new(),
+    }
+}
+
+/// A signature made with `alg`, relabeled as a sibling algorithm the same key could be opened as
+/// ([`substitutes`]) and verified by a verifier opened for that algorithm, is refused: a backend
+/// that leaves the padding or hash to a server default (or to the key's default) would accept a
+/// PSS signature as PKCS#1 v1.5 or the reverse. Refusing to open the key for the sibling
+/// (`KeyMismatch`) is as good as a verification failure.
+///
+/// For a sibling with another hash, the signature is checked against two digests of that hash's
+/// length: the message's own, and one that starts with the signed digest ([`same_prefix`]). A
+/// verifier that ignores the digest's hash and verifies its first bytes as the key's hash
+/// refuses the first (it shares no bytes with the signed digest) but accepts the second.
+pub(crate) async fn algorithm_substitution<F: Fixture>(
+    c: Ctx<F>,
+    alg: SignatureAlgorithm,
+) -> CaseResult {
+    let key = c.key(TestKeyKind::Signing(alg)).await?;
+    let hash = alg.hash().expect("digest algorithm");
+    let sig = sign(&c, &key, alg, MSG).await.ctx("sign")?;
+    let signed = Digest::compute(hash, MSG);
+    for wrong in substitutes(alg) {
+        let relabeled =
+            Signature::from_parts(wrong, sig.key_version().cloned(), sig.as_bytes().to_vec());
+        let wrong_hash = wrong.hash().expect("digest algorithm");
+        let mut digests = vec![("the message's digest", Digest::compute(wrong_hash, MSG))];
+        if wrong_hash != hash {
+            digests.push((
+                "a digest that starts with the signed one",
+                same_prefix(&signed, wrong_hash),
+            ));
+        }
+        for (what, d) in digests {
+            let r = match c.digest_verifier(&key.uri, wrong) {
+                Ok(v) => v.verify_digest(&d, &relabeled).await,
+                Err(e) => Err(e),
+            };
+            match r {
+                Ok(()) => {
+                    return Err(format!(
+                        "a {alg} signature verified as {wrong} on the same key, over {what}"
+                    ));
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::VerificationFailed | ErrorKind::KeyMismatch
+                    ) => {}
+                Err(e)
+                    if e.kind() == ErrorKind::Unsupported
+                        && !c.caps.has(Feature::Signing(wrong)) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "{alg} signature verified as {wrong} over {what}: expected \
+                         verification_failed or key_mismatch, got {}: {e}",
+                        e.kind()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A digest of `hash` whose bytes are `signed`'s, cut or padded (with `0xa5`) to `hash`'s
+/// length: what a verifier that ignores the digest's hash would take for `signed`.
+fn same_prefix(signed: &Digest, hash: HashAlgorithm) -> Digest {
+    let mut bytes = signed.as_bytes().to_vec();
+    bytes.resize(hash.output_len(), 0xa5);
+    Digest::new(hash, &bytes).expect("sized to the hash")
 }
 
 /// An algorithm of a different key family than `alg` (another curve for P-384 and P-521, ECDSA
@@ -852,4 +986,152 @@ pub(crate) async fn version_algorithms<F: Fixture>(c: Ctx<F>) -> CaseResult {
         info.versions()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anykms_core::{
+        Digest, DigestSigner, DigestVerifier, Error, ErrorKind, HashAlgorithm, KeyUri, KeyVersion,
+        Operation, Provider, PublicKey, PublicKeys, Registry, Result, Signature,
+        SignatureAlgorithm,
+    };
+
+    use crate::ctx::{Ctx, Path};
+    use crate::{
+        DigestKeyHandles, Fixture, FixtureCaps, KeyUse, TestKey, TestKeyKind, TypedHandles,
+    };
+
+    /// The padding byte a fake signature starts with.
+    fn padding(alg: SignatureAlgorithm) -> u8 {
+        u8::from(matches!(
+            alg,
+            SignatureAlgorithm::RsaPssSha256
+                | SignatureAlgorithm::RsaPssSha384
+                | SignatureAlgorithm::RsaPssSha512
+        ))
+    }
+
+    /// A fake RSA key: a signature is the padding byte, then the digest. Opened as `opened`;
+    /// its own hash is `own`.
+    struct FakeKey {
+        opened: SignatureAlgorithm,
+        own: HashAlgorithm,
+        /// Verifies as `own` whatever the digest's hash: the first bytes of any digest.
+        ignores_hash: bool,
+    }
+
+    impl DigestSigner for FakeKey {
+        fn signature_algorithm(&self) -> SignatureAlgorithm {
+            self.opened
+        }
+
+        async fn sign_digest(&self, digest: &Digest) -> Result<Signature> {
+            let mut bytes = vec![padding(self.opened)];
+            bytes.extend_from_slice(digest.as_bytes());
+            Ok(Signature::from_parts(self.opened, None, bytes))
+        }
+    }
+
+    impl DigestVerifier for FakeKey {
+        async fn verify_digest(&self, digest: &Digest, sig: &Signature) -> Result<()> {
+            let signed = if self.ignores_hash {
+                digest.as_bytes().get(..self.own.output_len())
+            } else {
+                Some(digest.as_bytes())
+            };
+            let ok = signed
+                .is_some_and(|d| sig.as_bytes().split_first() == Some((&padding(self.opened), d)));
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::new(
+                    ErrorKind::VerificationFailed,
+                    "fake",
+                    Operation::Verify,
+                    "signature mismatch",
+                ))
+            }
+        }
+    }
+
+    impl PublicKeys for FakeKey {
+        async fn public_key(&self) -> Result<PublicKey> {
+            unimplemented!()
+        }
+
+        async fn public_key_version(&self, _: &KeyVersion) -> Result<PublicKey> {
+            unimplemented!()
+        }
+    }
+
+    struct Fake {
+        ignores_hash: bool,
+    }
+
+    impl TypedHandles for Fake {
+        fn digest_key(&self, _: &KeyUri, alg: SignatureAlgorithm) -> Result<DigestKeyHandles> {
+            Ok(DigestKeyHandles::bridge_without_describe(Arc::new(
+                FakeKey {
+                    opened: alg,
+                    own: HashAlgorithm::Sha256,
+                    ignores_hash: self.ignores_hash,
+                },
+            )))
+        }
+    }
+
+    struct FakeFixture;
+
+    impl Fixture for FakeFixture {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn probe(&self) -> FixtureCaps {
+            FixtureCaps::new()
+        }
+
+        async fn create_key(&self, kind: TestKeyKind, _: KeyUse) -> Result<TestKey> {
+            Ok(TestKey::new(KeyUri::parse("fake://k").unwrap(), "k", kind))
+        }
+
+        fn missing_key_uri(&self, _: TestKeyKind) -> KeyUri {
+            unimplemented!()
+        }
+
+        fn provider(&self) -> Arc<dyn Provider> {
+            unimplemented!()
+        }
+
+        fn typed(&self) -> Arc<dyn TypedHandles> {
+            unimplemented!()
+        }
+    }
+
+    async fn run(ignores_hash: bool) -> std::result::Result<(), String> {
+        let c = Ctx::new(
+            Arc::new(FakeFixture),
+            Arc::new(FixtureCaps::new()),
+            Registry::builder().build().unwrap(),
+            Arc::new(Fake { ignores_hash }),
+            Path::Typed,
+            anykms_core::instant_sleep(),
+        );
+        super::algorithm_substitution(c, SignatureAlgorithm::RsaPssSha256).await
+    }
+
+    /// A verifier that ignores the digest's hash (verifying the first bytes of any digest as the
+    /// key's own hash) is caught: a SHA-512 digest that starts with the signed SHA-256 one
+    /// verifies. A verifier that checks the hash passes.
+    #[tokio::test]
+    async fn algorithm_substitution_catches_a_verifier_that_ignores_the_hash() {
+        let e = run(true).await.unwrap_err();
+        assert!(
+            e.contains("a digest that starts with the signed one"),
+            "{e}"
+        );
+        run(false).await.unwrap();
+    }
 }

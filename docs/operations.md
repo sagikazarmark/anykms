@@ -4,6 +4,12 @@ This guide is for whoever runs the Vault/OpenBao servers and the services that c
 behavior below was verified against Vault 1.20/2.1 and OpenBao 2.4/2.7 (see
 `research/vault-openbao-transit.md`).
 
+**Minimum server version: Vault 1.13** (any OpenBao release). Transit `encrypt`/`decrypt` take
+the AAD as `associated_data` only since Vault 1.13. Vault 1.11 and 1.12 ignore the parameter but
+warn about it, so anykms fails closed (`Unsupported`); Vault 1.10 and older ignore it silently,
+so a non-empty AAD would not be bound to the ciphertext. anykms does not check the server
+version: do not point it at Vault older than 1.13.
+
 For the cloud backends, see [operations-aws.md](operations-aws.md) (AWS KMS),
 [operations-gcp.md](operations-gcp.md) (Google Cloud KMS) and
 [operations-azure.md](operations-azure.md) (Azure Key Vault and Managed HSM).
@@ -185,14 +191,22 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
   version are settings of the HTTP transport, not of `ServerConfig`: build a
   `ReqwestTransport` (`anykms_transit::anykms_http::ReqwestTransport::builder()`) and pass it to
   `ServerConfig::http_transport`, or bring any `HttpTransport`. One transport may serve several
-  servers and providers. Without one, a default `ReqwestTransport` (system roots) is built.
+  servers and providers. Without one, a default `ReqwestTransport` (system roots) is built. The
+  system roots are the platform store, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is set: then only
+  the files they name are trusted. Set `ca_pem` (or `VAULT_CACERT`) to pin trust in code.
 - `ReqwestTransportBuilder::ca_pem`, and `VAULT_CACERT` / `VAULT_CAPATH` through `EnvConfig`
   (which builds the transport from them), **replace** the system roots. `VAULT_CAPATH` is a
   directory of PEM files (symlinks followed, subdirectories skipped); every file must hold a
   certificate, and `VAULT_CACERT` wins when both are set, as in the Vault CLI.
   `VAULT_CLIENT_CERT` and `VAULT_CLIENT_KEY` configure the client certificate the same way. There
   is no way to skip verification, and `*_SKIP_VERIFY=true` makes `from_env` fail. A transport
-  passed to a `ServerConfig` loaded by `EnvConfig` replaces the one built from the variables.
+  passed to a `ServerConfig` loaded by `EnvConfig` replaces the one built from the variables,
+  dropping their CA and client certificate (a `warn` event with the `tracing` feature): build
+  your own transport from `EnvConfig::tls()` (`EnvTls::into_transport_builder`) to keep them.
+  `VAULT_CACERT`, `VAULT_CAPATH` files and `VAULT_CLIENT_CERT` are read with a 4 MiB bound
+  (16 MiB for a whole `VAULT_CAPATH`), only as regular files; `VAULT_CLIENT_KEY` (1 MiB) must not
+  be group- or world-accessible, as for token files
+  (`ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE=1` accepts one).
 - TLS failures are classified: a rejected server certificate (`TLS certificate rejected: unknown
   issuer`, `name mismatch`, `expired`, ...) or a client certificate the server refuses is
   `Configuration` and is not retried. `DNS lookup failed` stays `Unavailable` (resolver outages
@@ -217,7 +231,7 @@ needs cannot be steered elsewhere by any key URI; a broadly privileged token can
 | Vault/Bao Agent sink file | `VAULT_TOKEN_FILE=/vault/secrets/token` (anykms-specific) or `ServerConfig::token_file` |
 | Agent API proxy (`use_auto_auth_token`) | `VAULT_ADDR=http://127.0.0.1:8100` and `ANYKMS_TRANSIT_NO_TOKEN=1` (`EnvConfig::no_token`, `ServerConfig::no_token`) |
 | Static token | `VAULT_TOKEN` (read on every request) |
-| OpenBao (`from_env_openbao`) | with `BAO_ADDR`: `BAO_TOKEN`, then `BAO_TOKEN_FILE` (anykms-specific), then `~/.bao-token`, `~/.vault-token`; with only `VAULT_ADDR`: the `VAULT_*` equivalents |
+| OpenBao (`from_env_openbao`) | with `BAO_ADDR`: `BAO_TOKEN`, then `BAO_TOKEN_FILE` (anykms-specific), then `~/.bao-token`, `~/.vault-token`; with only `VAULT_ADDR`: the `VAULT_*` equivalents (home file: only `~/.vault-token`) |
 | Developer machine | `~/.vault-token` (disable with `EnvConfig::vault().no_home_token()`) |
 | Kubernetes auth (renewed) | `ANYKMS_TRANSIT_AUTH=kubernetes`, `ANYKMS_TRANSIT_AUTH_ROLE=<role>` or `ServerConfig::login(Login::kubernetes(role))` |
 | JWT auth (renewed) | `ANYKMS_TRANSIT_AUTH=jwt`, `ANYKMS_TRANSIT_AUTH_ROLE=<role>`, `ANYKMS_TRANSIT_AUTH_JWT_FILE=<path>` or `ServerConfig::login(Login::jwt(role, path))` |
@@ -246,10 +260,13 @@ token source is found**, listing the variables and files it checked; without a t
 would fail with `PermissionDenied`. Behind an Agent API proxy, opt out explicitly with
 `ANYKMS_TRANSIT_NO_TOKEN=1` or `EnvConfig::no_token()`.
 
-OpenBao reads every setting (token, namespace, CA, client certificate) from the prefix that
-supplied the address, so a token is never sent to an address configured under the other prefix:
-with `BAO_ADDR` all `VAULT_*` variables are ignored; with only `VAULT_ADDR`, a `BAO_*` setting
-(for example a stray `BAO_TOKEN`) makes loading fail.
+OpenBao reads every setting (token, namespace, CA, client certificate, home token file) from the
+prefix that supplied the address, so a token variable or `~/.bao-token` is never sent to an
+address configured under the other prefix: with `BAO_ADDR` all `VAULT_*` variables are ignored;
+with only `VAULT_ADDR`, a `BAO_*` setting (for example a stray `BAO_TOKEN`) makes loading fail,
+and `~/.bao-token` is not read. `~/.vault-token` is the exception by design: it is the CLI token
+file both tools write (`vault login` and `bao login`), so with `BAO_ADDR` it is still the last
+fallback.
 
 `with_default_providers()` skips transit when neither `VAULT_ADDR` nor `BAO_ADDR` is set. The
 skip is reported by `DefaultProviders::skipped()` (`SkipCause::NotConfigured`) and logged with the
@@ -340,7 +357,7 @@ settings on `RetryPolicy`.
 | `pool_idle_timeout` | 50 s | below common load-balancer idle timeouts |
 | `tcp_keepalive` | 30 s | |
 | `http2` | off | HTTP/2 multiplexes onto one node behind a load balancer; it is negotiated over TLS only (needs the `http2` feature), so plain-HTTP loopback servers always use HTTP/1.1 |
-| `proxy` | none | environment proxy variables are ignored; link-local and loopback hosts are never proxied |
+| `proxy` | none | `http://` or `https://` with a host (another scheme fails the build); carries HTTPS only (a `CONNECT` tunnel): plain-HTTP requests, such as the cloud metadata and credential endpoints, always connect directly, and link-local and loopback hosts are never proxied; environment proxy variables are ignored |
 | `RetryPolicy` attempts / backoff | 6 / 300 ms base, 5 s cap, equal jitter | the 5 retries wait 4.65–9.3 s in total, which spans a leader step-down (see "Failover" below) |
 | `RetryPolicy` deadline | 15 s | across attempts (see `RetryPolicy`) |
 
@@ -447,14 +464,16 @@ failing one is obvious:
 
 ```text
 transit decrypt [hashivault://default/transit/keys/app-kek]: not_found: key not found (http 400) (server: "encryption key not found")
-transit open [hashivault://prod/transit/keys/app-kek]: configuration: unknown server alias
+transit open [hashivault://<redacted>/transit/keys/app-kek]: configuration: unknown server alias
 ```
 
 The resource is `<scheme>://<server alias>/<mount>/keys/<name>`, with ` (namespace <ns>)` when a
-namespace applies; it never holds a query string or token. File-related configuration errors
-name the path and the reason (`cannot read the CA certificate file /etc/vault/ca.pem
-(VAULT_CACERT): No such file or directory`). Vault and OpenBao return no request id on error
-responses (neither in the body nor in a header), so transit errors carry none.
+namespace applies; it never holds a query string or token. An authority that is not a configured
+server alias shows as `<redacted>` (it may be a pasted token, even one that looks like an
+alias). File-related configuration errors name the path and the reason (`cannot read the CA
+certificate file /etc/vault/ca.pem (VAULT_CACERT): No such file or directory`). Vault and OpenBao
+return no request id on error responses (neither in the body nor in a header), so transit errors
+carry none.
 
 | ErrorKind | Class | Likely cause | Action |
 |---|---|---|---|
@@ -547,9 +566,13 @@ transport you pass to the providers, or wrap the call in `tokio::time::timeout`.
 | `e.is_config_error()` | 500 | an operator must act. `NotFound` here is a configured key or mount that does not exist, not a missing resource of the request: never 404. `Unauthenticated` is the service's own KMS credential, never the client's: 500, not 401 |
 
 A hinted error that keeps coming back is the permanent condition (a key that does not exist):
-alert on its rate as for its class. A forged `kid`, above the latest version or naming a version
-or key that does not exist, is a caller error (401 when verifying a token), not a 503, and costs
-no backend request through `CachedVerifier` with its version checks on. A token naming a version
+alert on its rate as for its class. A forged `kid` above the latest version, or naming a version
+or key that does not exist, is a caller error (401 when verifying a token), not a 503. Through
+`CachedVerifier` with its version checks on, a numeric version above the latest costs no backend
+request; any other version it cannot rule out (a version below the latest that does not exist,
+any version of a source without numeric versions such as Azure, or with the checks off) costs one
+lookup per version per negative TTL (5 s by default), as does a disabled version
+(`KeyVersionUnusable`). A token naming a version
 the backend no longer publishes (below `min_decryption_version`) fails through `CachedVerifier`
 with `VerificationFailed` (the source's `UnknownKeyVersion`) or `KeyVersionUnusable`, both 401.
 Do not send `Display` output to clients: it names the backend, key URI and mount.

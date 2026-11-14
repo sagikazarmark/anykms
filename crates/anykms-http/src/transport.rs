@@ -57,6 +57,24 @@ pub trait HttpTransport: Send + Sync + 'static {
     fn ready(&self) -> Result<(), SendError> {
         Ok(())
     }
+
+    /// How long a caller that waits for another caller's request (a follower in a backend's
+    /// single-flight credential or metadata cache, see [`SingleFlight`](crate::cache::SingleFlight))
+    /// lets that request go unpolled before sending its own, and how to sleep for it. A leader
+    /// that is alive but not being polled (a future held in an idle `select!` branch or
+    /// `buffer_unordered` item) would otherwise strand its followers: its own request timeout
+    /// cannot fire while it is not polled. A follower takes over only once the leader's request
+    /// has been woken (its response arrived, or its timeout passed) and then left unpolled for
+    /// this long, so a request that is being polled is never duplicated, however long it takes.
+    ///
+    /// The backends apply it to their caches. `None` (the default) waits as long as the leader
+    /// lives, for transports without a timer. [`ReqwestTransport`](crate::reqwest::ReqwestTransport)
+    /// answers twice its connect plus request timeout, on Tokio's timer (which it needs anyway);
+    /// [`TowerTransport`](crate::tower::TowerTransport) answers what
+    /// [`with_follower_wait`](crate::tower::TowerTransport::with_follower_wait) set.
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        None
+    }
 }
 
 impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
@@ -66,6 +84,10 @@ impl<T: HttpTransport + ?Sized> HttpTransport for Arc<T> {
 
     fn ready(&self) -> Result<(), SendError> {
         (**self).ready()
+    }
+
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        (**self).follower_wait()
     }
 }
 

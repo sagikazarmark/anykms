@@ -62,10 +62,29 @@ fn verify_with(
 ) -> jsonwebtoken::errors::Result<Claims> {
     let set: JwkSet = serde_json::from_value(jwks.clone()).unwrap();
     let key = DecodingKey::from_jwk(set.find(kid).expect("kid is in the JWKS"))?;
+    // Decoded as a `Value` first: a claims struct whose `iss` and `aud` fields are required
+    // would hide a validation that lets absent claims through (L34).
+    let claims = relying_party_decode(alg, token, &key, iss, aud)?;
+    Ok(serde_json::from_value(claims)?)
+}
+
+/// The relying-party recipe of docs/guide.md and examples/jwt_signing.rs.
+fn relying_party_decode(
+    alg: SignatureAlgorithm,
+    token: &str,
+    key: &DecodingKey,
+    iss: &str,
+    aud: &str,
+) -> jsonwebtoken::errors::Result<Value> {
+    if decode_header(token)?.typ.as_deref() != Some("JWT") {
+        return Err(JwtErrorKind::InvalidToken.into());
+    }
     let mut validation = Validation::new(alg.jws_alg().unwrap().parse::<Algorithm>().unwrap());
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+    validation.validate_nbf = true;
     validation.set_issuer(&[iss]);
     validation.set_audience(&[aud]);
-    Ok(decode::<Claims>(token, &key, &validation)?.claims)
+    Ok(decode::<Value>(token, key, &validation)?.claims)
 }
 
 fn kind(e: jsonwebtoken::errors::Error) -> JwtErrorKind {
@@ -271,4 +290,61 @@ async fn rsa_jwts_verify_with_jsonwebtoken() {
         let jwks = signer.jwks().await.unwrap();
         check(&jwks, alg, &v1, &v2, &expired);
     }
+}
+
+/// L34: the relying-party recipe refuses tokens from the same key that lack `iss` or `aud`
+/// (another token type, a `sign_jws` payload), that are not yet valid (`nbf`), or whose `typ`
+/// is not `JWT`.
+#[tokio::test]
+async fn relying_party_recipe_requires_iss_aud_nbf_and_typ() {
+    use serde_json::json;
+    let alg = SignatureAlgorithm::EcdsaP256Sha256;
+    let ks = LocalKeyset::builder().ecdsa_p256("release").build();
+    let signer = JwtSigner::new(ks.digest_signing_key("release", alg), "release");
+    let jwks = signer.jwks().await.unwrap();
+    let set: JwkSet = serde_json::from_value(jwks.clone()).unwrap();
+    let rp = |token: &str| {
+        let kid = decode_header(token)?.kid.expect("kid");
+        let key = DecodingKey::from_jwk(set.find(&kid).expect("kid"))?;
+        relying_party_decode(alg, token, &key, ISS, AUD)
+    };
+    for partial in [
+        json!({"sub": "42", "aud": AUD}),
+        json!({"sub": "42", "iss": ISS}),
+        json!({"sub": "42"}),
+    ] {
+        let token = signer.sign(&partial, &ttl()).await.unwrap();
+        let e = rp(&token).unwrap_err();
+        assert!(
+            matches!(e.kind(), JwtErrorKind::MissingRequiredClaim(_)),
+            "{partial}: {e:?}"
+        );
+    }
+    // Not valid before an hour from now.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let early = json!({"sub": "42", "iss": ISS, "aud": AUD, "nbf": now + 3600});
+    let token = signer.sign(&early, &ttl()).await.unwrap();
+    assert_eq!(
+        kind(rp(&token).unwrap_err()),
+        JwtErrorKind::ImmatureSignature
+    );
+    // A JWS from the same key that is not typed as a JWT (`sign_jws`: header {alg, kid}), with
+    // claims that would otherwise pass.
+    let jwt = signer.sign(&claims(), &ttl()).await.unwrap();
+    let kid = decode_header(&jwt).unwrap().kid.unwrap();
+    let payload = json!({"sub": "42", "iss": ISS, "aud": AUD, "exp": now + 60});
+    let token = anykms_recipes::jose::sign_jws(
+        &ks.digest_signing_key("release", alg),
+        &kid,
+        &serde_json::to_vec(&payload).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kind(rp(&token).unwrap_err()), JwtErrorKind::InvalidToken);
+    // The full set passes.
+    let token = signer.sign(&claims(), &ttl()).await.unwrap();
+    rp(&token).unwrap();
 }

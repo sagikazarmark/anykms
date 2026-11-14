@@ -4,7 +4,8 @@
 //! Error bodies look like `{"error": {"code": 400, "message": "...", "status":
 //! "FAILED_PRECONDITION", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 //! "reason": "..."}, ...]}}`. The canonical `status` decides when present, the HTTP status
-//! otherwise. Messages are matched case-insensitively as substrings, and only where the status
+//! otherwise; a `status` that is not a `google.rpc.Code` name is ignored (never echoed). Messages
+//! are matched case-insensitively as substrings, and only where the status
 //! alone is ambiguous (decrypt failures, checksum mismatches, version states, purpose
 //! mismatches). Each pinned message is listed in [`KNOWN`] and covered by the mock tests; the
 //! live texts are recorded by the probe (`scripts/probe-gcp.sh`, baseline in
@@ -190,13 +191,38 @@ fn parse_proto_duration(s: &str) -> Option<Duration> {
     Some(Duration::new(whole, nanos))
 }
 
+/// The `google.rpc.Code` names: the only values `Status::code` keeps.
+const CANONICAL_CODES: [&str; 17] = [
+    "OK",
+    "CANCELLED",
+    "UNKNOWN",
+    "INVALID_ARGUMENT",
+    "DEADLINE_EXCEEDED",
+    "NOT_FOUND",
+    "ALREADY_EXISTS",
+    "PERMISSION_DENIED",
+    "UNAUTHENTICATED",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "ABORTED",
+    "OUT_OF_RANGE",
+    "UNIMPLEMENTED",
+    "INTERNAL",
+    "UNAVAILABLE",
+    "DATA_LOSS",
+];
+
 impl Status {
     pub(crate) fn parse(body: &[u8]) -> Self {
         let Ok(Envelope { error: Some(e) }) = serde_json::from_slice::<Envelope>(body) else {
             return Self::default();
         };
         let mut s = Status {
-            code: e.status,
+            // `status` is a `google.rpc.Code` name. Anything else (a hostile or odd server's free
+            // text, up to the response limit) is dropped, so it never reaches
+            // `BackendDetail::code`, the span's `code` field or a log line; `classify` then uses
+            // the HTTP status's canonical code.
+            code: e.status.filter(|c| CANONICAL_CODES.contains(&c.as_str())),
             message: e.message,
             json: true,
             ..Self::default()

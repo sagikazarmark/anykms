@@ -877,11 +877,16 @@ mod gca {
     async fn library_errors_keep_their_kind() {
         let cases: [(Make, ErrorKind); 2] = [
             (
-                || Err(CredentialsError::from_msg(true, "metadata server down")),
+                || {
+                    Err(CredentialsError::from_msg(
+                        true,
+                        "metadata server down LIBMARKER",
+                    ))
+                },
                 ErrorKind::Unavailable,
             ),
             (
-                || Err(CredentialsError::from_msg(false, "invalid_grant")),
+                || Err(CredentialsError::from_msg(false, "invalid_grant LIBMARKER")),
                 ErrorKind::Unauthenticated,
             ),
         ];
@@ -890,8 +895,309 @@ mod gca {
             let (creds, _) = fake(make);
             let e = encrypt(&provider(&server, creds)).await.unwrap_err();
             assert_eq!(e.kind(), kind, "{e}");
-            assert!(std::error::Error::source(&e).is_some(), "{e}");
+            // The library's error text may carry a response body: it is not kept.
+            assert!(std::error::Error::source(&e).is_none(), "{e}");
+            assert!(!format!("{e} {e:?}").contains("LIBMARKER"), "{e:?}");
             assert!(server.received_requests().await.unwrap().is_empty());
         }
     }
+}
+
+/// A transport for ADC discovery with no credential files: the metadata server's probe, its
+/// token endpoint and KMS encrypt. The first probe stays in flight until `release`; followers'
+/// wait bound ([`HttpTransport::follower_wait`]) elapses when `bound_elapsed` is set.
+struct ProbeStall {
+    probes: std::sync::atomic::AtomicUsize,
+    probe_started: tokio::sync::Notify,
+    release: tokio::sync::watch::Sender<bool>,
+    bound_elapsed: tokio::sync::watch::Sender<bool>,
+}
+
+impl ProbeStall {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            probes: 0.into(),
+            probe_started: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+            bound_elapsed: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    fn probes(&self) -> usize {
+        self.probes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl anykms_http::HttpTransport for ProbeStall {
+    fn send(
+        &self,
+        req: anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<'_, Result<anykms_http::transport::Response, anykms_http::SendError>>
+    {
+        Box::pin(async move {
+            let path = req.uri().path().to_owned();
+            let ok = |body: serde_json::Value| {
+                http::Response::builder()
+                    .status(200)
+                    .header("Metadata-Flavor", "Google")
+                    .header("content-type", "application/json")
+                    .body(zeroize::Zeroizing::new(serde_json::to_vec(&body).unwrap()))
+                    .unwrap()
+            };
+            if path == "/" {
+                let n = self
+                    .probes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    self.probe_started.notify_one();
+                    let mut rx = self.release.subscribe();
+                    let _ = rx.wait_for(|r| *r).await;
+                }
+                return Ok(ok(json!({})));
+            }
+            if path == METADATA_TOKEN {
+                return Ok(ok(json!({
+                    "access_token": "ya29.metadata", "expires_in": 3599, "token_type": "Bearer"
+                })));
+            }
+            let b64 = base64::engine::general_purpose::STANDARD;
+            Ok(ok(json!({
+                "name": format!("{KEY}/cryptoKeyVersions/1"),
+                "ciphertext": b64.encode(b"ct"),
+                "ciphertextCrc32c": crc(b"ct"),
+                "verifiedPlaintextCrc32c": true,
+            })))
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        let rx = self.bound_elapsed.subscribe();
+        Some((
+            Duration::from_secs(24),
+            Arc::new(move |_| {
+                let mut rx = rx.clone();
+                Box::pin(async move {
+                    let _ = rx.wait_for(|e| *e).await;
+                })
+            }),
+        ))
+    }
+}
+
+/// ADC with no credential files and the metadata server reached through `t`.
+fn adc_over(t: &Arc<ProbeStall>) -> GcpProvider {
+    anykms_gcp::GcpProviderBuilder::from_env_with(|v| match v {
+        "GCE_METADATA_HOST" => Some("127.0.0.1:9".to_owned()),
+        "HOME" | "APPDATA" => Some("/nonexistent/anykms-gcp-probe".to_owned()),
+        _ => None,
+    })
+    .unwrap()
+    .credentials(Credentials::adc())
+    .endpoint(Endpoint::custom("http://127.0.0.1:9"))
+    .allow_loopback_http()
+    .http_transport(t.clone())
+    .build()
+    .unwrap()
+}
+
+/// Polls `f` until it completes, yielding in between, at most `polls` times: `None` if it is
+/// still pending. Every future here completes without a timer, so the bound is never what ends
+/// a passing run.
+async fn poll_up_to<F: std::future::Future + Unpin>(f: &mut F, polls: usize) -> Option<F::Output> {
+    for _ in 0..polls {
+        tokio::select! {
+            biased;
+            r = &mut *f => return Some(r),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    None
+}
+
+/// ADC discovery's first metadata probe, held by a caller that is alive but no longer polled,
+/// strands later callers no longer than the transport's follower bound once the probe's answer
+/// has arrived (its future is woken, but nothing polls it): then they probe for themselves. The
+/// resolution is kept, so callers after that do not probe again.
+#[tokio::test]
+async fn an_unpolled_adc_probe_does_not_strand_later_callers() {
+    if child() {
+        return;
+    }
+    let t = ProbeStall::new();
+    let p = adc_over(&t);
+    let mut stalled = Box::pin(encrypt(&p));
+    tokio::select! {
+        biased;
+        _ = &mut stalled => panic!("the first probe is held"),
+        () = t.probe_started.notified() => {}
+    }
+    // From here on, `stalled` is alive and never polled.
+    let mut later = Box::pin(encrypt(&p));
+    assert!(
+        poll_up_to(&mut later, 50).await.is_none(),
+        "within the bound, a later caller waits for the probe in flight"
+    );
+    assert_eq!(t.probes(), 1);
+    // The first probe's answer arrives, waking its future, which nobody polls.
+    t.release.send_replace(true);
+    assert!(
+        poll_up_to(&mut later, 50).await.is_none(),
+        "within the bound, a later caller waits for the probe in flight"
+    );
+    t.bound_elapsed.send_replace(true);
+    poll_up_to(&mut later, 1000)
+        .await
+        .expect("a later caller is stranded past the follower bound")
+        .unwrap();
+    assert_eq!(t.probes(), 2);
+    encrypt(&p).await.unwrap();
+    assert_eq!(t.probes(), 2, "the resolution is kept");
+    drop(stalled);
+}
+
+/// Concurrent first callers share one ADC discovery: one metadata probe.
+#[tokio::test]
+async fn concurrent_adc_callers_share_one_probe() {
+    if child() {
+        return;
+    }
+    let t = ProbeStall::new();
+    let p = adc_over(&t);
+    let mut first = Box::pin(encrypt(&p));
+    tokio::select! {
+        biased;
+        _ = &mut first => panic!("the first probe is held"),
+        () = t.probe_started.notified() => {}
+    }
+    let mut second = Box::pin(encrypt(&p));
+    assert!(poll_up_to(&mut second, 50).await.is_none());
+    t.release.send_replace(true);
+    let (a, b) = tokio::join!(first, second);
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(t.probes(), 1);
+}
+
+const IMPERSONATE: &str =
+    "/v1/projects/-/serviceAccounts/ci@p.iam.gserviceaccount.com:generateAccessToken";
+
+/// A transport for an `external_account` source with a subject token URL and impersonation:
+/// each of its three requests (subject token, STS exchange, impersonation) answers after 9 s
+/// of tokio time, KMS encrypt at once. It counts requests by path, and bounds single-flight
+/// followers at 24 s, as the built-in transport does.
+#[derive(Default)]
+struct SlowStages {
+    hits: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+
+impl SlowStages {
+    fn hits(&self, path: &str) -> usize {
+        self.hits.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
+}
+
+impl anykms_http::HttpTransport for SlowStages {
+    fn send(
+        &self,
+        req: anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<'_, Result<anykms_http::transport::Response, anykms_http::SendError>>
+    {
+        let path = req.uri().path().to_owned();
+        *self.hits.lock().unwrap().entry(path.clone()).or_default() += 1;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let (slow, body) = match path.as_str() {
+            "/subject" => (true, "eyJ.subject.token".to_owned()),
+            "/v1/token" => (
+                true,
+                json!({
+                    "access_token": "ya29.federated", "expires_in": 3600, "token_type": "Bearer",
+                    "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                })
+                .to_string(),
+            ),
+            IMPERSONATE => (
+                true,
+                json!({"accessToken": "ya29.sa", "expireTime": "2099-01-01T00:00:00Z"}).to_string(),
+            ),
+            _ => {
+                assert_eq!(
+                    req.headers().get("authorization").unwrap(),
+                    "Bearer ya29.sa"
+                );
+                (
+                    false,
+                    json!({
+                        "name": format!("{KEY}/cryptoKeyVersions/1"),
+                        "ciphertext": b64.encode(b"ct"),
+                        "ciphertextCrc32c": crc(b"ct"),
+                        "verifiedPlaintextCrc32c": true,
+                    })
+                    .to_string(),
+                )
+            }
+        };
+        Box::pin(async move {
+            if slow {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+            }
+            Ok(http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(zeroize::Zeroizing::new(body.into_bytes()))
+                .unwrap())
+        })
+    }
+
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        Some((
+            Duration::from_secs(24),
+            Arc::new(|d| Box::pin(tokio::time::sleep(d))),
+        ))
+    }
+}
+
+/// An `external_account` token fetch of three sequential requests (subject token URL, STS,
+/// impersonation) that answer in 9 s each takes 27 s, more than the 24 s follower bound. Its
+/// caller keeps polling it, so callers waiting for it, whenever they came, wait it out: each
+/// endpoint is asked once, not once more per bound that passed.
+#[tokio::test(start_paused = true)]
+async fn a_slow_multi_stage_external_account_fetch_is_not_duplicated() {
+    if child() {
+        return;
+    }
+    let t = Arc::new(SlowStages::default());
+    let origin = "http://127.0.0.1:9";
+    let f = json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/pool",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{origin}/v1/token"),
+        "service_account_impersonation_url": format!("{origin}{IMPERSONATE}"),
+        "credential_source": {"url": format!("{origin}/subject")},
+    });
+    let p = GcpProvider::builder()
+        .credentials(Credentials::from_json(f.to_string()))
+        .endpoint(Endpoint::custom(origin))
+        .auth_endpoints(AuthEndpoints::custom(origin).unwrap())
+        .allow_loopback_http()
+        .http_transport(t.clone())
+        .build()
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let late = async {
+        // Joins after the first two stages.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        encrypt(&p).await
+    };
+    let (a, b, c, d, e) = tokio::join!(encrypt(&p), encrypt(&p), encrypt(&p), encrypt(&p), late);
+    for r in [a, b, c, d, e] {
+        r.unwrap();
+    }
+    assert_eq!(started.elapsed(), Duration::from_secs(27));
+    for path in ["/subject", "/v1/token", IMPERSONATE] {
+        assert_eq!(t.hits(path), 1, "{path}");
+    }
+    assert_eq!(t.hits(&format!("/v1/{KEY}:encrypt")), 5);
 }

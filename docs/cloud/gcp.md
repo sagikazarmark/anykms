@@ -305,7 +305,8 @@ Every chain step logs the source it picked at INFO, never a value. **ADC order**
 2. The gcloud ADC file (`$HOME/.config/gcloud/application_default_credentials.json`;
    `%APPDATA%\gcloud\…` on Windows).
 3. The metadata server, reached through `GCE_METADATA_HOST` or `metadata.google.internal`, with
-   header `Metadata-Flavor: Google`. The first probe uses a 1 s connect timeout.
+   header `Metadata-Flavor: Google`. The first probe uses a 3 s request timeout (the built-in
+   transport connects within 2 s).
 
 | `type` / source | First release | Mechanism |
 |---|---|---|

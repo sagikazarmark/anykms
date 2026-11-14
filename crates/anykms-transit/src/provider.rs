@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anykms_core::{
     AeadKey, DataKeysKey, DescribeKey, DigestSignerKey, DigestVerifierKey, Error, ErrorKind,
-    IntoKeyUri, KeyTypeCheck, KeyUri, KeyWrapKey, MacAlgorithm, MacKey, MessageSignerKey,
-    MessageVerifierKey, OpenOptions, Operation, Provider, PublicKeysKey, Result,
+    IntoKeyUri, KeyTypeCheck, KeyUri, KeyVersion, KeyWrapKey, MacAlgorithm, MacKey,
+    MessageSignerKey, MessageVerifierKey, OpenOptions, Operation, Provider, PublicKeysKey, Result,
     SignatureAlgorithm, SigningShape,
 };
 
@@ -17,7 +17,7 @@ use crate::handles::{
     KeyCtx, TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey, TypeCache,
     mac_path, transit_hash,
 };
-use crate::uri::{SCHEMES, TransitKeyRef};
+use crate::uri::{SCHEMES, TransitKeyRef, label, shown_alias};
 
 /// Opens `hashivault://` and `openbao://` keys on configured Vault and OpenBao servers.
 #[derive(Clone)]
@@ -137,13 +137,16 @@ impl TransitProvider {
             .build()
     }
 
-    /// Resolves a URI to a key context. Errors carry the key's resource: the URI without its
-    /// query string when it does not parse, the key as written in it after that.
+    /// Resolves a URI to a key context. Errors carry the key's resource: when the URI does not
+    /// parse, the URI without its query string ([`uri_label`](Self::uri_label)); the key as
+    /// written in it after that. Either way an authority that is not a configured server alias is
+    /// redacted: it may hold a pasted token, even one that fits the alias grammar.
     fn resolve(&self, uri: impl IntoKeyUri, check: KeyTypeCheck) -> Result<KeyCtx> {
         let uri = uri.into_key_uri()?;
-        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(uri.without_query()))?;
+        let r = TransitKeyRef::parse(&uri).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         // No error below names a resource yet.
-        let written = KeyCtx::resource(uri.scheme(), &r.alias, &r.mount, &r.name, None);
+        let alias = shown_alias(&r.alias, |a| self.servers.contains_key(a));
+        let written = KeyCtx::resource(uri.scheme(), alias, &r.mount, &r.name, None);
         self.resolve_inner(uri.scheme(), r, check)
             .map_err(|e| e.with_resource(&*written))
     }
@@ -253,10 +256,10 @@ impl TransitProvider {
                 Operation::Open,
                 "Ed25519 signs messages; use ed25519_key",
             )
-            .with_resource(uri.without_query()));
+            .with_resource(self.uri_label(&uri)));
         }
         if let Some(h) = alg.hash() {
-            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(uri.without_query()))?;
+            transit_hash(h, Operation::Open).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         }
         Ok(TransitDigestKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
@@ -274,19 +277,30 @@ impl TransitProvider {
     /// Opens an HMAC key for `alg`.
     pub fn mac_key(&self, uri: impl IntoKeyUri, alg: MacAlgorithm) -> Result<TransitMacKey> {
         let uri = uri.into_key_uri()?;
-        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(uri.without_query()))?;
+        mac_path(alg, Operation::Open).map_err(|e| e.with_resource(self.uri_label(&uri)))?;
         Ok(TransitMacKey {
             k: self.resolve(uri, KeyTypeCheck::Describe)?,
             alg,
         })
     }
-}
 
-/// [`SignatureAlgorithm::require_shape`], naming the key (`uri` without its query string) on
-/// failure, as every error after the URI is parsed does.
-fn require_shape(uri: &KeyUri, alg: SignatureAlgorithm, shape: SigningShape) -> Result<()> {
-    alg.require_shape(shape, BACKEND)
-        .map_err(|e| e.with_resource(uri.without_query()))
+    /// `uri` as errors name it before it has resolved ([`label`]): without its query string, an
+    /// authority that is not a configured server alias redacted.
+    fn uri_label(&self, uri: &KeyUri) -> String {
+        label(uri, |a| self.servers.contains_key(a))
+    }
+
+    /// [`SignatureAlgorithm::require_shape`], naming the key ([`uri_label`](Self::uri_label)) on
+    /// failure.
+    fn require_shape(
+        &self,
+        uri: &KeyUri,
+        alg: SignatureAlgorithm,
+        shape: SigningShape,
+    ) -> Result<()> {
+        alg.require_shape(shape, BACKEND)
+            .map_err(|e| e.with_resource(self.uri_label(uri)))
+    }
 }
 
 impl Provider for TransitProvider {
@@ -296,6 +310,19 @@ impl Provider for TransitProvider {
 
     fn name(&self) -> &'static str {
         BACKEND
+    }
+
+    /// `Unsupported`: transit URIs address no key version. The error names the key as open errors
+    /// do (`uri_label`): left unnamed, the registry would label it with the whole URI, including
+    /// an authority that is not a configured server alias (a pasted token, say).
+    fn pin(&self, uri: &KeyUri, _version: &KeyVersion) -> Result<KeyUri> {
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            BACKEND,
+            Operation::Open,
+            "provider does not address key versions in URIs",
+        )
+        .with_resource(self.uri_label(uri)))
     }
 
     fn aead(&self, uri: &KeyUri, opts: &OpenOptions) -> Result<AeadKey> {
@@ -343,7 +370,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<DigestSignerKey> {
-        require_shape(uri, alg, SigningShape::Digest)?;
+        self.require_shape(uri, alg, SigningShape::Digest)?;
         let k = self.digest_signing_key(uri, alg)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -361,7 +388,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<DigestVerifierKey> {
-        require_shape(uri, alg, SigningShape::Digest)?;
+        self.require_shape(uri, alg, SigningShape::Digest)?;
         let k = self.digest_signing_key(uri, alg)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -379,7 +406,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<MessageSignerKey> {
-        require_shape(uri, alg, SigningShape::Message)?;
+        self.require_shape(uri, alg, SigningShape::Message)?;
         let k = self.ed25519_key(uri)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -397,7 +424,7 @@ impl Provider for TransitProvider {
         alg: SignatureAlgorithm,
         opts: &OpenOptions,
     ) -> Result<MessageVerifierKey> {
-        require_shape(uri, alg, SigningShape::Message)?;
+        self.require_shape(uri, alg, SigningShape::Message)?;
         let k = self.ed25519_key(uri)?;
         let r = k.k.resource.clone();
         let sem = k.semantics().clone();
@@ -457,5 +484,84 @@ impl Provider for TransitProvider {
         let k = self.aead_key(uri)?;
         let r = k.k.resource.clone();
         Ok(DescribeKey::new(BACKEND, Arc::new(k)).with_resource(r))
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(all(test, any(feature = "rustls-ring", feature = "rustls-aws-lc-rs")))]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// With the built-in transport, the key-type cache bounds how long a caller waits for
+    /// another caller's read: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_type_cache() {
+        let p = TransitProvider::builder()
+            .server(
+                "default",
+                ServerConfig::new("http://127.0.0.1:8200", crate::Flavor::Vault)
+                    .allow_loopback_http(),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(
+            p.servers["default"].type_flights.max_wait(),
+            Some(Duration::from_secs(24))
+        );
+    }
+}
+
+#[cfg(test)]
+mod type_flight_tests {
+    use std::time::Duration;
+
+    use anykms_http::HttpTransport;
+    use anykms_http::transport::{Request, Response};
+
+    use super::*;
+
+    /// A transport that answers nothing and bounds followers by its `Duration`.
+    struct Bounded(Duration);
+
+    impl HttpTransport for Bounded {
+        fn send(
+            &self,
+            _: Request,
+            _: usize,
+        ) -> anykms_core::BoxFuture<'_, std::result::Result<Response, anykms_http::SendError>>
+        {
+            Box::pin(std::future::pending())
+        }
+
+        fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+            Some((self.0, anykms_core::instant_sleep()))
+        }
+    }
+
+    fn server(wait: Duration) -> ServerConfig {
+        ServerConfig::new("https://vault.example:8200", crate::Flavor::Vault)
+            .token("t")
+            .http_transport(Bounded(wait))
+    }
+
+    /// How long a key-type read on server `alias` keeps its followers waiting.
+    fn bound(p: &TransitProvider, alias: &str) -> Option<Duration> {
+        p.servers[alias].type_flights.max_wait()
+    }
+
+    /// Each server's key-type reads are bounded by its own transport, not by whichever server's
+    /// transport came first.
+    #[test]
+    fn each_server_bounds_its_own_type_reads() {
+        let (fast, slow) = (Duration::from_secs(2), Duration::from_secs(90));
+        let p = TransitProvider::builder()
+            .server("a", server(fast))
+            .server("b", server(slow))
+            .build()
+            .unwrap();
+        assert_eq!(bound(&p, "a"), Some(fast));
+        assert_eq!(bound(&p, "b"), Some(slow));
     }
 }

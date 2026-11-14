@@ -81,12 +81,16 @@ pub fn request_id(id: &str) -> Option<&str> {
 /// The origin of a URL, `scheme://host:port`, for the `Debug` output of anything holding a URL
 /// (a proxy URL may carry credentials in its userinfo; a path or query may carry tokens). The
 /// port is the scheme's default when the URL names none, and is left out when the scheme has no
-/// default. A string that does not parse as a URL is `<invalid URL>`.
+/// default. A string that does not parse as a URL, or has no host, is `<invalid URL>`.
 pub fn url_origin(url: &str) -> String {
     let Ok(u) = url::Url::parse(url) else {
         return "<invalid URL>".to_owned();
     };
-    let host = u.host_str().unwrap_or("");
+    // No host: a scheme-less `user:password@host` string parses with the username as its
+    // scheme; print nothing of it.
+    let Some(host) = u.host_str().filter(|h| !h.is_empty()) else {
+        return "<invalid URL>".to_owned();
+    };
     match u.port_or_known_default() {
         Some(port) => format!("{}://{host}:{port}", u.scheme()),
         None => format!("{}://{host}", u.scheme()),

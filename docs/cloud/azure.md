@@ -46,7 +46,7 @@ guide is [`docs/operations-azure.md`](../operations-azure.md) (D5; it was `docs/
   state as the key-level state; `AzureKeyInfo::current` names it when it differs from the pinned
   version (§9).
 - **Pinned `public_key_version` (security review L1):** a handle opened on a pinned URI serves
-  only that version's public key; any other version is `NotFound` before any I/O, matching
+  only that version's public key; any other version is `UnknownKeyVersion` before any I/O, matching
   verify, unwrap and decrypt. Publish every version (a JWKS) from the unversioned URI (§4.2).
 - **Z4, Z10, tracing and error code (D3):** the shared span schema; `request_id` is recorded only
   after the `x-ms-request-id` filter (≤ 128 visible ASCII characters); `BackendDetail::code` and
@@ -62,9 +62,8 @@ guide is [`docs/operations-azure.md`](../operations-azure.md) (D5; it was `docs/
 - **RSA features:** `rsa-aws-lc-rs` (default) and `rsa-rustcrypto` give local RSA verification
   (`local_verify`); without one, opening an RSA algorithm for local verification is
   `Configuration`. The facade forwards them (§3).
-- **Hardening from the security review:** the Azure CLI credential reads at most 64 KiB of
-  output and checks `expires_on` without overflow (L2); `nextLink` keeps the pinned
-  `api-version` (§5.2).
+- **Hardening from the security review:** `nextLink` keeps the pinned `api-version` (§5.2). (The
+  Azure CLI credential this item also hardened was removed later; see §3.)
 - **Tests:** a hidden `AzureProviderBuilder::__count_requests` lets the conformance fixture run
   the rejected-before-I/O cases (`RequestCount`); the live fixture runs `UnauthorizedProvider`
   when `ANYKMS_AZURE_UNAUTHORIZED_TOKEN` is set (§11.1).
@@ -180,7 +179,7 @@ crates/anykms-azure/
 
 Implemented as: transit-style handle names (D4; the plan named the signing and wrapping handles
 differently); `uri.rs` has `AzureKeyRef`; `cred/` is `entra.rs`
-(workload identity, client secret), `managed_identity.rs`, `cli.rs`, `mod.rs` (`from_env`
+(workload identity, client secret), `managed_identity.rs`, `sdk.rs` (`AzureIdentity`), `mod.rs` (`from_env`
 selection), with `StaticToken` in `credential.rs`; no `zbuf.rs` (`anykms-http`). Tests:
 `mock.rs`, `credentials.rs`, `hygiene.rs`, `vectors.rs`, `lowkey.rs`, `live.rs`,
 `conformance_lowkey.rs`, `conformance_azure.rs`, `conformance_mhsm.rs`, `common/`.
@@ -261,7 +260,7 @@ azure-kv://<host>/keys/<name>[/<version>]
   that version's. Without: writes use the current version (versionless request, version read from
   the response `kid`, §5.1), `public_key()` is the current one (Appendix A).
   Implemented with the pin authoritative for public keys too (security review L1): on a pinned
-  URI, `public_key_version(v)` with `v` ≠ the pinned version is `NotFound` before any I/O, as
+  URI, `public_key_version(v)` with `v` ≠ the pinned version is `UnknownKeyVersion` before any I/O, as
   verify, unwrap and decrypt already refuse another version. A JWKS of every version comes from
   the unversioned URI.
 
@@ -403,7 +402,7 @@ All requests: `POST https://<host>/keys/<name>[/<version>]/<op>?api-version=2025
 |---|---|---|
 | `DigestSigner::sign_digest` | `sign` | `{alg, value: digest}` → `{kid, value}`; ECDSA: `value` must be exactly 2×scalar bytes, converted to DER (`ecdsa_der`); RSA: length = modulus bytes. `Signature { alg, key_version: kid version }` |
 | `DigestVerifier::verify_digest` | `verify` (server-side) | ECDSA DER → raw r‖s first; `{alg, digest, value}` → `{value: bool}`; `false` → `VerificationFailed`. See §5.3 |
-| `PublicKeys::public_key` / `_version` | `GET /keys/<name>[/<v>]` | JWK (`n`,`e` / `crv`,`x`,`y`) → SPKI DER; EC point validated on curve; `key_version` from `kid`. A version ≠ 32 hex → `NotFound` before I/O (the version often comes from a JWT `kid`). Implemented with: on a pinned URI, a version other than the pinned one → `NotFound` before I/O (L1) |
+| `PublicKeys::public_key` / `_version` | `GET /keys/<name>[/<v>]` | JWK (`n`,`e` / `crv`,`x`,`y`) → SPKI DER; EC point validated on curve; `key_version` from `kid`. A version that is not 32 lowercase hex characters → `InvalidArgument` before I/O (the version often comes from a JWT `kid`; uppercase is refused so the returned version always equals the one asked for, review L14(a)). Implemented with: on a pinned URI, a version other than the pinned one → `UnknownKeyVersion` before I/O (L1) |
 | `KeyWrap::wrap_key` | `wrapkey` | `{alg: "RSA-OAEP-256", value: key}` → `{kid, value}`; input ≤ k−66 bytes (k = modulus bytes) else `InvalidArgument` locally; output framed (§7) |
 | `KeyWrap::unwrap_key` | `unwrapkey` (versioned) | frame parsed; `{alg, value}` → `{value}` (zeroizing); every failure that depends on the input → `DecryptFailed` (§8) |
 | `KeyWrap::wrapped_key_version` | local | from the frame |

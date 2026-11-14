@@ -183,6 +183,7 @@ probe() {
     "verify-missing-key verify/nope {$V,\"signature\":\"vault:v1:AAAA\"}" \
     "hmac-missing-key hmac/nope/sha2-256 {\"input\":\"$PT\"}" \
     "verify-non-der-signature verify/ec {$V,\"signature\":\"vault:v1:AAAA\"}" \
+    "verify-der-trailing-byte verify/ec {$V,\"signature\":\"vault:v1:MAYCAQECAQEA\"}" \
     "verify-bad-base64-signature verify/ec {$V,\"signature\":\"vault:v1:!!!\"}" \
     "verify-signature-no-prefix verify/ec {$V,\"signature\":\"AAAA\"}" \
     "verify-signature-too-new verify/ec {$V,\"signature\":\"vault:v9:AAAA\"}" \

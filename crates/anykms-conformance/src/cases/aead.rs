@@ -136,6 +136,47 @@ pub(crate) async fn authentication_failures<F: Fixture>(c: Ctx<F>) -> CaseResult
     Ok(())
 }
 
+/// The AAD is authenticated as exact bytes: a ciphertext made without AAD does not decrypt with
+/// one, binary AAD round-trips, and AADs that a lossy encoding would merge (invalid UTF-8 that
+/// becomes U+FFFD, a NUL that ends a C string, letter case) stay distinct.
+pub(crate) async fn aad_binding<F: Fixture>(c: Ctx<F>) -> CaseResult {
+    let key = c.key(TestKeyKind::Aead).await?;
+    let k = c.aead(&key.uri).ctx("open")?;
+    let ct = k.encrypt(b"secret", b"").await.ctx("encrypt without AAD")?;
+    expect_kind(
+        k.decrypt(&ct, b"aad").await,
+        ErrorKind::DecryptFailed,
+        "ciphertext made without AAD, decrypted with AAD",
+    )?;
+    let binary: &[u8] = &[0x00, 0xff, 0x80, b'a', 0x00, 0xc3, 0x28];
+    let ct = k
+        .encrypt(b"secret", binary)
+        .await
+        .ctx("encrypt with binary AAD")?;
+    ensure!(
+        *k.decrypt(&ct, binary)
+            .await
+            .ctx("decrypt with binary AAD")?
+            == *b"secret",
+        "binary AAD round trip returned different plaintext"
+    );
+    for (enc, dec, what) in [
+        (&[0x80u8][..], &[0x81u8][..], "invalid UTF-8 bytes"),
+        (&[0xff], &[0xfe], "invalid UTF-8 bytes"),
+        (b"a\x00b", b"a", "a NUL byte"),
+        (b"\x00", b"", "a lone NUL byte"),
+        (b"AAD", b"aad", "letter case"),
+    ] {
+        let ct = k.encrypt(b"secret", enc).await.ctx("encrypt")?;
+        expect_kind(
+            k.decrypt(&ct, dec).await,
+            ErrorKind::DecryptFailed,
+            &format!("AADs that differ only in {what} ({enc:02x?} vs {dec:02x?})"),
+        )?;
+    }
+    Ok(())
+}
+
 /// The version a fresh ciphertext of `k` is on: its `ciphertext_version`, else the primary
 /// version from `describe`.
 async fn current_version(k: &anykms_core::AeadKey) -> Result<KeyVersion, String> {
@@ -657,7 +698,22 @@ pub(crate) async fn rewrap_with_aad<F: Fixture>(c: Ctx<F>) -> CaseResult {
             ErrorKind::DecryptFailed,
             "rewrapped ciphertext lost its AAD binding",
         )?;
+        // Rewrap authenticates the AAD like decrypt: the wrong AAD, or none, is refused, and
+        // never yields a ciphertext bound to the AAD the caller passed instead.
+        for (aad, what) in [
+            (&b"other"[..], "rewrap under the wrong AAD"),
+            (b"", "rewrap without the AAD"),
+        ] {
+            expect_kind(k.rewrap(&ct, aad).await, ErrorKind::DecryptFailed, what)?;
+        }
     } else {
+        // Without AAD support, a rewrap (which passes no AAD) must not strip a ciphertext's AAD
+        // binding: it fails to authenticate, like a decrypt without the AAD.
+        expect_kind(
+            k.rewrap(&ct, b"").await,
+            ErrorKind::DecryptFailed,
+            "rewrap of an AAD-bound ciphertext without the AAD",
+        )?;
         expect_kind(
             k.rewrap(&ct, b"bound").await,
             ErrorKind::Unsupported,
@@ -691,6 +747,19 @@ pub(crate) async fn datakey_roundtrip<F: Fixture>(c: Ctx<F>) -> CaseResult {
     ensure!(
         !format!("{dk:?}").contains(&format!("{:?}", dk.plaintext())),
         "DataKey Debug leaks the key"
+    );
+    // Every call draws a fresh key: a constant or repeating data key passes the checks above.
+    let again = k
+        .generate_data_key(DataKeySpec::Aes256, b"")
+        .await
+        .ctx("generate_data_key again")?;
+    ensure!(
+        *again.plaintext() != *dk.plaintext(),
+        "two data keys hold the same key"
+    );
+    ensure!(
+        again.ciphertext() != dk.ciphertext(),
+        "two data keys have the same ciphertext"
     );
     Ok(())
 }

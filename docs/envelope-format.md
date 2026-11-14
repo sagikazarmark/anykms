@@ -80,14 +80,15 @@ so it can be replaced (rewrap, migration to another KEK) without touching the pa
 ### Errors
 
 - Availability and authorization errors from the KMS propagate unchanged: `PermissionDenied`,
-  `Throttled`, `Unavailable`, `Timeout`, `NotFound`, `KeyStateInvalid` (and every other kind not
-  listed below, such as `Backend` or `Unsupported`).
-- Everything that depends on the attacker-supplied wrapped key or payload becomes `DecryptFailed`.
-  The error's operation is the caller's: `decrypt`, or `rewrap` for the rewrap operations below.
-  Two messages are used:
+  `Unauthenticated`, `Throttled`, `Unavailable`, `Timeout`, `NotFound`, `KeyStateInvalid` (and
+  every other kind not listed below, such as `Backend` or `Unsupported`).
+- A `KeyVersionUnusable` from the unwrap also propagates unchanged (see the last item).
+- Everything else that depends on the attacker-supplied wrapped key or payload becomes
+  `DecryptFailed`. The error's operation is the caller's: `decrypt`, or `rewrap` for the rewrap
+  operations below. Two messages are used:
   - "envelope data key does not unwrap" when the KMS refuses the wrapped key (a KMS
-    `DecryptFailed`/`InvalidArgument`/`VerificationFailed`). The error keeps the KEK backend's
-    name and detail, and the KMS error as its source.
+    `DecryptFailed`/`InvalidArgument`/`VerificationFailed`/`UnknownKeyVersion`). The error keeps
+    the KEK backend's name and detail, and the KMS error as its source.
   - "wrong key or AAD, or a malformed or tampered envelope" for everything after a successful
     unwrap or before it: a malformed envelope, a wrong DEK length, a commitment mismatch, a
     bad GCM tag (which also covers a wrong AAD) and bad padding, with no further distinction
@@ -96,9 +97,14 @@ so it can be replaced (rewrap, migration to another KEK) without touching the pa
   Separating the KEK refusal is safe: it happens before the DEK or the payload is used, and the
   KMS reveals it anyway (its own error, audit log and timing). The causes that involve the DEK,
   the commitment or the payload share one message, so the error is no oracle on the payload.
-- A `KeyStateInvalid` from the unwrap reveals the slot's KEK version policy (for example "below
-  the minimum decryption version"). This is not secret: `ciphertext_version` exposes the version
-  anyway.
+- A `KeyVersionUnusable` from the unwrap (the slot names a KEK version the key has but may not
+  use: below the minimum decryption version, disabled or destroyed) stays distinct, so a forged
+  slot `vault:vN:<junk>` tells its sender whether version N is retired. That is the KEK's
+  version policy, not a secret: `ciphertext_version` exposes a slot's version without any KMS
+  call, and the policy is visible in the KMS's own errors and audit log. Keeping the kind lets
+  operators find data that needs a rewrap before the minimum version is raised; it is a caller
+  error (`is_caller_error`), so it pages no one. A KEK that the *handle* chose and cannot use is
+  `KeyStateInvalid`, which propagates like any other configuration error.
 
 ## Padding
 

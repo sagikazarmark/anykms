@@ -5,16 +5,19 @@
 //!
 //! ```text
 //! magic ("AKS" for signatures, "AKT" for tags) | format version 0x01 | algorithm code u8 |
-//! u8 key_version_len | key_version (UTF-8, 0..=255 bytes; 0 = no version) | value bytes (rest)
+//! u8 key_version_len | key_version (printable ASCII 0x21..=0x7e, 0..=255 bytes; 0 = no version) |
+//! value bytes (rest; for a tag, exactly the algorithm's tag length)
 //! ```
 //!
 //! Algorithm codes are stable and never reused. [`Signature::to_base64`] and [`Tag::to_base64`]
 //! (and their `_url` variants) wrap this encoding in base64 for text columns, JSON and URLs.
 //!
 //! Encoding fails only for a key version longer than 255 bytes, which the length byte cannot
-//! express. No backend issues such versions (transit, GCP: decimal numbers; Azure: 32 hex
-//! characters; AWS: none), but [`KeyVersion`] is an open string and [`Signature::from_parts`] /
-//! [`Tag::from_parts`] accept any, so the encoders stay fallible rather than panic or truncate.
+//! express, or one that is not printable ASCII (decoded versions are printed raw in errors and
+//! logs), and for a tag whose length is not its algorithm's. No backend issues such versions
+//! (transit, GCP: decimal numbers; Azure: 32 hex characters; AWS: the key ARN), but
+//! [`KeyVersion`] is an open string and [`Signature::from_parts`] / [`Tag::from_parts`] accept
+//! any, so the encoders stay fallible rather than panic or truncate.
 //!
 //! Decoding failures (wrong magic, unknown format version or algorithm code, truncation) are
 //! `VerificationFailed`, as for a forged or malformed signature from a backend: a corrupt stored
@@ -47,6 +50,15 @@ fn encode_parts(
             "key version is longer than 255 bytes",
         ));
     };
+    // Decoding refuses anything else, so a stored value always decodes.
+    if !v.iter().all(|b| matches!(b, 0x21..=0x7e)) {
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "encoding",
+            op,
+            "key version is not printable ASCII",
+        ));
+    }
     let mut out = Vec::with_capacity(6 + v.len() + value.len());
     out.extend_from_slice(&magic);
     out.push(FORMAT_V1);
@@ -78,6 +90,11 @@ fn decode_parts(
     let version = if vlen == 0 {
         None
     } else {
+        // Visible ASCII only: every backend's versions are, and a decoded version (attacker-chosen
+        // bytes) is printed raw by `KeyVersion`'s `Display`, in errors and logs.
+        if !v.iter().all(|b| matches!(b, 0x21..=0x7e)) {
+            return Err(err(op, "key version is not printable ASCII"));
+        }
         Some(KeyVersion::new(
             std::str::from_utf8(v).map_err(|_| err(op, "key version is not UTF-8"))?,
         ))
@@ -89,7 +106,7 @@ fn decode_parts(
 }
 
 /// Encodes a signature for storage. Fails with `InvalidArgument` only for a key version longer
-/// than 255 bytes (see the [module docs](self)).
+/// than 255 bytes or not printable ASCII (see the [module docs](self)).
 pub fn encode_signature(sig: &Signature) -> Result<Vec<u8>> {
     encode_parts(
         SIG_MAGIC,
@@ -109,8 +126,17 @@ pub fn decode_signature(bytes: &[u8]) -> Result<Signature> {
 }
 
 /// Encodes a MAC tag for storage. Fails with `InvalidArgument` only for a key version longer
-/// than 255 bytes (see the [module docs](self)).
+/// than 255 bytes or not printable ASCII, or a tag whose length is not its algorithm's (see the
+/// [module docs](self)).
 pub fn encode_tag(tag: &Tag) -> Result<Vec<u8>> {
+    if tag.as_bytes().len() != tag.algorithm().tag_len() {
+        return Err(Error::new(
+            ErrorKind::InvalidArgument,
+            "encoding",
+            Operation::Mac,
+            "tag length does not match its algorithm",
+        ));
+    }
     encode_parts(
         TAG_MAGIC,
         Operation::Mac,
@@ -125,6 +151,14 @@ pub fn decode_tag(bytes: &[u8]) -> Result<Tag> {
     let (code, version, value) = decode_parts(TAG_MAGIC, Operation::VerifyMac, bytes)?;
     let alg = MacAlgorithm::from_code(code)
         .ok_or_else(|| err(Operation::VerifyMac, "unknown algorithm code"))?;
+    // Tags are never truncated: a tag of another length cannot verify, and backends need not
+    // each re-check it.
+    if value.len() != alg.tag_len() {
+        return Err(err(
+            Operation::VerifyMac,
+            "tag length does not match its algorithm",
+        ));
+    }
     Ok(Tag::from_parts(alg, version, value.to_vec()))
 }
 
@@ -190,7 +224,45 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.operation(), Operation::Sign);
         let max = Some(KeyVersion::new("v".repeat(255)));
-        let t = Tag::from_parts(MacAlgorithm::HmacSha256, max, [1]);
+        let t = Tag::from_parts(MacAlgorithm::HmacSha256, max, [1; 32]);
         assert_eq!(decode_tag(&encode_tag(&t).unwrap()).unwrap(), t);
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    fn raw_tag(version: &[u8], tag_len: usize) -> Vec<u8> {
+        let mut b = TAG_MAGIC.to_vec();
+        b.extend_from_slice(&[
+            FORMAT_V1,
+            MacAlgorithm::HmacSha256.code(),
+            u8::try_from(version.len()).unwrap(),
+        ]);
+        b.extend_from_slice(version);
+        b.extend(std::iter::repeat_n(7u8, tag_len));
+        b
+    }
+
+    /// L25: a decoded key version (attacker-chosen bytes) must be visible ASCII, so it can be
+    /// printed raw in errors and logs.
+    #[test]
+    fn decoded_key_versions_are_visible_ascii() {
+        assert!(decode_tag(&raw_tag(b"3", 32)).is_ok());
+        for bad in [&b"v\n1"[..], b"v 1", "v\u{202e}1".as_bytes(), b"\x1b[31m"] {
+            let e = decode_tag(&raw_tag(bad, 32)).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::VerificationFailed, "{bad:?}");
+        }
+    }
+
+    /// L33: a tag of the wrong length for its algorithm does not decode.
+    #[test]
+    fn decode_tag_checks_the_length() {
+        for len in [1, 16, 31, 33, 64] {
+            let e = decode_tag(&raw_tag(b"", len)).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::VerificationFailed, "{len}");
+        }
+        assert!(decode_tag(&raw_tag(b"", 32)).is_ok());
     }
 }

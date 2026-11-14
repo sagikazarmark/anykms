@@ -103,6 +103,7 @@ async fn request_bodies_are_minimal_with_crc32c_strings() {
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "plaintext": b64(b"pt"), "plaintextCrc32c": crc(b"pt"), "usedPrimary": true,
+            "protectionLevel": "SOFTWARE",
         })))
         .expect(1)
         .mount(&server)
@@ -552,15 +553,23 @@ async fn response_integrity_failures() {
         ("encrypt", json!({"unexpected": true}), ErrorKind::Backend),
         (
             "decrypt",
-            json!({"plaintext": b64(b"secret"), "plaintextCrc32c": crc(b"other")}),
+            json!({"plaintext": b64(b"secret"), "plaintextCrc32c": crc(b"other"),
+                "protectionLevel": "SOFTWARE"}),
             ErrorKind::Unavailable,
         ),
         (
             "decrypt",
-            json!({"plaintext": b64(b"secret")}),
+            json!({"plaintext": b64(b"secret"), "protectionLevel": "SOFTWARE"}),
             ErrorKind::Unavailable,
         ),
-        ("decrypt", json!({"plaintext": "!!!"}), ErrorKind::Backend),
+        (
+            "decrypt",
+            json!({"plaintext": "!!!", "protectionLevel": "SOFTWARE"}),
+            ErrorKind::Backend,
+        ),
+        // L19: no `protectionLevel`: not a decrypt response, never an empty plaintext.
+        ("decrypt", json!({}), ErrorKind::Backend),
+        ("decrypt", json!([]), ErrorKind::Backend),
     ];
     for (verb, body, want) in cases {
         let server = MockServer::start().await;

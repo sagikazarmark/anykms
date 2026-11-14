@@ -199,7 +199,40 @@ where
             eprintln!("  {i}");
         }
     }
+    if !args.list {
+        print_coverage(&caps.not_applicable_features(), &unchecked(&*fx));
+    }
     conclusion.exit_code()
+}
+
+/// Checks a fixture turns off without declaring a feature: the defaults of optional [`Fixture`]
+/// methods that some cases depend on.
+pub fn unchecked<F: Fixture>(fx: &F) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if fx.secret_markers().is_empty() {
+        v.push(
+            "Fixture::secret_markers is empty: error-hygiene cases cannot detect a leaked credential",
+        );
+    }
+    v
+}
+
+/// Prints the coverage a run did not have: every feature declared not applicable and every check
+/// turned off without a declaration, so that a passing run cannot hide them.
+#[cfg(not(target_arch = "wasm32"))]
+fn print_coverage(not_applicable: &[(Feature, String)], unchecked: &[&str]) {
+    if !not_applicable.is_empty() {
+        eprintln!("\nnot applicable (declared by the fixture; cases gated on these did not run):");
+        for (f, why) in not_applicable {
+            eprintln!("  Feature::{f:?}: {why}");
+        }
+    }
+    if !unchecked.is_empty() {
+        eprintln!("\nnot checked:");
+        for u in unchecked {
+            eprintln!("  {u}");
+        }
+    }
 }
 
 /// The name of the trial that checks the fixture's declarations.
@@ -278,6 +311,10 @@ pub struct CaseReport {
 }
 
 /// Every case's outcome plus the declarations check, as produced by [`run_async`].
+///
+/// Non-exhaustive: the runner builds it, a host reads it, and new coverage fields land without a
+/// breaking change (`not_applicable` and `unchecked` were added in 0.4).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     /// Cases in run order.
@@ -286,6 +323,11 @@ pub struct Report {
     /// Empty when every selected case's features are declared. Covers the cases the run's
     /// `filter` selects, like `cases`; a run without a filter checks every case.
     pub undeclared: Vec<(Feature, Vec<String>)>,
+    /// Features the fixture declared not applicable, with its reasons ([`FixtureCaps::not_applicable_features`]):
+    /// every case gated on one was not run, whatever the counts say.
+    pub not_applicable: Vec<(Feature, String)>,
+    /// Checks the fixture turned off without a declaration (see [`unchecked`]).
+    pub unchecked: Vec<&'static str>,
 }
 
 impl Report {
@@ -344,7 +386,11 @@ pub async fn run_async<F: Fixture>(
         .expect("fixture provider registers");
     let typed = fx.typed();
     let all = cases::all::<F>();
-    let mut report = Report::default();
+    let mut report = Report {
+        not_applicable: caps.not_applicable_features(),
+        unchecked: unchecked(&*fx),
+        ..Report::default()
+    };
     for case in all.iter().filter(|c| selected(filter, c)) {
         if let Gate::Undeclared(fs) = gate(&caps, case) {
             for f in fs {
@@ -466,6 +512,24 @@ mod tests {
         };
         assert!(selected(Some("typed::x"), &typed_only));
         assert!(!selected(Some("registry::"), &typed_only));
+    }
+
+    /// L37: a run reports every feature the fixture declared not applicable, so a passing run
+    /// cannot hide the coverage the declarations removed.
+    #[test]
+    fn not_applicable_features_are_reported() {
+        let caps = FixtureCaps::new()
+            .supports(Feature::Aead)
+            .not_applicable(Feature::RequestCount, "no server")
+            .lacks(Feature::Throttle, "not here")
+            .not_applicable(Feature::Mac, "no MAC keys");
+        assert_eq!(
+            caps.not_applicable_features(),
+            vec![
+                (Feature::Mac, "no MAC keys".to_owned()),
+                (Feature::RequestCount, "no server".to_owned()),
+            ]
+        );
     }
 
     #[test]

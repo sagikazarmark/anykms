@@ -12,6 +12,12 @@ use anykms_core::time::Instant;
 // versions disabled).
 use anykms_http::cache::{SingleFlight, jittered_ttl};
 
+/// When an entry fetched at `from` expires: `ttl` ±10% later. The builder clamps the TTL, and an
+/// overflow still never panics: such an entry is expired at once (fails towards a re-read).
+fn expiry(from: Instant, ttl: Duration) -> Instant {
+    from.checked_add(jittered_ttl(ttl)).unwrap_or(from)
+}
+
 use anykms_core::{
     Ciphertext, Describe, Digest, DigestSigner, DigestVerifier, Error, ErrorKind, KeyInfo,
     KeyState, KeyTypeCheck, KeyVersion, KeyWrap, Operation, Preflight, PublicKey, PublicKeys,
@@ -47,12 +53,137 @@ pub(crate) enum Origin {
 /// (host, lowercase name, version).
 pub(crate) type CacheKey = (String, String, Option<String>);
 
-/// Key bundles read for the key-type check, shared per provider.
+/// Key bundles read for the key-type check, shared per provider: key → slot (expiry, bundle,
+/// store and drop marks).
+///
+/// A read stores its bundle only if its key was not dropped since it started
+/// ([`KeyCtx::forget`]), and a read that a stalled flight's replacement superseded stores
+/// nothing: a bundle never comes back after the key was found missing or changed.
+///
+/// # Conflicting reads
+///
+/// No instant taken on this side orders two reads of a key that overlapped: a transport may
+/// hold a request for any time after it is handed over (a tower `poll_ready`, a connection
+/// pool), so the read sent first may reach the vault last. Only reads that did not overlap are
+/// ordered: one that started after another's bundle was stored saw the vault after it. A store
+/// therefore takes the next value of a counter ([`mark`](Self::mark)) as its own mark, and a
+/// read that started before that mark and returns a different key ([`same_key`]) is a conflict:
+/// it neither replaces the cached bundle nor keeps it, but drops it, so the next request reads
+/// the key again (and reads still in flight from before the conflict store nothing). The same
+/// key from an overlapping read just stores again.
+///
+/// # Per-key drop marks
+///
+/// A drop, like a store, takes the next mark and records it in its own key's slot; a read
+/// stores only if its key's drop mark is not newer than the mark it started at. A drop
+/// therefore discards concurrent reads of its own key only: reads of other keys still store.
+/// The slot is emptied rather than removed (and created for a key with no entry), so the mark
+/// outlives the bundle it dropped. Slots expire like entries (an emptied one a TTL after its
+/// drop) and are pruned with them, whenever a read stores or a key is dropped, so the cache
+/// holds at most one slot per key used within a TTL. Pruning a drop mark raises `pruned` to
+/// it, and a read that started before `pruned` stores nothing: a dropped key's read can never
+/// store once its mark is gone, and a read of another key loses its store to a pruned mark only
+/// when it was in flight for longer than that mark's TTL (it is then read again by the next
+/// request).
 #[derive(Default)]
 pub(crate) struct DescribeCache {
-    entries: Mutex<HashMap<CacheKey, (Instant, Arc<KeyBundle>)>>,
+    entries: Mutex<Entries>,
     /// One key read at a time for concurrent misses (R-34).
     flights: SingleFlight<CacheKey, Result<Arc<KeyBundle>>>,
+}
+
+#[derive(Default)]
+struct Entries {
+    by_key: HashMap<CacheKey, Slot>,
+    /// Bumped by every store and every drop, under this lock: the mark a read starts at.
+    mark: u64,
+    /// The newest drop mark pruned with its slot: a read that started before it stores nothing.
+    pruned: u64,
+}
+
+/// One key's cached bundle, with its store and drop marks.
+struct Slot {
+    /// When the slot may be pruned: its bundle's expiry, or a TTL after its drop.
+    expires: Instant,
+    /// The cached bundle, while `expires` is ahead; `None` once dropped.
+    bundle: Option<Arc<KeyBundle>>,
+    /// The mark `bundle` was stored at (0: nothing stored).
+    stored: u64,
+    /// The mark of the key's latest drop (0: never dropped).
+    dropped: u64,
+}
+
+impl Entries {
+    /// Drops expired slots, keeping their drop marks in `pruned`.
+    fn prune(&mut self, now: Instant) {
+        let pruned = &mut self.pruned;
+        self.by_key.retain(|_, slot| {
+            let keep = now < slot.expires;
+            if !keep {
+                *pruned = (*pruned).max(slot.dropped);
+            }
+            keep
+        });
+    }
+
+    /// Drops `key`'s bundle; a read of that key that started before cannot store its own.
+    fn drop_key(&mut self, key: &CacheKey, now: Instant, ttl: Duration) {
+        self.prune(now);
+        self.mark += 1;
+        // The slot stays, emptied, to keep the mark.
+        self.by_key.insert(
+            key.clone(),
+            Slot {
+                expires: now.checked_add(ttl).unwrap_or(now),
+                bundle: None,
+                stored: 0,
+                dropped: self.mark,
+            },
+        );
+    }
+}
+
+/// Whether two bundles describe the same key as far as a handle relies on it: version (`kid`),
+/// type, curve, RSA size, operations, state and public key. Other metadata (`updated`, tags,
+/// the version list a describe adds) may differ.
+fn same_key(a: &KeyBundle, b: &KeyBundle) -> bool {
+    let (x, y) = (&a.info, &b.info);
+    x.key_id == y.key_id
+        && x.version == y.version
+        && x.key_type == y.key_type
+        && x.curve == y.curve
+        && x.rsa_bits == y.rsa_bits
+        && x.key_ops == y.key_ops
+        && x.enabled == y.enabled
+        && x.not_before == y.not_before
+        && x.expires == y.expires
+        && a.public == b.public
+}
+
+impl DescribeCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The mark a read about to be sent stores under (see [`KeyCtx::store`]).
+    fn mark(&self) -> u64 {
+        self.lock().mark
+    }
+
+    /// An empty cache whose followers replace a stalled leader after `transport`'s bound (L29).
+    pub(crate) fn bounded_by(transport: &dyn anykms_http::HttpTransport) -> Self {
+        let c = Self::default();
+        c.flights.bound_by(transport);
+        c
+    }
+
+    /// The single-flight wait bound (tests).
+    #[cfg(test)]
+    pub(crate) fn wait_bound(&self) -> Option<Duration> {
+        self.flights.max_wait()
+    }
 }
 
 /// Everything a handle needs to reach one key.
@@ -189,23 +320,22 @@ impl KeyCtx {
         )
     }
 
+    /// Drops the cached bundle; a read of this key that started before cannot store its own.
+    /// Reads of other keys are unaffected (see [`DescribeCache`]).
     fn forget(&self) {
         self.cache
-            .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.cache_key());
+            .drop_key(&self.cache_key(), Instant::now(), self.client.cache_ttl);
     }
 
     fn cached(&self) -> Option<Arc<KeyBundle>> {
         let now = Instant::now();
         self.cache
-            .entries
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_key
             .get(&self.cache_key())
-            .filter(|(exp, _)| now < *exp)
-            .map(|(_, b)| b.clone())
+            .filter(|slot| now < slot.expires)
+            .and_then(|slot| slot.bundle.clone())
     }
 
     fn url(&self, version: Option<&str>, action: Option<&str>) -> Result<anykms_http::url::Url> {
@@ -288,43 +418,72 @@ impl KeyCtx {
     }
 
     /// The bundle of the URI's version (or the current one), cached for the key-type check.
-    /// Concurrent misses for the key share one read and its result, a failure included (R-34).
+    /// Concurrent misses for the key share one read and its result, a failure included (R-34);
+    /// the bundle is cached as the flight lands, unless a replacement superseded that flight.
     pub(crate) async fn bundle(&self, op: Operation) -> Result<Arc<KeyBundle>> {
         if let Some(b) = self.cached() {
             return Ok(b);
         }
+        let started = self.cache.mark();
         self.cache
             .flights
-            .run(&self.cache_key(), || async {
-                // A flight that landed after the miss above has filled the cache.
-                if let Some(b) = self.cached() {
-                    return Ok(b);
-                }
-                let b = Arc::new(
-                    self.get_bundle(Origin::Handle, self.uri.version(), op)
-                        .await?,
-                );
-                self.store(b.clone());
-                Ok(b)
-            })
+            .run_and_commit(
+                &self.cache_key(),
+                || async {
+                    // A flight that landed after the miss above has filled the cache.
+                    if let Some(b) = self.cached() {
+                        return Ok(b);
+                    }
+                    let b = self
+                        .get_bundle(Origin::Handle, self.uri.version(), op)
+                        .await?;
+                    Ok(Arc::new(b))
+                },
+                |r| {
+                    if let Ok(b) = r {
+                        self.store(started, b);
+                    }
+                },
+            )
             .await
             // The flight may have been another operation's.
             .map_err(|e| e.with_operation(op))
     }
 
-    /// Caches `b` as the bundle of the URI's version (or the current one).
-    fn store(&self, b: Arc<KeyBundle>) {
+    /// Caches the bundle a read that started at mark `started` returned, as the bundle of the
+    /// URI's version (or the current one), see [`DescribeCache`]: not if this key was dropped
+    /// since (or a drop mark newer than `started` was pruned). A different key stored since by
+    /// an overlapping read is a conflict, which drops the key instead.
+    fn store(&self, started: u64, b: &Arc<KeyBundle>) {
+        let key = self.cache_key();
+        let ttl = self.client.cache_ttl;
+        let mut cache = self.cache.lock();
         let now = Instant::now();
-        let mut cache = self
-            .cache
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.retain(|_, (exp, _)| now < *exp);
-        cache.insert(
-            self.cache_key(),
-            (now + jittered_ttl(self.client.cache_ttl), b),
-        );
+        cache.prune(now);
+        if started < cache.pruned {
+            return;
+        }
+        if let Some(slot) = cache.by_key.get(&key) {
+            if started < slot.dropped {
+                return;
+            }
+            if started < slot.stored && slot.bundle.as_ref().is_some_and(|c| !same_key(c, b)) {
+                cache.drop_key(&key, now, ttl);
+                return;
+            }
+        }
+        cache.mark += 1;
+        let stored = cache.mark;
+        let expires = expiry(now, ttl);
+        let slot = cache.by_key.entry(key).or_insert(Slot {
+            expires,
+            bundle: None,
+            stored: 0,
+            dropped: 0,
+        });
+        slot.expires = expires;
+        slot.bundle = Some(b.clone());
+        slot.stored = stored;
     }
 
     /// The `Preflight` of every handle: a fresh read of the key (the metadata `describe`
@@ -337,13 +496,14 @@ impl KeyCtx {
     ) -> Result<KeyInfo> {
         self.scoped(async {
             let op = Operation::Describe;
+            let started = self.cache.mark();
             let (b, info) = self.azure_info_with_bundle().await?;
             if let Err(e) = check(&b) {
                 self.forget();
                 return Err(e.with_operation(op));
             }
             let usable = check_usable(&b.info, op);
-            self.store(Arc::new(b));
+            self.store(started, &Arc::new(b));
             usable?;
             Ok(info.to_key_info())
         })
@@ -365,6 +525,25 @@ impl KeyCtx {
             return Err(e.with_operation(op));
         }
         Ok(Some(b))
+    }
+
+    /// [`ensure`](Self::ensure) for an operation on `version`, a version named by input (a
+    /// signature's or a frame's). The cached bundle describes the URI's version or the current
+    /// one; when `version` is another (older) version, which may have another RSA size or even
+    /// another key type, the check is skipped and the vault judges that version (review L20).
+    /// `check` must not depend on anything else from the input, so input never drops the
+    /// cached bundle (review L13). Returns the bundle only when it describes `version`.
+    async fn ensure_version(
+        &self,
+        op: Operation,
+        version: &str,
+        check: impl Fn(&KeyBundle) -> Result<()>,
+    ) -> Result<Option<Arc<KeyBundle>>> {
+        let describes = |b: &KeyBundle| b.info.version.eq_ignore_ascii_case(version);
+        let b = self
+            .ensure(op, |b| if describes(b) { check(b) } else { Ok(()) })
+            .await?;
+        Ok(b.filter(|b| describes(b)))
     }
 
     /// A write (`sign`, `wrapkey`, `encrypt`, HS* `sign`): on the URI's version, else
@@ -749,7 +928,7 @@ impl LocalVerifiers {
         if self.ttl.is_zero() {
             return;
         }
-        let exp = fetched + jittered_ttl(self.ttl);
+        let exp = expiry(fetched, self.ttl);
         insert_bounded(&mut self.state().keys, version, (exp, v));
     }
 
@@ -757,7 +936,7 @@ impl LocalVerifiers {
         if self.ttl.is_zero() {
             return;
         }
-        let exp = fetched + jittered_ttl(self.ttl);
+        let exp = expiry(fetched, self.ttl);
         insert_bounded(&mut self.state().unknown, version, (exp, e));
     }
 }
@@ -897,8 +1076,9 @@ impl AzureDigestKey {
         let (version, raw) = self.verify_input(sig)?;
         let bundle = self
             .k
-            .ensure(op, check_signing(self.alg, Some("verify")))
+            .ensure_version(op, &version, check_signing(self.alg, Some("verify")))
             .await?;
+        // Exact size only against the signature's own version (review L20).
         if let Some(k) = modulus_len(bundle.as_ref())
             && raw.len() != k
         {
@@ -998,11 +1178,14 @@ async fn bundle_public_key(
     let version = match version {
         // Untrusted (often a JWT `kid`): checked before any I/O, never another key. A URI
         // that pins a version trusts that version only, as verification does.
+        // Only the canonical (lowercase) form, as Azure names its versions: the returned key
+        // carries the canonical version, and a caller comparing it with what it asked for
+        // (`CachedVerifier`) must never see a mismatch it would not remember (review L14(a)).
         Some(v) => {
-            let v = parse_version(v).ok_or_else(|| {
+            let v = parse_version(v).filter(|c| c == v).ok_or_else(|| {
                 invalid(
                     op,
-                    "malformed key version (Azure versions are 32 hex characters)",
+                    "malformed key version (Azure versions are 32 lowercase hex characters)",
                 )
             })?;
             if k.uri.version().is_some_and(|p| p != v) {
@@ -1208,6 +1391,12 @@ fn check_rsa_wrap(b: &KeyBundle) -> Result<()> {
     Ok(())
 }
 
+/// The key can unwrap, with whichever wrap algorithm its type has (input-independent: the
+/// frame's algorithm is compared separately).
+fn check_unwrap(b: &KeyBundle) -> Result<()> {
+    check_wrap(wrap_alg_of(b, Operation::Open)?, "unwrapKey")(b)
+}
+
 fn check_wrap(alg: FrameAlg, op_name: &'static str) -> impl Fn(&KeyBundle) -> Result<()> {
     move |b: &KeyBundle| {
         if wrap_alg_of(b, Operation::Open)? != alg {
@@ -1358,15 +1547,29 @@ impl AzureKeyWrapKey {
             ));
         }
         let version = self.k.input_version(frame.version(), op)?;
-        let bundle = self.k.ensure(op, check_wrap(alg, "unwrapKey")).await?;
-        if alg == FrameAlg::RsaOaep256
-            && let Some(k) = modulus_len(bundle.as_ref())
-            && frame.body().len() != k
-        {
-            return Err(decrypt_failed(
-                op,
-                "wrapped key has the wrong size for the key",
-            ));
+        // The key-type check depends on the key only (review L13): a frame's algorithm byte is
+        // input, so a mismatch with it is a failed decryption, never `KeyMismatch` with the
+        // cached bundle dropped.
+        let bundle = self.k.ensure_version(op, &version, check_unwrap).await?;
+        if let Some(b) = &bundle {
+            if wrap_alg_of(b, op).ok() != Some(alg) {
+                return Err(decrypt_failed(
+                    op,
+                    "wrapped key was made with another key type",
+                ));
+            }
+            if alg == FrameAlg::RsaOaep256
+                && let Some(k) = modulus_len(Some(b))
+                && frame.body().len() != k
+            {
+                return Err(decrypt_failed(
+                    op,
+                    "wrapped key has the wrong size for the key",
+                ));
+            }
+        } else if alg == FrameAlg::RsaOaep256 && !(256..=2048).contains(&frame.body().len()) {
+            // Another version (or TrustCaller): only the sizes an RSA key can have.
+            return Err(decrypt_failed(op, "wrapped key has the wrong size"));
         }
         let value = b64(frame.body());
         let req = OpReq::new(alg.azure_name(), &value);
@@ -1384,6 +1587,9 @@ impl AzureKeyWrapKey {
             self.k
                 .bad_response(op, "unexpected unwrapkey response format")
         })?;
+        // Like every other operation: the response names this key and the requested version.
+        self.k
+            .returned_version(r.kid.as_deref(), Some(&version), op)?;
         decode_secret(r.value).ok_or_else(|| {
             self.k
                 .bad_response(op, "unexpected unwrapkey response format")
@@ -1545,6 +1751,9 @@ impl AzureAeadKey {
             self.k
                 .bad_response(op, "unexpected decrypt response format")
         })?;
+        // Like every other operation: the response names this key and the requested version.
+        self.k
+            .returned_version(r.kid.as_deref(), Some(&version), op)?;
         decode_secret(r.value).ok_or_else(|| {
             self.k
                 .bad_response(op, "unexpected decrypt response format")
@@ -1818,5 +2027,64 @@ pub(crate) fn fuzz_decode_success(which: u8, body: &[u8]) -> bool {
             .is_some(),
         1 => serde_json::from_slice::<VerifyResp>(body).is_ok(),
         _ => KeyBundle::parse(body, VaultKind::Vault).is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Expired slots are pruned, drop marks included, so the cache stays bounded; a pruned mark
+    /// is kept in `pruned`, which still stops a read from before it.
+    #[test]
+    fn expired_slots_and_their_drop_marks_are_pruned() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(600);
+        let key = |n: &str| ("kv1.vault.azure.net".to_owned(), n.to_owned(), None);
+        let bundle = KeyBundle::parse(
+            br#"{"key": {"kid": "https://kv1.vault.azure.net/keys/cached/0123456789abcdef0123456789abcdef", "kty": "oct-HSM"}}"#,
+            VaultKind::ManagedHsm,
+        )
+        .unwrap();
+        let mut entries = Entries {
+            mark: 3,
+            ..Entries::default()
+        };
+        entries.by_key.insert(
+            key("dropped"),
+            Slot {
+                expires: now + ttl,
+                bundle: None,
+                stored: 0,
+                dropped: 3,
+            },
+        );
+        entries.by_key.insert(
+            key("cached"),
+            Slot {
+                expires: now + 2 * ttl,
+                bundle: Some(Arc::new(bundle)),
+                stored: 2,
+                dropped: 1,
+            },
+        );
+        entries.prune(now);
+        assert_eq!((entries.by_key.len(), entries.pruned), (2, 0));
+        entries.prune(now + ttl);
+        assert_eq!(entries.by_key.len(), 1);
+        assert!(entries.by_key.contains_key(&key("cached")));
+        assert_eq!(
+            entries.pruned, 3,
+            "a read from before the pruned mark stores nothing"
+        );
+        entries.prune(now + 2 * ttl);
+        assert!(entries.by_key.is_empty());
+        assert_eq!(entries.pruned, 3, "the newest pruned mark is kept");
+
+        // A drop prunes too, and keeps its own mark in an emptied slot.
+        entries.drop_key(&key("again"), now + 3 * ttl, ttl);
+        let slot = &entries.by_key[&key("again")];
+        assert!(slot.bundle.is_none());
+        assert_eq!((slot.dropped, entries.mark), (4, 4));
     }
 }

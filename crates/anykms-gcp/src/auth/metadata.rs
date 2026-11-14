@@ -2,8 +2,10 @@
 //!
 //! `GET http://<host>/computeMetadata/v1/instance/service-accounts/default/token` with
 //! `Metadata-Flavor: Google`; the response must carry `Metadata-Flavor: Google` too. Plain HTTP
-//! only to `169.254.169.254`, `metadata.google.internal`, the `GCE_METADATA_HOST` override or the
-//! [`AuthEndpoints::custom`](super::AuthEndpoints::custom) origin; never a redirect.
+//! only to `169.254.169.254`, the `GCE_METADATA_HOST` override (a loopback or link-local IP,
+//! `localhost`, `metadata.google.internal` or `fd20:ce::254`, unless
+//! [`allow_remote_http_credentials`](crate::GcpProviderBuilder::allow_remote_http_credentials))
+//! or the [`AuthEndpoints::custom`](super::AuthEndpoints::custom) origin; never a redirect.
 
 use std::time::Duration;
 
@@ -35,8 +37,10 @@ pub(crate) fn origin(ctx: &AuthCtx) -> Result<Url> {
     if host.contains(['/', '?', '#', '@']) {
         return Err(config_err("GCE_METADATA_HOST must be host[:port]"));
     }
-    Url::parse(&format!("http://{host}/"))
-        .map_err(|_| config_err("GCE_METADATA_HOST must be host[:port]"))
+    let url = Url::parse(&format!("http://{host}/"))
+        .map_err(|_| config_err("GCE_METADATA_HOST must be host[:port]"))?;
+    super::check_plain_http(&url, ctx, "GCE_METADATA_HOST")?;
+    Ok(url)
 }
 
 pub(crate) struct Metadata {
@@ -77,7 +81,8 @@ pub(crate) fn source(ctx: &AuthCtx) -> Result<Cached<Metadata>> {
     Ok(Cached::new(Metadata {
         http: ctx.http.clone(),
         token_url,
-    }))
+    })
+    .bounded_by(&*ctx.http))
 }
 
 /// Whether a metadata server answers at `base` (any response with `Metadata-Flavor: Google`)

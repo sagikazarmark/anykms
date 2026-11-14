@@ -522,12 +522,15 @@ impl FromStr for SignatureAlgorithm {
 }
 
 fn unknown_algorithm(what: &str, s: &str) -> Error {
-    // The input comes from configuration, not from a secret, so naming it is safe and useful.
+    // The input comes from configuration, not from a secret, so naming it is safe and useful;
+    // escaped (`{:?}`) and cut at 64 characters, as any string may arrive here.
+    let shown: String = s.chars().take(64).collect();
+    let more = if shown.len() < s.len() { "..." } else { "" };
     Error::new(
         ErrorKind::InvalidArgument,
         "anykms",
         Operation::Construct,
-        format!("unknown {what} algorithm {s:?}"),
+        format!("unknown {what} algorithm {shown:?}{more}"),
     )
 }
 
@@ -652,8 +655,9 @@ impl Signature {
     /// algorithm, key version and bytes) as standard base64 (padded), for text columns and JSON.
     /// Decode with [`from_base64`](Self::from_base64).
     ///
-    /// Fails with `InvalidArgument` only for a key version longer than 255 bytes, which no
-    /// backend issues (see the [`encoding`](crate::encoding) docs).
+    /// Fails with `InvalidArgument` only for a key version no backend issues (longer than 255
+    /// bytes, or not printable ASCII) or a tag of the wrong length (see the
+    /// [`encoding`](crate::encoding) docs).
     pub fn to_base64(&self) -> Result<String> {
         Ok(STANDARD.encode(crate::encoding::encode_signature(self)?))
     }
@@ -690,14 +694,35 @@ impl fmt::Debug for Signature {
 
 /// A MAC tag, tagged with its algorithm and key version.
 ///
-/// `PartialEq` is **not** constant-time: verify tags with [`Mac::verify_mac`](crate::Mac::verify_mac),
-/// never with `==`.
+/// Verify tags with [`Mac::verify_mac`](crate::Mac::verify_mac). `==` compares the tag bytes in
+/// constant time (the algorithm, key version and length are not secret), so comparing a stored
+/// tag with one computed by [`Mac::mac`](crate::Mac::mac) does not leak how many bytes match.
 #[non_exhaustive]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct Tag {
     alg: MacAlgorithm,
     key_version: Option<KeyVersion>,
     bytes: Vec<u8>,
+}
+
+impl PartialEq for Tag {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq as _;
+        self.alg == other.alg
+            && self.key_version == other.key_version
+            // `ct_eq` on slices returns early on a length mismatch only (lengths are public).
+            && bool::from(self.bytes.ct_eq(&other.bytes))
+    }
+}
+
+impl Eq for Tag {}
+
+impl std::hash::Hash for Tag {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.alg, state);
+        self.key_version.hash(state);
+        self.bytes.hash(state);
+    }
 }
 
 impl Tag {
@@ -733,8 +758,9 @@ impl Tag {
     /// algorithm, key version and bytes) as standard base64 (padded), for text columns and JSON.
     /// Decode with [`from_base64`](Self::from_base64).
     ///
-    /// Fails with `InvalidArgument` only for a key version longer than 255 bytes, which no
-    /// backend issues (see the [`encoding`](crate::encoding) docs).
+    /// Fails with `InvalidArgument` only for a key version no backend issues (longer than 255
+    /// bytes, or not printable ASCII) or a tag of the wrong length (see the
+    /// [`encoding`](crate::encoding) docs).
     pub fn to_base64(&self) -> Result<String> {
         Ok(STANDARD.encode(crate::encoding::encode_tag(self)?))
     }
@@ -1514,5 +1540,38 @@ mod tests {
         assert_eq!(d.key_version(), Some(&KeyVersion::from(2)));
         assert_eq!(d.used_primary(), Some(false));
         assert_eq!(&*d.into_plaintext(), b"AAAA");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    /// L25: the echoed algorithm name is bounded.
+    #[test]
+    fn unknown_algorithm_echo_is_bounded() {
+        let e = "x".repeat(10_000).parse::<MacAlgorithm>().unwrap_err();
+        assert!(e.message().len() < 200, "{}", e.message().len());
+    }
+
+    /// L33: equality keeps its meaning (algorithm, version and bytes all compared); the byte
+    /// comparison itself is constant-time, which a functional test cannot observe.
+    #[test]
+    fn tag_equality_semantics() {
+        let t = |alg, v: Option<u64>, b: &[u8]| {
+            Tag::from_parts(alg, v.map(KeyVersion::from), b.to_vec())
+        };
+        let a = t(MacAlgorithm::HmacSha256, Some(1), &[1; 32]);
+        assert_eq!(a, a.clone());
+        assert_ne!(a, t(MacAlgorithm::HmacSha256, Some(1), &[2; 32]));
+        assert_ne!(a, t(MacAlgorithm::HmacSha256, Some(2), &[1; 32]));
+        assert_ne!(a, t(MacAlgorithm::HmacSha256, None, &[1; 32]));
+        assert_ne!(a, t(MacAlgorithm::HmacSha384, Some(1), &[1; 32]));
+        assert_ne!(a, t(MacAlgorithm::HmacSha256, Some(1), &[1; 31]));
+        let mut last = [1u8; 32];
+        last[31] = 0;
+        assert_ne!(a, t(MacAlgorithm::HmacSha256, Some(1), &last));
+        let set: std::collections::HashSet<Tag> = [a.clone(), a.clone()].into_iter().collect();
+        assert_eq!(set.len(), 1);
     }
 }

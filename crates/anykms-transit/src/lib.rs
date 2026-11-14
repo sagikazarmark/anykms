@@ -116,13 +116,15 @@
 //!
 //! # Zeroization limits
 //!
-//! Request and response bodies, decoded plaintexts, data keys, tokens and the mTLS key PEM are
-//! held in zeroizing buffers that grow without leaving unwiped copies. Copies outside anykms'
+//! Request and response bodies, decoded plaintexts, data keys, tokens and the TLS PEMs
+//! [`EnvConfig`] reads (CA bundle, client certificate and key) are held in zeroizing buffers that
+//! grow without leaving unwiped copies. Copies outside anykms'
 //! control are not wiped: with the built-in transport, the body reqwest sends and the token in its
 //! `X-Vault-Token` header value (another transport decides for itself);
-//! the process environment (`VAULT_TOKEN`), hyper/rustls buffers, kernel socket buffers, and the
+//! the process environment (`VAULT_TOKEN`), hyper/rustls buffers, kernel socket buffers, the
 //! parsed mTLS signing key inside the crypto provider (aws-lc clears it when freed; ring does
-//! not).
+//! not), and the sections rustls-pki-types decodes while it looks for certificates in a PEM (a
+//! private key in a CA or certificate file is decoded, then dropped without being wiped).
 //!
 //! # Public dependencies
 //!
@@ -155,7 +157,7 @@ pub(crate) const BACKEND: &str = "transit";
 /// [`ReqwestTransport`](anykms_http::ReqwestTransport) for [`ServerConfig::http_transport`].
 pub use anykms_http;
 pub use auth::{KUBERNETES_SERVICE_ACCOUNT_TOKEN, Login};
-pub use config::{EnvConfig, Flavor, ServerConfig};
+pub use config::{EnvConfig, EnvTls, Flavor, ServerConfig};
 pub use handles::{TransitAeadKey, TransitDigestKey, TransitEd25519Key, TransitMacKey};
 pub use keyinfo::{TransitKeyInfo, TransitKeyType};
 pub use provider::{TransitProvider, TransitProviderBuilder};
@@ -179,14 +181,7 @@ pub mod __fuzz {
 
     /// Error-response classification.
     pub fn classify(status: u16, body: &[u8]) -> anykms_core::ErrorKind {
-        #[derive(serde::Deserialize)]
-        struct E {
-            #[serde(default)]
-            errors: Vec<String>,
-        }
-        let messages = serde_json::from_slice::<E>(body)
-            .map(|e| e.errors)
-            .unwrap_or_default();
+        let messages = crate::errors::ErrorBody::messages(body);
         crate::errors::classify(&crate::errors::Failure {
             status,
             messages: &messages,

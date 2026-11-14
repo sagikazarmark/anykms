@@ -2393,3 +2393,266 @@ async fn local_verifier_keys_expire_and_unknown_versions_are_remembered() {
     );
     assert_eq!(reads(V1.to_owned()).await, 4);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Security review regressions
+
+/// Review L13: on a Managed HSM, a wrapped key whose frame names the other wrap algorithm (an
+/// attacker flipped the algorithm byte) is `DecryptFailed`, before any request, and never drops
+/// the cached key bundle (no key read per forged frame). Both directions; TrustCaller handles do
+/// not evict the shared bundle either.
+#[tokio::test]
+async fn review_l13_mhsm_tampered_frame_alg_is_decrypt_failed_without_eviction() {
+    let env = Env::new().await;
+    let ops = ["wrapKey", "unwrapKey"];
+    env.bundle("aes", V1, env.oct_bundle("aes", V1, &ops)).await;
+    env.bundle("rsa", V1, env.rsa_bundle("rsa", V1, &ops)).await;
+    let p = env.mhsm_provider();
+    for (name, flipped) in [
+        (
+            "aes",
+            framing::encode(framing::FrameAlg::RsaOaep256, V1, &[1; 256]).unwrap(),
+        ),
+        (
+            "rsa",
+            framing::encode(framing::FrameAlg::A256Kw, V1, &[1; 40]).unwrap(),
+        ),
+    ] {
+        let k = p.key_wrap(&env.uri(name), &OpenOptions::new()).unwrap();
+        k.preflight().await.unwrap();
+        let get = format!("/keys/{name}");
+        let reads = env.requests("GET", &get).await.len();
+        let posts = env.server.received_requests().await.unwrap().len();
+        let bad = Ciphertext::from_bytes(flipped);
+        for _ in 0..5 {
+            let e = k.unwrap_key(&bad).await.unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::DecryptFailed, "{name}: {e}");
+        }
+        assert_eq!(
+            env.requests("GET", &get).await.len(),
+            reads,
+            "{name}: a forged frame dropped the cached bundle"
+        );
+        assert_eq!(
+            env.server.received_requests().await.unwrap().len(),
+            posts,
+            "{name}: a forged frame cost a request"
+        );
+    }
+    // TrustCaller: no bundle to compare with, so the vault refuses it (input class: no eviction
+    // of the bundle other handles share).
+    env.post(
+        &format!("/keys/aes/{V1}/unwrapkey"),
+        400,
+        err_body("BadParameter", None, "wrong algorithm"),
+    )
+    .await;
+    let trusting = p
+        .key_wrap(
+            &env.uri("aes"),
+            &OpenOptions::new().with_key_type_check(KeyTypeCheck::TrustCaller),
+        )
+        .unwrap();
+    let checked = p.key_wrap(&env.uri("aes"), &OpenOptions::new()).unwrap();
+    checked.preflight().await.unwrap();
+    let reads = env.requests("GET", "/keys/aes").await.len();
+    let bad = Ciphertext::from_bytes(
+        framing::encode(framing::FrameAlg::RsaOaep256, V1, &[1; 256]).unwrap(),
+    );
+    let e = trusting.unwrap_key(&bad).await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::DecryptFailed, "{e}");
+    let e = checked.unwrap_key(&bad).await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::DecryptFailed, "{e}");
+    assert_eq!(env.requests("GET", "/keys/aes").await.len(), reads);
+}
+
+/// Review L14(a): a version from input that is not in Azure's canonical (lowercase) form is
+/// refused as `InvalidArgument` before any request, so a verifier that compares the returned
+/// version exactly never sees a mismatch it would not cache.
+#[tokio::test]
+async fn review_l14a_non_canonical_input_versions_are_refused_before_io() {
+    let env = Env::new().await;
+    env.bundle("sig", V1, env.ec_bundle("sig", V1, &["sign", "verify"]))
+        .await;
+    let k = env
+        .provider()
+        .digest_signing_key(env.uri("sig"), SignatureAlgorithm::EcdsaP256Sha256)
+        .unwrap();
+    let before = env.server.received_requests().await.unwrap().len();
+    let upper = KeyVersion::new(V1.to_ascii_uppercase());
+    let e = k.public_key_version(&upper).await.unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidArgument, "{e}");
+    assert_eq!(env.server.received_requests().await.unwrap().len(), before);
+    // The canonical form works.
+    let pk = k.public_key_version(&KeyVersion::new(V1)).await.unwrap();
+    assert_eq!(pk.key_version().map(KeyVersion::as_str), Some(V1));
+}
+
+/// A 4096-bit RSA bundle (the modulus is only sized, never used).
+fn rsa4096_bundle(env: &Env, name: &str, v: &str, ops: &[&str]) -> Value {
+    let mut n = vec![0xc5u8; 512];
+    n[511] |= 1;
+    json!({
+        "key": {"kid": env.kid(name, v), "kty": "RSA-HSM", "n": b64u(&n), "e": b64u(&[1, 0, 1]), "key_ops": ops},
+        "attributes": {"enabled": true, "created": 1_700_000_000}
+    })
+}
+
+/// Review L20: the exact RSA size check applies only to input that names the bundle's own
+/// version. An old version of another size (or another key type) is the vault's to judge, so data
+/// wrapped or signed before such a rotation stays usable, and nothing drops the cached bundle.
+#[tokio::test]
+async fn review_l20_old_versions_of_another_size_or_type_still_work() {
+    // Wrapped under a 4096-bit V1; the current version V2 is 2048 bits.
+    let env = Env::new().await;
+    let ops = ["wrapKey", "unwrapKey"];
+    env.bundle("kek", V2, env.rsa_bundle("kek", V2, &ops)).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/keys/kek/{V1}/unwrapkey")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"kid": env.kid("kek", V1), "value": b64u(&[9u8; 32])})),
+        )
+        .mount(&env.server)
+        .await;
+    let k = env.provider().key_wrap_key(env.uri("kek")).unwrap();
+    let old = Ciphertext::from_bytes(
+        framing::encode(framing::FrameAlg::RsaOaep256, V1, &[7; 512]).unwrap(),
+    );
+    assert_eq!(&*k.unwrap_key(&old).await.unwrap(), &[9u8; 32]);
+    // The current version's own size is still checked before any request.
+    let before = env.server.received_requests().await.unwrap().len();
+    let short = Ciphertext::from_bytes(
+        framing::encode(framing::FrameAlg::RsaOaep256, V2, &[7; 512]).unwrap(),
+    );
+    assert_eq!(
+        k.unwrap_key(&short).await.unwrap_err().kind(),
+        ErrorKind::DecryptFailed
+    );
+    assert_eq!(env.server.received_requests().await.unwrap().len(), before);
+
+    // The current version is 4096 bits; a 2048-bit V1 signature is verified by the vault.
+    let env = Env::new().await;
+    env.bundle(
+        "sig",
+        V2,
+        rsa4096_bundle(&env, "sig", V2, &["sign", "verify"]),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/keys/sig/{V1}/verify")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": true})))
+        .expect(1)
+        .mount(&env.server)
+        .await;
+    let alg = SignatureAlgorithm::RsaPssSha256;
+    let k = env
+        .provider()
+        .digest_signing_key(env.uri("sig"), alg)
+        .unwrap();
+    let sig = Signature::from_parts(alg, Some(KeyVersion::new(V1)), vec![3; 256]);
+    k.verify_digest(&Digest::sha256(b"m"), &sig).await.unwrap();
+
+    // The key's current version is now an EC key: old RSA-wrapped keys still unwrap (the vault
+    // checks V1's type), and the bundle is not dropped and read again for each of them.
+    let env = Env::new().await;
+    env.bundle("kek", V2, env.ec_bundle("kek", V2, &["sign", "verify"]))
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/keys/kek/{V1}/unwrapkey")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"kid": env.kid("kek", V1), "value": b64u(&[9u8; 32])})),
+        )
+        .mount(&env.server)
+        .await;
+    let k = env.provider().key_wrap_key(env.uri("kek")).unwrap();
+    let old = Ciphertext::from_bytes(
+        framing::encode(framing::FrameAlg::RsaOaep256, V1, &[7; 256]).unwrap(),
+    );
+    for _ in 0..3 {
+        assert_eq!(&*k.unwrap_key(&old).await.unwrap(), &[9u8; 32]);
+    }
+    assert_eq!(env.requests("GET", "/keys/kek").await.len(), 1);
+    // Wrapping with the (now EC) key is still a key mismatch.
+    assert_eq!(
+        k.wrap_key(&[1; 32]).await.unwrap_err().kind(),
+        ErrorKind::KeyMismatch
+    );
+}
+
+/// Review (Azure informational): unwrap and AES-GCM decrypt check the response `kid` like every
+/// other operation: a response naming another key or version is `Backend`, never a plaintext.
+#[tokio::test]
+async fn review_unwrap_and_decrypt_check_the_response_kid() {
+    let env = Env::new().await;
+    let ops = ["wrapKey", "unwrapKey", "encrypt", "decrypt"];
+    env.bundle("kek", V1, env.rsa_bundle("kek", V1, &ops)).await;
+    env.bundle("aes", V1, env.oct_bundle("aes", V1, &ops)).await;
+    env.post(
+        &format!("/keys/kek/{V1}/unwrapkey"),
+        200,
+        json!({"kid": env.kid("kek", V2), "value": b64u(&[9u8; 32])}),
+    )
+    .await;
+    env.post(
+        &format!("/keys/aes/{V1}/decrypt"),
+        200,
+        json!({"kid": env.kid("other", V1), "value": b64u(b"pt")}),
+    )
+    .await;
+    let p = env.mhsm_provider();
+    let w = Ciphertext::from_bytes(
+        framing::encode(framing::FrameAlg::RsaOaep256, V1, &[7; 256]).unwrap(),
+    );
+    let e = p
+        .key_wrap_key(env.uri("kek"))
+        .unwrap()
+        .unwrap_key(&w)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Backend, "{e}");
+    let ct = Ciphertext::from_bytes(framing::encode_gcm(V1, &[0; 12], b"x", &[0; 16]).unwrap());
+    let e = p
+        .aead_key(env.uri("aes"))
+        .unwrap()
+        .decrypt(&ct, b"")
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Backend, "{e}");
+}
+
+/// Review L28: a "cache forever" TTL (`Duration::MAX`) is clamped, never a panic, at open (local
+/// verification) or on the first key read.
+#[tokio::test]
+async fn review_l28_huge_key_cache_ttl_does_not_panic() {
+    let env = Env::new().await;
+    env.bundle("sig", V1, env.ec_bundle("sig", V1, &["sign", "verify"]))
+        .await;
+    let digest = Digest::sha256(b"m");
+    env.post(
+        "/keys/sig/sign",
+        200,
+        json!({"kid": env.kid("sig", V1), "value": b64u(&ec_sign(digest.as_bytes()))}),
+    )
+    .await;
+    let p = AzureProvider::builder()
+        .credential(StaticToken::new("tok-1"))
+        .test_host(env.test_host())
+        .http_transport(transport(Duration::from_secs(5)))
+        .key_cache_ttl(Duration::MAX)
+        .build()
+        .unwrap();
+    let alg = SignatureAlgorithm::EcdsaP256Sha256;
+    let local = OpenOptions::new().with_extension(AzureOptions::new().local_verify());
+    let k = p
+        .digest_signing_key_with(env.uri("sig"), alg, &local)
+        .unwrap();
+    let sig = k.sign_digest(&digest).await.unwrap();
+    k.verify_digest(&digest, &sig).await.unwrap();
+    k.verify_digest(&digest, &sig).await.unwrap();
+    assert_eq!(
+        env.requests("GET", &format!("/keys/sig/{V1}")).await.len(),
+        1
+    );
+}

@@ -983,10 +983,11 @@ async fn corrupted_responses_are_refused_on_every_operation() {
 }
 
 /// P1-4 and P1-13: 100 distinct forged versions through verify, `public_key_version` and MAC
-/// verification never drop the handle's key-type check; with the public-key cache on, each
-/// forged version costs one version-state lookup (no `getPublicKey`), and a repeat costs none
-/// (the negative cache). A3: verifying with a forged version is `VerificationFailed`, its public
-/// key `UnknownKeyVersion`.
+/// verification never drop the handle's key-type check. With the public-key cache on, the first
+/// forged version costs one version-state lookup (no `getPublicKey`) and one read of the key's
+/// latest version (`cryptoKeyVersions.list`); every later version above the latest costs none
+/// until `public_key_ttl` expires (L17). A3: verifying with a forged version is
+/// `VerificationFailed`, its public key `UnknownKeyVersion`.
 #[tokio::test]
 async fn forged_versions_do_not_flush_the_checks() {
     let fake = FakeKms::start().await;
@@ -1032,8 +1033,8 @@ async fn forged_versions_do_not_flush_the_checks() {
     assert_eq!(fake.calls("GET publicKey"), keys);
     assert_eq!(
         fake.requests(),
-        before + 200,
-        "one version-state lookup and one macVerify each"
+        before + 102,
+        "one version-state lookup and one list in all, one macVerify each"
     );
     // The checks still stand: signing and MACing make no check request.
     let before = fake.requests();

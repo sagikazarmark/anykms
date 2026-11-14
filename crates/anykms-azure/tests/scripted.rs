@@ -10,7 +10,7 @@ use anykms_azure::{
     AzureCredential, AzureProvider, ClientSecret, ManagedIdentity, StaticToken, WorkloadIdentity,
 };
 use anykms_core::prelude::*;
-use anykms_core::{ErrorKind, KeyTypeCheck};
+use anykms_core::{ErrorKind, KeyTypeCheck, SignatureAlgorithm};
 use anykms_testkit::{Scripted, ScriptedTransport, SeenRequest};
 use serde_json::json;
 
@@ -259,4 +259,191 @@ async fn a_default_transport_does_not_block_the_providers_binding() {
     let p = provider(&t, cred);
     wrap(&p).await.unwrap();
     assert_eq!(t.count(), 2, "{:?}", t.seen());
+}
+
+/// A path's scripted answers: (delay in seconds, status, body).
+type Queue = std::collections::VecDeque<(u64, u16, String)>;
+
+/// Answers each request from a per-path queue (the path without the query), after holding it
+/// for the answer's delay, and records the path of every request.
+#[derive(Default)]
+struct Delayed {
+    answers: std::sync::Mutex<std::collections::HashMap<&'static str, Queue>>,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl Delayed {
+    /// Answers the next request for `path` with 200 and `body` after `secs` seconds.
+    fn answer(&self, path: &'static str, secs: u64, body: String) -> &Self {
+        self.answer_status(path, secs, 200, body)
+    }
+
+    /// Answers the next request for `path` with `status` and `body` after `secs` seconds.
+    fn answer_status(&self, path: &'static str, secs: u64, status: u16, body: String) -> &Self {
+        self.answers
+            .lock()
+            .unwrap()
+            .entry(path)
+            .or_default()
+            .push_back((secs, status, body));
+        self
+    }
+
+    fn paths(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl anykms_azure::anykms_http::HttpTransport for Delayed {
+    fn send(
+        &self,
+        req: anykms_azure::anykms_http::transport::Request,
+        _limit: usize,
+    ) -> anykms_core::BoxFuture<
+        '_,
+        Result<
+            anykms_azure::anykms_http::transport::Response,
+            anykms_azure::anykms_http::SendError,
+        >,
+    > {
+        let path = req.uri().path().to_owned();
+        self.seen.lock().unwrap().push(path.clone());
+        let next = self
+            .answers
+            .lock()
+            .unwrap()
+            .get_mut(path.as_str())
+            .and_then(std::collections::VecDeque::pop_front);
+        Box::pin(async move {
+            let (secs, status, body) = next.ok_or_else(|| {
+                anykms_azure::anykms_http::SendError::Other(format!("unscripted {path}").into())
+            })?;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            let mut r = anykms_azure::anykms_http::http::Response::new(zeroize::Zeroizing::new(
+                body.into_bytes(),
+            ));
+            *r.status_mut() =
+                anykms_azure::anykms_http::http::StatusCode::from_u16(status).unwrap();
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            Ok(r)
+        })
+    }
+}
+
+const KID: &str = "https://kv1.vault.azure.net/keys/k/0123456789abcdef0123456789abcdef";
+
+/// `k` as an RSA-2048 key (after it was recreated).
+fn rsa_bundle() -> String {
+    use base64::Engine as _;
+    let der = anykms_recipes::pem_to_der(include_str!("data/rsa_2048.spki.pem")).unwrap();
+    let n = &der[der.len() - 5 - 256..der.len() - 5];
+    let b64u = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    json!({
+        "key": {"kid": KID, "kty": "RSA-HSM", "n": b64u(n), "e": b64u(&[1, 0, 1]),
+                "key_ops": ["wrapKey", "unwrapKey"]},
+        "attributes": {"enabled": true, "created": 1_700_000_000}
+    })
+    .to_string()
+}
+
+/// `k` as an EC P-256 key (before it was recreated).
+fn ec_bundle() -> String {
+    json!({
+        "key": {"kid": "https://kv1.vault.azure.net/keys/k/fedcba9876543210fedcba9876543210",
+                "kty": "EC", "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+                "key_ops": ["sign", "verify"]},
+        "attributes": {"enabled": true, "created": 1_600_000_000}
+    })
+    .to_string()
+}
+
+/// A transport may hold a request for any time after it is handed over, so of two overlapping
+/// key reads the one sent first may reach the vault last, after the key was recreated. Neither
+/// is trusted over the other: the later-sent read's older bundle does not replace the bundle
+/// the earlier-sent one cached, and the next request reads the key again.
+#[tokio::test(start_paused = true)]
+async fn overlapping_key_reads_that_disagree_are_read_again() {
+    let t = std::sync::Arc::new(Delayed::default());
+    let versions = || json!({"value": []}).to_string();
+    // Sent first, it reaches the vault after the key was recreated.
+    t.answer("/keys/k", 5, rsa_bundle())
+        // Sent later, it was answered before.
+        .answer("/keys/k", 10, ec_bundle())
+        .answer("/keys/k", 0, rsa_bundle())
+        .answer("/keys/k/versions", 0, versions())
+        .answer("/keys/k/versions", 0, versions())
+        .answer("/keys/k/wrapkey", 0, wrap_ok());
+    let p = AzureProvider::builder()
+        .credential(StaticToken::new("tok"))
+        .http_transport(t.clone())
+        .build()
+        .unwrap();
+    let kek = p.key_wrap_key(KEY).unwrap();
+    let signer = p
+        .digest_signing_key(KEY, SignatureAlgorithm::EcdsaP256Sha256)
+        .unwrap();
+    let earlier = tokio::spawn({
+        let kek = kek.clone();
+        async move { kek.preflight().await }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    signer.preflight().await.unwrap();
+    earlier.await.unwrap().unwrap();
+    assert_eq!(t.paths().len(), 4, "{:?}", t.paths());
+
+    kek.wrap_key(&[0u8; 32])
+        .await
+        .expect("the later-sent read's older bundle was kept");
+    assert_eq!(t.paths()[4..], ["/keys/k", "/keys/k/wrapkey"]);
+}
+
+/// Dropping one key's cached bundle (a request found that key missing) does not discard a read
+/// of another key that was in flight meanwhile: that key's bundle is cached, and its next
+/// request reads no key.
+#[tokio::test(start_paused = true)]
+async fn dropping_one_keys_bundle_keeps_a_concurrent_read_of_another_key() {
+    let t = std::sync::Arc::new(Delayed::default());
+    t.answer("/keys/k", 5, rsa_bundle())
+        .answer("/keys/k/wrapkey", 0, wrap_ok())
+        .answer("/keys/k/wrapkey", 0, wrap_ok())
+        .answer_status(
+            "/keys/b/wrapkey",
+            0,
+            404,
+            json!({"error": {"code": "KeyNotFound", "message": "no key b"}}).to_string(),
+        );
+    let p = AzureProvider::builder()
+        .credential(StaticToken::new("tok"))
+        .http_transport(t.clone())
+        .build()
+        .unwrap();
+    let a = p.key_wrap_key(KEY).unwrap();
+    let in_flight = tokio::spawn({
+        let a = a.clone();
+        async move { a.wrap_key(&[0u8; 32]).await.map(drop) }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(t.paths(), ["/keys/k"]);
+
+    // Key `b` is found missing (and its bundle dropped) while `k`'s read is in flight.
+    let e = p
+        .key_wrap_key("azure-kv://kv1.vault.azure.net/keys/b")
+        .unwrap()
+        .with_key_type_check(KeyTypeCheck::TrustCaller)
+        .wrap_key(&[0u8; 32])
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound, "{e}");
+    in_flight.await.unwrap().unwrap();
+    assert_eq!(t.paths().len(), 3, "{:?}", t.paths());
+
+    a.wrap_key(&[0u8; 32]).await.unwrap();
+    assert_eq!(
+        t.paths()[3..],
+        ["/keys/k/wrapkey"],
+        "another key's dropped bundle discarded this key's read"
+    );
 }

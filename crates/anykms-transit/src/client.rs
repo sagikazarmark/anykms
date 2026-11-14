@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::BACKEND;
 use crate::config::ServerConfig;
-use crate::errors::{Failure, classify};
+use crate::errors::{ErrorBody, Failure, classify};
 use crate::token::{Token, TokenSource};
 
 /// Warnings known to be harmless. Ships empty: every entry needs a test and a written reason.
@@ -28,6 +28,8 @@ pub(crate) struct Server {
     token: Arc<dyn TokenSource>,
     /// The semantics of this server's handles, by key family.
     pub(crate) semantics: crate::semantics::ServerSemantics,
+    /// Concurrent key-type reads of this server's keys, bounded by `http` (L29).
+    pub(crate) type_flights: crate::handles::TypeFlights,
 }
 
 impl std::fmt::Debug for Server {
@@ -74,12 +76,6 @@ pub(crate) struct Call<'a> {
 
 fn config_err(m: &'static str) -> Error {
     Error::new(ErrorKind::Configuration, BACKEND, Operation::Configure, m)
-}
-
-#[derive(Deserialize)]
-struct ErrorBody {
-    #[serde(default)]
-    errors: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +137,8 @@ impl Server {
             )),
             None => cfg.token.clone(),
         };
+        let type_flights = crate::handles::TypeFlights::new();
+        type_flights.bound_by(&*http);
         Ok(Self {
             alias,
             semantics: crate::semantics::ServerSemantics::new(cfg.flavor),
@@ -148,6 +146,7 @@ impl Server {
             base,
             http,
             token,
+            type_flights,
         })
     }
 
@@ -305,9 +304,7 @@ impl Server {
             }
             return Ok(body);
         }
-        let messages = serde_json::from_slice::<ErrorBody>(&body)
-            .map(|b| b.errors)
-            .unwrap_or_default();
+        let messages = ErrorBody::messages(&body);
         let mut e = classify(&Failure {
             status: status.as_u16(),
             messages: &messages,
@@ -338,6 +335,14 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L23(d): parsed error messages (which may echo request input) are wiped on drop.
+    #[test]
+    fn error_messages_are_zeroizing() {
+        let b: ErrorBody = serde_json::from_slice(br#"{"errors":["echo: secret"]}"#).unwrap();
+        let first: &zeroize::Zeroizing<String> = &b.errors[0];
+        assert_eq!(first.as_str(), "echo: secret");
+    }
 
     /// Built without a provider feature (and with no process default installed in this test
     /// binary), building a server fails with guidance instead of panicking in reqwest.

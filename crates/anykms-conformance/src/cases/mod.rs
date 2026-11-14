@@ -104,6 +104,7 @@ pub(crate) fn all<F: Fixture>() -> Vec<Case<F>> {
             &[Aead],
             aead::authentication_failures::<F>,
         ),
+        case("aead::aad_binding", &[Aead], aead::aad_binding::<F>),
         case("aead::rotation", &[Aead, Rotate], aead::rotation::<F>),
         case(
             "aead::min_decryption_version",
@@ -460,6 +461,18 @@ pub(crate) fn all<F: Fixture>() -> Vec<Case<F>> {
         v.push(case(format!("sign::{a}::malformed"), &req, move |c| {
             sign::malformed::<F>(c, alg)
         }));
+        v.push(case(
+            format!("sign::{a}::other_keys_signature"),
+            &req,
+            move |c| sign::other_keys_signature::<F>(c, alg),
+        ));
+        if !sign::substitutes(alg).is_empty() {
+            v.push(case(
+                format!("sign::{a}::algorithm_substitution"),
+                &req,
+                move |c| sign::algorithm_substitution::<F>(c, alg),
+            ));
+        }
         v.push(case(
             format!("sign::{a}::input_validation"),
             &req,

@@ -110,13 +110,15 @@ impl AwsProviderBuilder {
             source = source.kind(),
             "AWS credential source configured"
         );
+        let kms = Arc::new({
+            let mut kms = Kms::new(http, source);
+            kms.requests = self.request_counter.take();
+            kms
+        });
+        let cache = Arc::new(DescribeCache::bounded_by(kms.transport()));
         Ok(AwsProvider {
             inner: Arc::new(Inner {
-                kms: Arc::new({
-                    let mut kms = Kms::new(http, source);
-                    kms.requests = self.request_counter.take();
-                    kms
-                }),
+                kms,
                 allowed_accounts: self.allowed_accounts,
                 allowed_regions: self.allowed_regions,
                 endpoints,
@@ -124,7 +126,7 @@ impl AwsProviderBuilder {
                 fips: self.fips,
                 dual_stack: self.dual_stack,
                 allow_loopback_http: self.allow_loopback_http,
-                cache: Arc::default(),
+                cache,
                 public_keys: Arc::default(),
             }),
         })
@@ -208,7 +210,7 @@ impl AwsProvider {
             return Err(open_err("the key's region is not in the allowed regions"));
         }
         let endpoint = self.endpoint_for(&r)?;
-        let resolved = (!r.is_alias()).then(|| r.arn.clone());
+        let resolved = (!r.is_alias()).then(|| (r.arn.clone(), crate::handles::Seen::ORIGIN));
         Ok(KeyCtx {
             kms: i.kms.clone(),
             endpoint,
@@ -480,5 +482,29 @@ impl Provider for AwsProvider {
         Ok(DescribeKey::full(BACKEND, k)
             .with_resource(r)
             .with_semantics(semantics::DESCRIBE.clone()))
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(test)]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::credentials::{Credentials, StaticCredentials};
+
+    /// With the built-in transport, the key-metadata and credential caches bound how long a
+    /// caller waits for another caller's request: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_caches() {
+        let p = AwsProvider::builder()
+            .credentials(StaticCredentials::new(Credentials::new("A", "S", None)))
+            .build()
+            .unwrap();
+        assert_eq!(p.inner.cache.wait_bound(), Some(Duration::from_secs(24)));
+        assert_eq!(
+            p.inner.kms.creds_wait_bound(),
+            Some(Duration::from_secs(24))
+        );
     }
 }

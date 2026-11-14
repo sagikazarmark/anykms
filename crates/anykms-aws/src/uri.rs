@@ -193,7 +193,7 @@ fn bad(m: &'static str) -> Error {
     Error::new(ErrorKind::Configuration, BACKEND, Operation::ParseUri, m)
 }
 
-fn partition_ok(s: &str) -> bool {
+pub(crate) fn partition_ok(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && b.len() <= 32
@@ -235,7 +235,7 @@ const RESERVED_PREFIXES: &[(&str, &str)] = &[
 
 /// Whether `region` (already [`region_ok`]) belongs to `partition`. Partitions anykms has no
 /// built-in endpoints for accept any region of a prefix no other known partition reserves.
-fn region_in_partition(partition: &str, region: &str) -> bool {
+pub(crate) fn region_in_partition(partition: &str, region: &str) -> bool {
     for (p, prefix) in RESERVED_PREFIXES {
         if region.starts_with(prefix) {
             return partition == *p;

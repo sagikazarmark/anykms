@@ -117,19 +117,22 @@ async fn interactive_policy() -> anyhow::Result<()> {
 async fn env_config() -> anyhow::Result<()> {
     // snippet: docs/guide.md
     use anykms::transit::anykms_http::ReqwestTransport;
-    use anykms::transit::{EnvConfig, TransitProvider};
+    use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
 
-    let server = EnvConfig::vault()
-        .no_home_token() // never fall back to ~/.vault-token
-        // .no_token()   // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
+    let env = EnvConfig::vault()
+        // .no_token()    // behind a Vault/Bao Agent API proxy (or ANYKMS_TRANSIT_NO_TOKEN=1)
+        .no_home_token(); // never fall back to ~/.vault-token
+    // TLS, timeouts and proxying live on the transport, and the one passed to `http_transport`
+    // replaces the one `load` built: start it from the TLS variables (VAULT_CACERT & co.) to keep them.
+    let transport = env
+        .tls()?
+        .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+        .request_timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let server = env
         .load()?
         .allowed_namespaces(["team-a"]) // key URIs may select it with ?namespace=team-a
-        // TLS, timeouts and proxying live on the transport (replaces VAULT_CACERT & co. here).
-        .http_transport(
-            ReqwestTransport::builder()
-                .request_timeout(std::time::Duration::from_secs(5))
-                .build()?,
-        );
+        .http_transport(transport);
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .layer(anykms::retry_layer())
@@ -141,16 +144,26 @@ async fn env_config() -> anyhow::Result<()> {
 #[rustfmt::skip]
 async fn tower_stack() -> anyhow::Result<()> {
     // snippet: docs/guide.md
+    use std::time::Duration;
+
     use anykms::transit::anykms_http::{ReqwestTransport, TowerTransport};
-    use anykms::transit::{EnvConfig, TransitProvider};
+    use anykms::transit::{EnvConfig, EnvTls, TransitProvider};
     use tower::ServiceBuilder;
 
+    let env = EnvConfig::vault();
+    // TLS, no redirects, timeouts: the client's. Built from the TLS variables (VAULT_CACERT & co.),
+    // which the transport passed to `http_transport` would otherwise drop.
+    let client = env
+        .tls()?
+        .map_or_else(ReqwestTransport::builder, EnvTls::into_transport_builder)
+        .build()?;
     let service = ServiceBuilder::new()
         .concurrency_limit(4)
-        .service(ReqwestTransport::new()?.into_service()); // TLS, no redirects, timeouts: the client's
-    let server = EnvConfig::vault()
-        .load()?
-        .http_transport(TowerTransport::new(service));
+        .service(client.into_service());
+    // How long a stalled request may sit unpolled before a follower sends its own (24 s, as the client).
+    let transport = TowerTransport::new(service)
+        .with_follower_wait(Duration::from_secs(24), anykms::tokio_sleep());
+    let server = env.load()?.http_transport(transport);
     let registry = anykms::Registry::builder()
         .provider(TransitProvider::builder().server("default", server).build()?)
         .build()?;
@@ -272,24 +285,52 @@ async fn choosing_aad(
     // snippet: docs/guide.md
     /// Canonical AAD for `purpose` over non-secret `fields` (docs/aad-format.md): a purpose tag, then
     /// the fields length-prefixed and key-sorted, so no two field sets share bytes and every writer
-    /// produces the same bytes. Apply the document's caps and charsets before calling it.
-    fn aad(purpose: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+    /// produces the same bytes. It checks every rule of the document: without them (a duplicate key,
+    /// a value of 64 KiB or more) two different field sets can encode to the same bytes.
+    fn aad(purpose: &str, fields: &[(&str, &str)]) -> anykms::Result<Vec<u8>> {
+        let bad = |m: &'static str| Err(anykms::Error::invalid_argument(m));
+        // 1..=max bytes, a lowercase letter, then bytes accepted by `rest`.
+        let name = |s: &str, max: usize, rest: fn(u8) -> bool| {
+            (1..=max).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase() && s.bytes().all(rest)
+        };
+        if !name(purpose, 48, |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return bad("AAD purpose must be 1..=48 bytes of [a-z][a-z0-9-]*");
+        }
+        if fields.len() > 15 {
+            return bad("at most 15 AAD fields");
+        }
+        for &(k, v) in fields {
+            if k == "purpose" || !name(k, 32, |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+                return bad("AAD keys must be 1..=32 bytes of [a-z][a-z0-9_]*, other than `purpose`");
+            }
+            if v.is_empty() || v.len() > 255 || v.chars().any(char::is_control) {
+                return bad("AAD values must be 1..=255 bytes without control characters");
+            }
+        }
         let mut fields = fields.to_vec();
         fields.push(("purpose", purpose));
         fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if fields.windows(2).any(|w| w[0].0 == w[1].0) {
+            return bad("duplicate AAD key");
+        }
+        // Every length fits a u16 after the checks above; `try_from` keeps it from ever wrapping.
+        let len = |n: usize| u16::try_from(n).expect("within the caps").to_be_bytes();
         let mut out = b"anykms/aad/v1\0".to_vec();
-        out.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        out.extend_from_slice(&len(fields.len()));
         for (k, v) in fields {
-            out.extend_from_slice(&(k.len() as u16).to_be_bytes());
+            out.extend_from_slice(&len(k.len()));
             out.extend_from_slice(k.as_bytes());
-            out.extend_from_slice(&(v.len() as u16).to_be_bytes());
+            out.extend_from_slice(&len(v.len()));
             out.extend_from_slice(v.as_bytes());
         }
-        out
+        if out.len() > 3072 {
+            return bad("AAD encoding is longer than 3072 bytes");
+        }
+        Ok(out)
     }
 
-    let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])).await?;
-    let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])).await?;
+    let ct = envelope.encrypt(b"123-45-6789", &aad("ssn", &[("user", "42")])?).await?;
+    let ssn = envelope.decrypt_utf8(&ct, &aad("ssn", &[("user", "42")])?).await?;
     // end snippet
     assert_eq!(&*ssn, "123-45-6789");
     // The guide's encoder agrees with the committed vectors (tests/vectors/aad_v1.json,
@@ -303,7 +344,36 @@ async fn choosing_aad(
     ] {
         expected.extend_from_slice(part);
     }
-    assert_eq!(aad("escrow", &[("record", "r-42"), ("owner", "7")]), expected);
+    assert_eq!(aad("escrow", &[("record", "r-42"), ("owner", "7")])?, expected);
+    // L36: the collision an unchecked encoder allows (a value of 64 KiB or more, lengths cast
+    // with a wrapping `as u16`) is refused, not encoded.
+    let y = "y".repeat(65531);
+    let a1 = format!("x\0\x01b\0\x06{y}");
+    let b2 = format!("{y}\0\x01b\0\x06victim");
+    assert!(aad("p", &[("a", &a1), ("b", "victim")]).is_err());
+    assert!(aad("p", &[("a", "x"), ("b", &b2)]).is_err());
+    // Every committed vector: the valid ones encode to their bytes, the invalid ones are refused.
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../anykms-recipes/tests/vectors/aad_v1.json");
+    let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let args = |v: &serde_json::Value| -> (String, Vec<(String, String)>) {
+        let fields = v["fields"].as_array().unwrap().iter().map(|f| {
+            (f[0].as_str().unwrap().to_owned(), f[1].as_str().unwrap().to_owned())
+        });
+        (v["purpose"].as_str().unwrap().to_owned(), fields.collect())
+    };
+    let call = |v: &serde_json::Value| {
+        let (purpose, fields) = args(v);
+        let fields: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (&**k, &**v)).collect();
+        aad(&purpose, &fields)
+    };
+    for v in vectors["valid"].as_array().unwrap() {
+        let hex: String = call(v)?.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, v["aad"].as_str().unwrap(), "{}", v["name"]);
+    }
+    for v in vectors["invalid"].as_array().unwrap() {
+        assert!(call(v).is_err(), "{} must be refused", v["name"]);
+    }
     Ok(())
 }
 
@@ -347,13 +417,18 @@ async fn jwts(registry: anykms::Registry) -> anyhow::Result<()> {
     let jwks = signer.jwks().await?;
 
     // Relying party, with jsonwebtoken (`rust_crypto` or `aws_lc_rs` feature): the key by kid, the
-    // algorithm pinned, exp (required by default), iss and aud checked.
+    // algorithm pinned, the token typed as a JWT, `exp`, `iss` and `aud` required (`set_issuer` and
+    // `set_audience` alone let a token without the claim through) and `nbf` checked.
     use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
     let jwks: JwkSet = serde_json::from_value(jwks)?;
+    let header = decode_header(&jwt)?;
     // (`ok_or_else(|| anyhow!(..))` works with anyhow; with `Box<dyn Error>`, `ok_or("..")` does too.)
-    let kid = decode_header(&jwt)?.kid.ok_or_else(|| anyhow::anyhow!("token has no kid"))?;
+    anyhow::ensure!(header.typ.as_deref() == Some("JWT"), "not a JWT");
+    let kid = header.kid.ok_or_else(|| anyhow::anyhow!("token has no kid"))?;
     let key = DecodingKey::from_jwk(jwks.find(&kid).ok_or_else(|| anyhow::anyhow!("unknown kid"))?)?;
     let mut validation = Validation::new(Algorithm::ES256);
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+    validation.validate_nbf = true;
     validation.set_issuer(&["https://issuer.example"]);
     validation.set_audience(&["api"]);
     let claims: Claims = decode(&jwt, &key, &validation)?.claims;

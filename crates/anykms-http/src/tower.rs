@@ -29,6 +29,7 @@
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
+use std::time::Duration;
 
 use anykms_core::BoxFuture;
 use bytes::Bytes;
@@ -72,6 +73,7 @@ pub type RequestBody = Full<Bytes>;
 #[derive(Clone)]
 pub struct TowerTransport<S> {
     service: S,
+    follower_wait: Option<(Duration, anykms_core::SleepFn)>,
 }
 
 impl<S> fmt::Debug for TowerTransport<S> {
@@ -83,7 +85,21 @@ impl<S> fmt::Debug for TowerTransport<S> {
 impl<S> TowerTransport<S> {
     /// Wraps `service`.
     pub fn new(service: S) -> Self {
-        Self { service }
+        Self {
+            service,
+            follower_wait: None,
+        }
+    }
+
+    /// Bounds how long a backend's single-flight followers let another caller's request go
+    /// unpolled ([`HttpTransport::follower_wait`]): once that request has been woken (its
+    /// response arrived, or its timeout passed) and left unpolled for `max`, measured with
+    /// `sleep` (e.g. `tokio::time::sleep`, or a JS timer on wasm), a follower sends its own. A
+    /// request that is being polled is waited for however long it takes. Without it, followers
+    /// wait as long as the leader lives.
+    pub fn with_follower_wait(mut self, max: Duration, sleep: anykms_core::SleepFn) -> Self {
+        self.follower_wait = Some((max, sleep));
+        self
     }
 
     /// The service.
@@ -109,6 +125,10 @@ where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Source>,
 {
+    fn follower_wait(&self) -> Option<(Duration, anykms_core::SleepFn)> {
+        self.follower_wait.clone()
+    }
+
     fn send(&self, req: Request, limit: usize) -> BoxFuture<'_, Result<Response, SendError>> {
         let service = self.service.clone();
         Box::pin(send(service, req, limit))

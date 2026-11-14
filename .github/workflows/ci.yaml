@@ -397,11 +397,49 @@ jobs:
   # token, so no third-party action holds AWS credentials. Configure the repository variables
   # AWS_LIVE_ROLE_ARN, AWS_LIVE_REGION and the pool key ARNs (scripts/aws-test-setup.sh prints
   # them); without AWS_LIVE_ROLE_ARN the job is skipped.
-  aws-live:
-    name: AWS (live)
+  #
+  # The test binaries are built in aws-live-build, which has no `id-token` permission and no cloud
+  # variable, and aws-live only runs them: no build script or proc-macro of any dependency runs
+  # where an OIDC token can be requested (ACTIONS_ID_TOKEN_REQUEST_* are in every step's
+  # environment once a job has `id-token: write`). aws-live restores no cache either. The test
+  # code itself, dependencies included, still runs with the token: this closes build-time
+  # attacks only.
+  aws-live-build:
+    name: AWS (live, build)
     if: >-
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
       && github.repository == 'sagikazarmark/anykms' && vars.AWS_LIVE_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Build test binaries
+        run: scripts/live-tests.sh build aws live-bin
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-bin-aws
+          path: live-bin
+          retention-days: 1
+
+  aws-live:
+    name: AWS (live)
+    needs: aws-live-build
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -433,11 +471,11 @@ jobs:
       - name: Set up devenv
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Download test binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cmd-format: devenv shell -- {0}
+          name: live-bin-aws
+          path: live-bin
 
       - name: GitHub OIDC token
         run: |
@@ -448,7 +486,7 @@ jobs:
           echo "AWS_WEB_IDENTITY_TOKEN_FILE=$token_file" >> "$GITHUB_ENV"
 
       - name: Live conformance
-        run: just live aws
+        run: scripts/live-tests.sh run aws live-bin
 
   # Mocks, credentials, the TRACE hygiene test, and Lowkey Vault end to end with the conformance
   # suite (every case runs or is n/a by declaration). The live targets run in azure-live.
@@ -498,12 +536,44 @@ jobs:
   # OIDC federated to an Entra ID app (workload identity: no stored secret). Configure the
   # repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID and ANYKMS_AZURE_VAULT_URL (and the
   # pooled-key URIs printed by scripts/azure-test-setup.sh); without them the job is skipped.
-  azure-live:
-    name: Azure (live vault)
+  # Built without `id-token` in azure-live-build, run in azure-live (see aws-live-build).
+  azure-live-build:
+    name: Azure (live vault, build)
     if: >-
       github.repository == 'sagikazarmark/anykms'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
       && vars.ANYKMS_AZURE_VAULT_URL != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Build test binaries
+        run: scripts/live-tests.sh build azure live-bin
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-bin-azure
+          path: live-bin
+          retention-days: 1
+
+  azure-live:
+    name: Azure (live vault)
+    needs: azure-live-build
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -526,11 +596,11 @@ jobs:
       - name: Set up devenv
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Download test binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cmd-format: devenv shell -- {0}
+          name: live-bin-azure
+          path: live-bin
 
       # The GitHub OIDC token as the federated token file workload identity reads (refreshed
       # before the steps that need it: it is valid for minutes).
@@ -542,15 +612,12 @@ jobs:
           chmod 600 "$RUNNER_TEMP/azure-federated-token"
           echo "AZURE_FEDERATED_TOKEN_FILE=$RUNNER_TEMP/azure-federated-token" >> "$GITHUB_ENV"
 
-      - name: Build tests
-        run: just live azure --no-run
-
       - name: Live tests and conformance
         run: |
           curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
             | jq -r .value > "$AZURE_FEDERATED_TOKEN_FILE"
-          just live azure
+          scripts/live-tests.sh run azure live-bin
 
       # Purges keys the fixture created more than a day ago (a cancelled run leaves some).
       - name: Janitor
@@ -710,12 +777,44 @@ jobs:
   # scripts/gcp-test-setup.sh (key ring, pooled keys, service accounts, workload identity pool).
   # The job's values live in the `cloud-gcp` environment, which a job-level `if` cannot read, so
   # a repository-level variable ANYKMS_GCP_LIVE=true enables it (set it once provisioned).
-  gcp-live:
-    name: GCP live (nightly)
+  # Built without `id-token` in gcp-live-build, run in gcp-live (see aws-live-build).
+  gcp-live-build:
+    name: GCP live (nightly, build)
     if: >-
       (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
       && github.repository == 'sagikazarmark/anykms'
       && vars.ANYKMS_GCP_LIVE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Build test binaries
+        run: scripts/live-tests.sh build gcp live-bin
+
+      - name: Upload test binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: live-bin-gcp
+          path: live-bin
+          retention-days: 1
+
+  gcp-live:
+    name: GCP live (nightly)
+    needs: gcp-live-build
     runs-on: ubuntu-latest
     environment: cloud-gcp
     permissions:
@@ -734,11 +833,11 @@ jobs:
       - name: Set up devenv
         uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
 
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Download test binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cmd-format: devenv shell -- {0}
+          name: live-bin-gcp
+          path: live-bin
 
       - name: Admin token (fixture provisioning)
         id: admin
@@ -774,4 +873,4 @@ jobs:
           ANYKMS_GCP_ADMIN_TOKEN: ${{ steps.admin.outputs.access_token }}
           ANYKMS_GCP_DATA_TOKEN: ${{ steps.data.outputs.access_token }}
           ANYKMS_GCP_UNAUTHORIZED_TOKEN: ${{ steps.unauthorized.outputs.access_token }}
-        run: just live gcp
+        run: scripts/live-tests.sh run gcp live-bin

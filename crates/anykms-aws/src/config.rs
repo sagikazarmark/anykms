@@ -237,7 +237,7 @@ impl AwsProviderBuilder {
     /// `ReqwestTransport` is built; without the `reqwest` feature, building fails with
     /// `Configuration`. The link-local credential endpoints (IMDS, ECS) carry a short per-request
     /// [`RequestTimeout`](anykms_http::RequestTimeout) and are never proxied by the built-in
-    /// transport.
+    /// transport (its proxy carries HTTPS only; they are plain HTTP).
     pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
         self.http_transport = Some(Arc::new(transport));
         self

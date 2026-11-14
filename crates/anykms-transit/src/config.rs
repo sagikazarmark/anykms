@@ -36,6 +36,8 @@ pub struct ServerConfig {
     pub(crate) allowed_namespaces: Vec<String>,
     pub(crate) allowed_mounts: Option<Vec<String>>,
     pub(crate) http_transport: Option<Arc<dyn HttpTransport>>,
+    /// `http_transport` was built by [`EnvConfig`] from TLS variables (a replacement drops them).
+    pub(crate) env_tls: bool,
     pub(crate) allow_loopback_http: bool,
     pub(crate) max_response_bytes: usize,
 }
@@ -95,6 +97,7 @@ impl ServerConfig {
             allowed_namespaces: Vec::new(),
             allowed_mounts: None,
             http_transport: None,
+            env_tls: false,
             allow_loopback_http: false,
             max_response_bytes: 32 * 1024 * 1024,
         }
@@ -169,7 +172,22 @@ impl ServerConfig {
     /// transport, feature `reqwest`) or bring any [`HttpTransport`]. Without this, a default
     /// `ReqwestTransport` is built; without the `reqwest` feature, building the provider fails
     /// with `Configuration`. One transport may be shared by several servers and providers.
+    ///
+    /// On a configuration [`EnvConfig`] loaded with TLS variables (`*_CACERT`, `*_CAPATH`,
+    /// `*_CLIENT_CERT`), this replaces the transport built from them, so the pinned CA and client
+    /// certificate no longer apply (a `warn` event with the `tracing` feature). Build the
+    /// replacement from [`EnvConfig::tls`] to keep them.
     pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
+        #[cfg(feature = "tracing")]
+        if self.env_tls {
+            tracing::warn!(
+                backend = BACKEND,
+                "ServerConfig::http_transport replaces the transport built from the TLS \
+                 environment variables; their CA and client certificate no longer apply \
+                 (build the transport from EnvConfig::tls to keep them)"
+            );
+        }
+        self.env_tls = false;
         self.http_transport = Some(Arc::new(transport));
         self
     }
@@ -279,8 +297,10 @@ impl ServerConfig {
 /// OpenBao reads the `BAO_*` equivalents when `BAO_ADDR` is set, otherwise the `VAULT_*` ones.
 /// **Every setting comes from the prefix that supplied the address**, so a token is never sent
 /// to an address configured under the other prefix: with `BAO_ADDR`, `VAULT_*` variables are
-/// ignored; with `VAULT_ADDR`, any `BAO_*` setting makes loading fail. The home token files are
-/// `~/.bao-token`, then `~/.vault-token`.
+/// ignored; with `VAULT_ADDR`, any `BAO_*` setting makes loading fail. The home token files follow
+/// the prefix too: with `BAO_ADDR`, `~/.bao-token`, then `~/.vault-token`; with `VAULT_ADDR`, only
+/// `~/.vault-token`. `~/.vault-token` is the CLI token file both tools share (the OpenBao CLI
+/// writes it too), so a token found there is sent to whichever address was configured.
 ///
 /// - **A token source is required.** Loading fails if none of the token variables or home files
 ///   is present. Behind a Vault/Bao Agent API proxy with `use_auto_auth_token`, opt out with
@@ -302,8 +322,10 @@ impl ServerConfig {
 ///   regular file must hold at least one certificate, subdirectories are skipped) replace the
 ///   system roots; as with the Vault CLI, `*_CACERT` wins when both are set. Plain `http://` is
 ///   allowed automatically only for literal loopback addresses.
-/// - **Token files** must not be group- or world-accessible ([`FileToken`]). To accept one
-///   anyway (e.g. a Kubernetes secret volume you cannot re-mode), call
+/// - **Token files** and the `*_CLIENT_KEY` file must not be group- or world-accessible
+///   ([`FileToken`]). Certificate files are read with a bound, only as regular files. To accept a
+///   group- or world-accessible token or key file anyway (e.g. a Kubernetes secret volume you
+///   cannot re-mode), call
 ///   [`allow_insecure_token_file`](Self::allow_insecure_token_file) or set
 ///   `ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE=1` (or `true`).
 #[derive(Clone, Debug)]
@@ -352,14 +374,88 @@ fn flag(v: Option<String>) -> bool {
     v.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
+/// Upper bound for one certificate file (`*_CACERT`, a `*_CAPATH` file, `*_CLIENT_CERT`): far
+/// above any real bundle (Mozilla's is about 220 KiB).
+const MAX_CERT_FILE: usize = 4 * 1024 * 1024;
+
+/// Upper bound for all of a `*_CAPATH` directory together.
+const MAX_CA_DIR: usize = 16 * 1024 * 1024;
+
+/// Reads a file a variable names, as [`FileToken`] reads token files: opened first and the opened
+/// file checked (no race with a swap in between), non-blocking on Unix so a FIFO without a writer
+/// cannot hang a thread, refused unless a regular file, and read with a bound (a `/dev/zero` or a
+/// huge file fails instead of exhausting memory) into a zeroizing buffer that never reallocates
+/// in place. `private`: `Some(insecure_ok)` for a private key file, which is also refused when
+/// group- or world-accessible unless `insecure_ok` (as for token files).
+fn read_config_file(
+    path: &std::path::Path,
+    limit: usize,
+    private: Option<bool>,
+) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    use std::io::{Error as IoError, ErrorKind as IoKind, Read as _};
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = opts.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(IoError::new(IoKind::InvalidInput, "not a regular file"));
+    }
+    #[cfg(unix)]
+    if private == Some(false) {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(IoError::new(
+                IoKind::PermissionDenied,
+                "the file is group- or world-accessible; chmod 600 it, or opt in with \
+                 EnvConfig::allow_insecure_token_file (ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE=1)",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let too_large = || IoError::new(IoKind::InvalidData, "file too large");
+    if meta.len() > limit as u64 {
+        return Err(too_large());
+    }
+    let hint = usize::try_from(meta.len()).unwrap_or(limit).min(limit);
+    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(hint));
+    let mut chunk = zeroize::Zeroizing::new([0u8; 4096]);
+    loop {
+        let n = file.read(&mut chunk[..])?;
+        if n == 0 {
+            return Ok(buf);
+        }
+        // The file may grow after the size check.
+        if !anykms_http::zbuf::extend(&mut buf, &chunk[..n], limit) {
+            return Err(too_large());
+        }
+    }
+}
+
+/// A PEM buffer read from a file a variable names. Zeroizing although certificates are public: a
+/// combined PEM file may hold a private key next to them.
+type Pem = zeroize::Zeroizing<Vec<u8>>;
+
+/// Reads a certificate file, kept zeroizing ([`Pem`]).
+fn read_cert_file(path: &std::path::Path) -> std::io::Result<Pem> {
+    read_config_file(path, MAX_CERT_FILE, None)
+}
+
 /// Reads a `*_CACERT` PEM file; `var` names the setting in errors.
-fn read_ca_file(path: &std::path::Path, var: &str) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| file_err("CA certificate file", var, path, e))
+fn read_ca_file(path: &std::path::Path, var: &str) -> Result<Pem> {
+    read_cert_file(path).map_err(|e| file_err("CA certificate file", var, path, e))
 }
 
 /// Concatenates the PEM files in a `*_CAPATH` directory (sorted by name, symlinks followed,
-/// subdirectories skipped). Every file must hold at least one certificate.
-fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
+/// subdirectories skipped) into a zeroizing buffer that grows without leaving unwiped copies;
+/// every file read is wiped when dropped, on error paths too. Every file must hold at least one
+/// certificate.
+fn read_ca_dir(dir: &str, var: &str) -> Result<Pem> {
     use rustls_pki_types::CertificateDer;
     use rustls_pki_types::pem::PemObject;
 
@@ -370,13 +466,13 @@ fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(dir_err)?;
     paths.sort();
-    let mut pem = Vec::new();
+    let mut pem = Pem::default();
     for path in paths {
         let file_err = |e| file_err("CA certificate file", var, &path, e);
         if std::fs::metadata(&path).map_err(file_err)?.is_dir() {
             continue;
         }
-        let file = std::fs::read(&path).map_err(file_err)?;
+        let file = read_cert_file(&path).map_err(file_err)?;
         let mut certs = 0;
         for cert in CertificateDer::pem_slice_iter(&file) {
             cert.map_err(|_| {
@@ -393,8 +489,13 @@ fn read_ca_dir(dir: &str, var: &str) -> Result<Vec<u8>> {
                 path.display()
             )));
         }
-        pem.extend_from_slice(&file);
-        pem.push(b'\n');
+        if !(anykms_http::zbuf::extend(&mut pem, &file, MAX_CA_DIR)
+            && anykms_http::zbuf::extend(&mut pem, b"\n", MAX_CA_DIR))
+        {
+            return Err(config_err(format!(
+                "{var}: the certificates in {dir} are too large together (over 16 MiB)"
+            )));
+        }
     }
     if pem.is_empty() {
         return Err(config_err(format!(
@@ -453,6 +554,67 @@ impl EnvConfig {
         }
     }
 
+    /// The prefix that supplies the address (and so every other setting), and the address.
+    /// `set`: a lookup where an empty value counts as unset.
+    fn select_prefix(
+        &self,
+        set: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(&'static str, String)> {
+        let (prefix, addr) = self
+            .prefixes()
+            .iter()
+            .find_map(|p| set(&format!("{p}_ADDR")).map(|a| (*p, a)))
+            .ok_or_else(|| {
+                config_err(match self.flavor {
+                    Flavor::OpenBao => "BAO_ADDR (or VAULT_ADDR) is not set",
+                    _ => "VAULT_ADDR is not set",
+                })
+            })?;
+        if self.flavor == Flavor::OpenBao
+            && prefix == "VAULT"
+            && let Some(s) = SETTINGS.iter().find(|s| set(&format!("BAO_{s}")).is_some())
+        {
+            return Err(config_err(format!(
+                "BAO_{s} is set but the address comes from VAULT_ADDR; every setting is read \
+                     from the prefix that supplies the address: set BAO_ADDR, or unset BAO_{s}"
+            )));
+        }
+        Ok((prefix, addr))
+    }
+
+    /// The TLS settings [`load`](Self::load) would build the transport from (`*_CACERT` or
+    /// `*_CAPATH`, `*_CLIENT_CERT` with `*_CLIENT_KEY`, from the prefix that supplies the
+    /// address), read and checked the same way; `None` when no TLS variable is set.
+    ///
+    /// [`ServerConfig::http_transport`] replaces the transport `load` built from these, so an
+    /// application that brings its own transport (a tower stack, one client shared by several
+    /// providers) builds it from these settings to keep a pinned CA and client certificate:
+    /// with the `reqwest` feature, [`EnvTls::into_transport_builder`].
+    pub fn tls(&self) -> Result<Option<EnvTls>> {
+        self.tls_from(&|name| std::env::var(name).ok())
+    }
+
+    /// Like [`tls`](Self::tls), reading variables from `lookup` instead of the process
+    /// environment.
+    pub fn tls_with(
+        &self,
+        lookup: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<Option<EnvTls>> {
+        self.tls_from(&lookup)
+    }
+
+    fn tls_from(&self, get: &dyn Fn(&str) -> Option<String>) -> Result<Option<EnvTls>> {
+        let set = |name: &str| get(name).filter(|v| !v.is_empty());
+        let (prefix, _) = self.select_prefix(&set)?;
+        let var = |suffix: &str| set(&format!("{prefix}_{suffix}"));
+        EnvTls::load(prefix, &var, self.insecure_ok(get))
+    }
+
+    /// Whether group- or world-accessible token and key files are accepted.
+    fn insecure_ok(&self, get: &dyn Fn(&str) -> Option<String>) -> bool {
+        self.insecure_token_file || flag(get("ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE"))
+    }
+
     /// Loads the configuration from the process environment.
     pub fn load(&self) -> Result<ServerConfig> {
         self.load_from(&|name| std::env::var(name).ok(), None)
@@ -483,26 +645,7 @@ impl EnvConfig {
             )));
         }
         let set = |name: &str| get(name).filter(|v| !v.is_empty());
-        // The prefix that supplies the address supplies every other setting too.
-        let (prefix, addr) = self
-            .prefixes()
-            .iter()
-            .find_map(|p| set(&format!("{p}_ADDR")).map(|a| (*p, a)))
-            .ok_or_else(|| {
-                config_err(match self.flavor {
-                    Flavor::OpenBao => "BAO_ADDR (or VAULT_ADDR) is not set",
-                    _ => "VAULT_ADDR is not set",
-                })
-            })?;
-        if self.flavor == Flavor::OpenBao
-            && prefix == "VAULT"
-            && let Some(s) = SETTINGS.iter().find(|s| set(&format!("BAO_{s}")).is_some())
-        {
-            return Err(config_err(format!(
-                "BAO_{s} is set but the address comes from VAULT_ADDR; every setting is read \
-                     from the prefix that supplies the address: set BAO_ADDR, or unset BAO_{s}"
-            )));
-        }
+        let (prefix, addr) = self.select_prefix(&set)?;
         let var = |suffix: &str| set(&format!("{prefix}_{suffix}"));
         if let Some(v) = var("SKIP_VERIFY")
             && !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no")
@@ -512,8 +655,7 @@ impl EnvConfig {
             )));
         }
         let mut c = ServerConfig::new(addr, self.flavor);
-        let insecure_ok =
-            self.insecure_token_file || flag(get("ANYKMS_TRANSIT_ALLOW_INSECURE_TOKEN_FILE"));
+        let insecure_ok = self.insecure_ok(get);
         let token_file = |c: ServerConfig, path: PathBuf| {
             let f = FileToken::new(path);
             let f = if insecure_ok {
@@ -523,8 +665,11 @@ impl EnvConfig {
             };
             c.token_source(Arc::new(f))
         };
-        let home_files: &[&str] = match self.flavor {
-            Flavor::OpenBao => &[".bao-token", ".vault-token"],
+        // By prefix, like every other setting: under BAO_ADDR the OpenBao CLI's file first,
+        // then ~/.vault-token (which `bao login` also writes); under VAULT_ADDR only the Vault
+        // CLI's file, so a token saved for OpenBao never reaches an address configured for Vault.
+        let home_files: &[&str] = match prefix {
+            "BAO" => &[".bao-token", ".vault-token"],
             _ => &[".vault-token"],
         };
         let home_file = || {
@@ -608,9 +753,10 @@ impl EnvConfig {
             c = c.namespace(ns);
         }
         // As in the Vault CLI, CACERT takes precedence over CAPATH.
-        let tls = EnvTls::load(prefix, &var)?;
+        let tls = EnvTls::load(prefix, &var, insecure_ok)?;
         if let Some(tls) = tls {
             c.http_transport = Some(tls.transport()?);
+            c.env_tls = true;
         }
         // Scheme from the parsed URL (case-insensitive); validate() still enforces loopback-only.
         if Url::parse(&c.address).is_ok_and(|u| u.scheme() == "http") {
@@ -621,17 +767,41 @@ impl EnvConfig {
     }
 }
 
-/// The TLS settings `EnvConfig` reads (`*_CACERT` or `*_CAPATH`, `*_CLIENT_CERT` with
-/// `*_CLIENT_KEY`), which configure the built-in transport.
-#[cfg_attr(not(feature = "reqwest"), allow(dead_code))]
-struct EnvTls {
-    ca_pem: Option<Vec<u8>>,
-    client_identity: Option<(Vec<u8>, zeroize::Zeroizing<Vec<u8>>)>,
+/// The TLS settings [`EnvConfig`] reads (`*_CACERT` or `*_CAPATH`, `*_CLIENT_CERT` with
+/// `*_CLIENT_KEY`), which configure the built-in transport. From [`EnvConfig::tls`], for an
+/// application that builds its own transport and must keep these settings. `Debug` never prints
+/// the key. Every PEM it holds stays in a zeroizing buffer (a CA or certificate file may also carry a
+/// private key), from the file read through [`into_transport_builder`](Self::into_transport_builder),
+/// which moves each into the builder's zeroizing buffers without a copy.
+pub struct EnvTls {
+    ca_pem: Option<Pem>,
+    client_identity: Option<(Pem, Pem)>,
+}
+
+impl fmt::Debug for EnvTls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvTls")
+            .field("ca_pem_len", &self.ca_pem.as_ref().map(|p| p.len()))
+            .field(
+                "client_cert_len",
+                &self.client_identity.as_ref().map(|(c, _)| c.len()),
+            )
+            .field(
+                "client_key",
+                &self.client_identity.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl EnvTls {
-    /// `None` when no TLS variable is set (the default transport then applies).
-    fn load(prefix: &str, var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+    /// `None` when no TLS variable is set (the default transport then applies). `insecure_ok`
+    /// accepts a group- or world-accessible client key file.
+    fn load(
+        prefix: &str,
+        var: &dyn Fn(&str) -> Option<String>,
+        insecure_ok: bool,
+    ) -> Result<Option<Self>> {
         let ca_pem = if let Some(path) = var("CACERT") {
             Some(read_ca_file(path.as_ref(), &format!("{prefix}_CACERT"))?)
         } else if let Some(dir) = var("CAPATH") {
@@ -641,7 +811,7 @@ impl EnvTls {
         };
         let client_identity = match (var("CLIENT_CERT"), var("CLIENT_KEY")) {
             (Some(cert), Some(key)) => {
-                let cert = std::fs::read(&cert).map_err(|e| {
+                let cert = read_cert_file(cert.as_ref()).map_err(|e| {
                     file_err(
                         "client certificate file",
                         &format!("{prefix}_CLIENT_CERT"),
@@ -649,16 +819,17 @@ impl EnvTls {
                         e,
                     )
                 })?;
-                // Read straight into a zeroizing buffer (std::fs::read could leave copies).
-                let key =
-                    anykms_http::zbuf::read_file(key.as_ref(), MAX_KEY_FILE).map_err(|e| {
+                // Straight into a zeroizing buffer; refused when group- or world-accessible.
+                let key = read_config_file(key.as_ref(), MAX_KEY_FILE, Some(insecure_ok)).map_err(
+                    |e| {
                         file_err(
                             "client key file",
                             &format!("{prefix}_CLIENT_KEY"),
                             key.as_ref(),
                             e,
                         )
-                    })?;
+                    },
+                )?;
                 Some((cert, key))
             }
             (None, None) => None,
@@ -677,20 +848,45 @@ impl EnvTls {
         })
     }
 
+    /// The CA bundle (`*_CACERT`, or the `*_CAPATH` files concatenated), which replaces the
+    /// system roots. Held in a zeroizing buffer.
+    pub fn ca_pem(&self) -> Option<&[u8]> {
+        self.ca_pem.as_deref().map(Vec::as_slice)
+    }
+
+    /// The client certificate chain (`*_CLIENT_CERT`), held in a zeroizing buffer.
+    pub fn client_cert_pem(&self) -> Option<&[u8]> {
+        self.client_identity.as_ref().map(|(c, _)| c.as_slice())
+    }
+
+    /// The client private key (`*_CLIENT_KEY`), held in a zeroizing buffer.
+    pub fn client_key_pem(&self) -> Option<&[u8]> {
+        self.client_identity.as_ref().map(|(_, k)| k.as_slice())
+    }
+
+    /// A built-in transport builder with these settings, to customize further (timeouts, a
+    /// proxy) or to wrap (a tower stack over the built transport) before passing it to
+    /// [`ServerConfig::http_transport`].
+    #[cfg(feature = "reqwest")]
+    pub fn into_transport_builder(self) -> anykms_http::ReqwestTransportBuilder {
+        let mut b = anykms_http::ReqwestTransport::builder();
+        // Each PEM moves out of its zeroizing buffer into the builder's (which wraps the `Vec`
+        // it is given without copying it), leaving an empty one behind.
+        if let Some(mut pem) = self.ca_pem {
+            b = b.ca_pem(std::mem::take(&mut *pem));
+        }
+        if let Some((mut cert, mut key)) = self.client_identity {
+            b = b.client_identity(std::mem::take(&mut *cert), std::mem::take(&mut *key));
+        }
+        b
+    }
+
     /// The built-in transport with these settings (feature `reqwest`); without the feature,
     /// `Configuration`: TLS settings belong to the transport the application injects.
     fn transport(self) -> Result<Arc<dyn HttpTransport>> {
         #[cfg(feature = "reqwest")]
         {
-            let mut b = anykms_http::ReqwestTransport::builder();
-            if let Some(pem) = self.ca_pem {
-                b = b.ca_pem(pem);
-            }
-            if let Some((cert, mut key)) = self.client_identity {
-                // The key moves out of its zeroizing buffer into the builder's.
-                b = b.client_identity(cert, std::mem::take(&mut *key));
-            }
-            Ok(Arc::new(b.build()?))
+            Ok(Arc::new(self.into_transport_builder().build()?))
         }
         #[cfg(not(feature = "reqwest"))]
         {
@@ -1033,7 +1229,34 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         let get = |n: &str| vars.get(&format!("VAULT_{n}")).cloned();
-        EnvTls::load("VAULT", &get).unwrap().and_then(|t| t.ca_pem)
+        EnvTls::load("VAULT", &get, false)
+            .unwrap()
+            .and_then(|t| t.ca_pem)
+            .map(|p| p.to_vec())
+    }
+
+    /// Every PEM buffer `EnvTls` holds or builds is zeroizing (a combined PEM may carry a
+    /// private key): its fields, and what each file reader returns, so a buffer dropped on an
+    /// error path (a client key that fails to load, a `*_CAPATH` file that does not parse) is
+    /// wiped too.
+    #[test]
+    fn tls_pem_buffers_are_zeroizing() {
+        fn z(_: &zeroize::Zeroizing<Vec<u8>>) {}
+        let tls = EnvTls {
+            ca_pem: Some(Pem::new(b"ca".to_vec())),
+            client_identity: Some((Pem::new(b"cert".to_vec()), Pem::new(b"key".to_vec()))),
+        };
+        z(tls.ca_pem.as_ref().unwrap());
+        let (cert, key) = tls.client_identity.as_ref().unwrap();
+        z(cert);
+        z(key);
+        assert_eq!(tls.ca_pem(), Some(&b"ca"[..]));
+        assert_eq!(tls.client_cert_pem(), Some(&b"cert"[..]));
+        assert_eq!(tls.client_key_pem(), Some(&b"key"[..]));
+        let _: fn(&std::path::Path) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> =
+            read_cert_file;
+        let _: fn(&std::path::Path, &str) -> Result<zeroize::Zeroizing<Vec<u8>>> = read_ca_file;
+        let _: fn(&str, &str) -> Result<zeroize::Zeroizing<Vec<u8>>> = read_ca_dir;
     }
 
     /// The TLS variables build a transport of their own, which a shared one must not replace;
@@ -1161,6 +1384,179 @@ mod tests {
             "{m}"
         );
         assert!(!m.contains("BEGIN"), "{m}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// L10: the home token files follow the prefix that supplied the address. Under `BAO_ADDR`,
+    /// `~/.bao-token` then `~/.vault-token` (the OpenBao CLI itself writes `~/.vault-token`);
+    /// under `VAULT_ADDR`, only `~/.vault-token`, so an OpenBao token never reaches an address
+    /// configured for Vault.
+    #[test]
+    fn home_token_files_follow_the_address_prefix() {
+        let home = scratch("home-prefix");
+        let h = home.to_str().unwrap().to_owned();
+        let bao = ("BAO_ADDR", "https://bao.example:8200");
+        let vault = ("VAULT_ADDR", "https://vault.example:8200");
+
+        // Only ~/.bao-token: used for BAO_ADDR, never for VAULT_ADDR.
+        write(&home.join(".bao-token"), b"s.bao");
+        let c = load(&EnvConfig::openbao(), &[bao, ("HOME", &h)]).unwrap();
+        assert!(token_debug(&c).contains(".bao-token"), "{c:?}");
+        let e = load(&EnvConfig::openbao(), &[vault, ("HOME", &h)]).unwrap_err();
+        assert!(e.to_string().contains("no token found"), "{e}");
+        assert!(
+            e.to_string()
+                .contains("VAULT_TOKEN, VAULT_TOKEN_FILE, ~/.vault-token)"),
+            "{e}"
+        );
+
+        // Both files: BAO_ADDR prefers ~/.bao-token, VAULT_ADDR takes ~/.vault-token.
+        write(&home.join(".vault-token"), b"hvs.vault");
+        let c = load(&EnvConfig::openbao(), &[bao, ("HOME", &h)]).unwrap();
+        assert!(token_debug(&c).contains(".bao-token"), "{c:?}");
+        let c = load(&EnvConfig::openbao(), &[vault, ("HOME", &h)]).unwrap();
+        assert!(token_debug(&c).contains(".vault-token"), "{c:?}");
+
+        // Only ~/.vault-token (what `bao login` writes): BAO_ADDR still falls back to it.
+        std::fs::remove_file(home.join(".bao-token")).unwrap();
+        let c = load(&EnvConfig::openbao(), &[bao, ("HOME", &h)]).unwrap();
+        assert!(token_debug(&c).contains(".vault-token"), "{c:?}");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// L9: the TLS settings `EnvConfig` reads are reachable on their own, so an application that
+    /// brings its own transport (a tower stack, a shared client) can build it with the pinned CA
+    /// and client certificate instead of silently dropping them.
+    #[test]
+    fn env_tls_settings_are_reachable() {
+        let dir = scratch("tls-settings");
+        let ca = dir.join("ca.pem");
+        write(&ca, TEST_CA.as_bytes());
+        let key = dir.join("key.pem");
+        write(
+            &key,
+            b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n",
+        );
+        set_mode(&key, 0o600);
+        let ca_s = ca.to_str().unwrap().to_owned();
+        let key_s = key.to_str().unwrap().to_owned();
+        let vars = [
+            ("VAULT_ADDR", "https://vault.example:8200"),
+            ("VAULT_CACERT", ca_s.as_str()),
+            ("VAULT_CLIENT_CERT", ca_s.as_str()),
+            ("VAULT_CLIENT_KEY", key_s.as_str()),
+        ];
+        let lookup = {
+            let vars: HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            move |n: &str| vars.get(n).cloned()
+        };
+        let tls = EnvConfig::vault().tls_with(lookup).unwrap().unwrap();
+        assert_eq!(tls.ca_pem(), Some(TEST_CA.as_bytes()));
+        assert_eq!(tls.client_cert_pem(), Some(TEST_CA.as_bytes()));
+        assert!(
+            tls.client_key_pem()
+                .is_some_and(|k| k.starts_with(b"-----BEGIN PRIVATE KEY"))
+        );
+        // Debug never prints the key.
+        assert!(!format!("{tls:?}").contains("BEGIN PRIVATE"), "{tls:?}");
+        // No TLS variable: None.
+        assert!(
+            EnvConfig::vault()
+                .tls_with(|n| (n == "VAULT_ADDR").then(|| "https://v:8200".to_owned()))
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn set_mode(p: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(_: &std::path::Path, _: u32) {}
+
+    /// L31: certificate files named by variables are read with a bound (a `/dev/zero` or a huge
+    /// file fails loading instead of exhausting memory), and the client key file must not be
+    /// group- or world-accessible, as for token files.
+    #[test]
+    fn tls_files_are_bounded_and_the_key_file_is_private() {
+        let base = [
+            ("VAULT_ADDR", "https://vault.example:8200"),
+            ("VAULT_TOKEN", "t"),
+        ];
+        let dir = scratch("tls-bounds");
+        let big = dir.join("big.pem");
+        // Sparse: 8 MiB of zeros, above the 4 MiB bound, without using the disk.
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(8 * 1024 * 1024)
+            .unwrap();
+        let big_s = big.to_str().unwrap().to_owned();
+        let ca = dir.join("ca.pem");
+        write(&ca, TEST_CA.as_bytes());
+        let ca_s = ca.to_str().unwrap().to_owned();
+        let key = dir.join("key.pem");
+        write(
+            &key,
+            b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n",
+        );
+        let key_s = key.to_str().unwrap().to_owned();
+        let bigdir = dir.join("capath");
+        std::fs::create_dir(&bigdir).unwrap();
+        std::fs::copy(&big, bigdir.join("big.pem")).unwrap();
+        let bigdir_s = bigdir.to_str().unwrap().to_owned();
+
+        for (extra, var) in [
+            (vec![("VAULT_CACERT", big_s.as_str())], "VAULT_CACERT"),
+            (vec![("VAULT_CACERT", "/dev/zero")], "VAULT_CACERT"),
+            (vec![("VAULT_CAPATH", bigdir_s.as_str())], "VAULT_CAPATH"),
+            (
+                vec![
+                    ("VAULT_CLIENT_CERT", big_s.as_str()),
+                    ("VAULT_CLIENT_KEY", key_s.as_str()),
+                ],
+                "VAULT_CLIENT_CERT",
+            ),
+        ] {
+            set_mode(&key, 0o600);
+            let mut vars = base.to_vec();
+            vars.extend(extra);
+            let e = load(&EnvConfig::vault(), &vars).unwrap_err();
+            let m = e.to_string();
+            assert_eq!(e.kind(), ErrorKind::Configuration, "{m}");
+            assert!(
+                m.contains(var) && (m.contains("too large") || m.contains("not a regular file")),
+                "{var}: {m}"
+            );
+        }
+
+        // A group- or world-readable client key is refused unless opted in.
+        set_mode(&key, 0o644);
+        let mut vars = base.to_vec();
+        vars.push(("VAULT_CLIENT_CERT", ca_s.as_str()));
+        vars.push(("VAULT_CLIENT_KEY", key_s.as_str()));
+        #[cfg(unix)]
+        {
+            let e = load(&EnvConfig::vault(), &vars).unwrap_err();
+            let m = e.to_string();
+            assert!(
+                m.contains("VAULT_CLIENT_KEY") && m.contains("group- or world-accessible"),
+                "{m}"
+            );
+        }
+        // With the opt-in the key is read (building the transport then fails on the fake key,
+        // which is not what this checks).
+        let e = load(&EnvConfig::vault().allow_insecure_token_file(), &vars)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(!e.contains("group- or world-accessible"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -465,6 +465,16 @@ pub trait PublicKeys: Send + Sync {
     /// this from the handle's own key: they never fetch a key or resource named by `version`.
     /// The conformance suite checks it (`sign::*::foreign_versions`).
     async fn public_key_version(&self, version: &KeyVersion) -> Result<PublicKey>;
+
+    /// Drops whatever public keys and key or version states this source caches, so the next
+    /// lookup reads the backend again. A no-op by default, for sources that read the state on
+    /// every lookup.
+    ///
+    /// Verifiers that cache public keys call it from their own invalidation (`anykms-recipes`'
+    /// `CachedVerifier::invalidate`), so revoking a version takes effect at once instead of
+    /// after the source's cache expires. A source that caches (GCP, `public_key_ttl`) must
+    /// implement it; wrappers forward it.
+    fn invalidate_public_keys(&self) {}
 }
 
 /// Key metadata.

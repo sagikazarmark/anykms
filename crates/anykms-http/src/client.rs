@@ -86,14 +86,21 @@ pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     retry_after_value(v, system_now())
 }
 
-/// A `Retry-After` value relative to `now` (see [`retry_after`]).
+/// A `Retry-After` value relative to `now` (see [`retry_after`]), clamped to
+/// [`Error::MAX_RETRY_AFTER`](anykms_core::Error::MAX_RETRY_AFTER) (one day): the server chooses
+/// it, and callers forward it or add it to an `Instant`. Delay-seconds is digits only (no sign),
+/// and a value too large for a `u64` is clamped like any other.
 pub fn retry_after_value(v: &str, now: SystemTime) -> Option<Duration> {
+    let max = anykms_core::Error::MAX_RETRY_AFTER;
     let v = v.trim();
-    if let Ok(secs) = v.parse::<u64>() {
-        return Some(Duration::from_secs(secs));
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(
+            v.parse::<u64>()
+                .map_or(max, |secs| Duration::from_secs(secs).min(max)),
+        );
     }
     let at = httpdate::parse_http_date(v).ok()?;
-    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO).min(max))
 }
 
 #[cfg(test)]
@@ -118,6 +125,20 @@ mod tests {
         );
         assert_eq!(retry_after_value("soon", now), None);
         assert_eq!(retry_after_value("-1", now), None);
+        assert_eq!(
+            retry_after_value("+5", now),
+            None,
+            "delay-seconds has no sign"
+        );
+        // Clamped to a day, also past `u64::MAX` (which `u64::parse` rejects).
+        let max = anykms_core::Error::MAX_RETRY_AFTER;
+        assert_eq!(retry_after_value("86401", now), Some(max));
+        assert_eq!(retry_after_value("18446744073709551615", now), Some(max));
+        assert_eq!(retry_after_value("18446744073709551616", now), Some(max));
+        assert_eq!(
+            retry_after_value("99999999999999999999999999", now),
+            Some(max)
+        );
 
         let mut h = HeaderMap::new();
         assert_eq!(retry_after(&h), None);
@@ -168,5 +189,26 @@ mod tests {
             Err(SendError::InvalidRequest(_)) => {}
             other => panic!("{other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod review_l26_tests {
+    use super::*;
+
+    /// L26: a hostile `Retry-After` is clamped to one day at the parser, so no caller sees (or
+    /// adds to an `Instant`) an unbounded duration.
+    #[test]
+    fn retry_after_is_clamped_to_one_day() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_445_412_480);
+        let day = Duration::from_hours(24);
+        assert_eq!(retry_after_value("18446744073709551615", now), Some(day));
+        assert_eq!(retry_after_value("86401", now), Some(day));
+        assert_eq!(
+            retry_after_value("Fri, 31 Dec 9999 23:59:59 GMT", now),
+            Some(day)
+        );
+        assert_eq!(retry_after_value("86400", now), Some(day));
+        assert_eq!(retry_after_value("7", now), Some(Duration::from_secs(7)));
     }
 }

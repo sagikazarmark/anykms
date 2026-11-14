@@ -33,13 +33,17 @@ Rules a parser enforces (`anykms_azure::framing::parse`):
   characters today; the length prefix keeps a future format readable). The key handles accept
   32-hex versions only today: another version in a well-formed frame is `DecryptFailed` (or
   `InvalidArgument` for a signature's version) before any request;
-- an RSA body of at least one byte (its exact size is checked against the key before unwrapping),
-  a GCM body of at least 28 bytes (an empty ciphertext is representable), an A256KW body of at
-  least 24 bytes and a multiple of 8.
+- an RSA body of at least one byte (the key handle checks its exact size against the key before
+  unwrapping when the frame names the version it has read, otherwise that it is 256 to 2048
+  bytes; an older version may have another size), a GCM body of at least 28 bytes (an empty
+  ciphertext is representable), an A256KW body of at least 24 bytes and a multiple of 8.
 
 The frame is not authenticated by itself. A tampered version makes the vault use another key
-version, which fails to decrypt (`DecryptFailed`); a tampered algorithm byte is refused by the
-handle before any request. AES-GCM authenticates the ciphertext and the AAD, not the frame.
+version, which fails to decrypt (`DecryptFailed`). A tampered algorithm byte is `DecryptFailed`:
+refused by the handle before any request when the frame names the version the handle has read
+(the key's current or pinned version), else by the vault, which knows that version's key type;
+it never drops the handle's cached key. AES-GCM authenticates the ciphertext and the AAD, not
+the frame.
 
 ## Interoperability
 

@@ -61,7 +61,8 @@ anykms-recipes.workspace = true
 
 # Formats the HTTP-date `Retry-After` the mock server sends (tests/mock.rs).
 httpdate = "1"
-tokio.workspace = true
+# `start_paused`: deterministic timing of the bounded single-flight waits.
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

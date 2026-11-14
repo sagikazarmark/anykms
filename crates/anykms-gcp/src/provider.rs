@@ -22,6 +22,9 @@ use crate::handles::{
 };
 use crate::uri::{GcpKeyRef, SCHEMES, location_ok, parse_version, project_ok};
 
+/// The longest [`GcpProviderBuilder::public_key_ttl`] honoured.
+const MAX_PUBLIC_KEY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Opens `gcp-kms://` keys on Cloud KMS.
 ///
 /// Building a provider does no I/O beyond loading the system TLS roots: credentials are resolved
@@ -60,6 +63,7 @@ pub struct GcpProviderBuilder {
     http_transport: Option<Arc<dyn HttpTransport>>,
     public_key_ttl: Duration,
     allow_loopback_http: bool,
+    allow_remote_http_credentials: bool,
     max_response_bytes: usize,
     env: EnvVars,
 }
@@ -74,6 +78,10 @@ impl std::fmt::Debug for GcpProviderBuilder {
             .field("allowed_locations", &self.allowed_locations)
             .field("http_transport", &self.http_transport.is_some())
             .field("public_key_ttl", &self.public_key_ttl)
+            .field(
+                "allow_remote_http_credentials",
+                &self.allow_remote_http_credentials,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -90,6 +98,7 @@ impl Default for GcpProviderBuilder {
             http_transport: None,
             public_key_ttl: Duration::from_secs(60),
             allow_loopback_http: false,
+            allow_remote_http_credentials: false,
             max_response_bytes: 4 * 1024 * 1024,
             env: EnvVars::default(),
         }
@@ -156,7 +165,7 @@ impl GcpProviderBuilder {
     /// default `ReqwestTransport` is built; without the `reqwest` feature, building fails with
     /// `Configuration`. Metadata-server requests carry a short per-request
     /// [`RequestTimeout`](anykms_http::RequestTimeout) and are never proxied by the built-in
-    /// transport.
+    /// transport (its proxy carries HTTPS only; they are plain HTTP).
     pub fn http_transport(mut self, transport: impl HttpTransport) -> Self {
         self.http_transport = Some(Arc::new(transport));
         self
@@ -164,8 +173,10 @@ impl GcpProviderBuilder {
 
     /// How long a version's public key is cached for local verification and the key-type check;
     /// default 60 s (Cloud KMS's disable propagation). `Duration::ZERO` disables the cache.
+    /// Values above one day are treated as one day: it bounds how long a disabled version keeps
+    /// verifying, so "forever" is not offered (and `Duration::MAX` cannot overflow the clock).
     pub fn public_key_ttl(mut self, ttl: Duration) -> Self {
-        self.public_key_ttl = ttl;
+        self.public_key_ttl = ttl.min(MAX_PUBLIC_KEY_TTL);
         self
     }
 
@@ -173,6 +184,19 @@ impl GcpProviderBuilder {
     /// loopback IP (tests, emulators).
     pub fn allow_loopback_http(mut self) -> Self {
         self.allow_loopback_http = true;
+        self
+    }
+
+    /// Allows plain `http://` credential endpoints on any host: a `GCE_METADATA_HOST` or an
+    /// `external_account` `credential_source.url` that is not a loopback or link-local IP,
+    /// `localhost`, `metadata.google.internal` or Google's IPv6 metadata address `fd20:ce::254`
+    /// (for example a metadata proxy on another host).
+    /// Without it such an endpoint is a `Configuration` error before any request, because the
+    /// token it returns (and any header the credential file adds) would cross the network in
+    /// clear text. There is deliberately no environment variable for this: whoever sets
+    /// `GCE_METADATA_HOST` could set it too.
+    pub fn allow_remote_http_credentials(mut self) -> Self {
+        self.allow_remote_http_credentials = true;
         self
     }
 
@@ -239,6 +263,7 @@ impl GcpProviderBuilder {
             http: http.clone(),
             endpoints: self.auth_endpoints,
             env: self.env,
+            allow_remote_http: self.allow_remote_http_credentials,
         };
         let creds = self.credentials.into_source(&ctx)?;
         let client = Client {
@@ -352,6 +377,20 @@ impl GcpProvider {
     /// Starts building a provider.
     pub fn builder() -> GcpProviderBuilder {
         GcpProviderBuilder::default()
+    }
+
+    /// Drops the public keys this provider cached (`public_key_ttl`), the versions it remembers
+    /// as unknown or unusable, and the latest versions it read, for every key and every handle
+    /// opened from it or from a clone of it. A fetch in progress caches nothing.
+    ///
+    /// Every handle's [`PublicKeys::invalidate_public_keys`](anykms_core::PublicKeys::invalidate_public_keys)
+    /// does the same, so
+    /// [`CachedVerifier::invalidate`](https://docs.rs/anykms-recipes/latest/anykms_recipes/struct.CachedVerifier.html#method.invalidate)
+    /// on a verifier whose source is a handle of this provider already drops this cache: the
+    /// next verification re-reads the version's state and refuses a disabled one. Call this
+    /// directly after disabling a version when handles are used without a `CachedVerifier`.
+    pub fn invalidate_public_keys(&self) {
+        self.shared.invalidate_public_keys();
     }
 
     /// A provider configured from the environment (see [`GcpProviderBuilder::from_env`]), with
@@ -873,5 +912,35 @@ mod tests {
         })
         .unwrap();
         assert!(b.build().is_ok());
+    }
+}
+
+/// Regression test for the security review (L29, by default).
+#[cfg(test)]
+mod review_l29_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::auth::{AuthCtx, EnvVars};
+
+    /// With the built-in transport, the state-check flight and a token cache bound how long a
+    /// caller waits for another caller's request: twice the connect plus request timeout.
+    #[test]
+    fn the_builtin_transport_bounds_the_caches() {
+        let p = GcpProvider::builder()
+            .credentials(Credentials::none())
+            .endpoint(Endpoint::custom("http://127.0.0.1:9"))
+            .allow_loopback_http()
+            .build()
+            .unwrap();
+        assert_eq!(p.shared.check_wait_bound(), Some(Duration::from_secs(24)));
+        let ctx = AuthCtx {
+            http: anykms_http::default_transport(BACKEND, false).unwrap(),
+            endpoints: AuthEndpoints::default(),
+            env: EnvVars::default(),
+            allow_remote_http: false,
+        };
+        let metadata = crate::auth::metadata::source(&ctx).unwrap();
+        assert_eq!(metadata.wait_bound(), Some(Duration::from_secs(24)));
     }
 }

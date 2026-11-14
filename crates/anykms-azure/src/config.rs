@@ -64,7 +64,8 @@ impl AzureCloud {
     pub fn from_authority_host(host: &str) -> Option<Self> {
         let h = host.trim_end_matches('/').to_ascii_lowercase();
         match h.as_str() {
-            "https://login.microsoftonline.com" => Some(Self::Public),
+            // `login.windows.net` is the public cloud's legacy alias.
+            "https://login.microsoftonline.com" | "https://login.windows.net" => Some(Self::Public),
             "https://login.partner.microsoftonline.cn" | "https://login.chinacloudapi.cn" => {
                 Some(Self::China)
             }

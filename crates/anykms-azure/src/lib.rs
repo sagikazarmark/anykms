@@ -74,10 +74,12 @@
 //!   RSA-OAEP-256; non-empty AAD is `Unsupported` before any I/O (bind context with
 //!   `EnvelopeAead` instead). Unwrap them with the `KeyWrap` handle of the same key.
 //! - **Errors** are classified on HTTP status and error codes (`BackendDetail::code` = the
-//!   innermost Azure code, e.g. `ForbiddenByRbac`; `request_id` = `x-ms-request-id`). Until the
-//!   live probe pins Azure's codes, a disabled key and an RBAC denial are both
-//!   `PermissionDenied` (403) and a key-size error is `InvalidArgument`: under-classified, never
-//!   misclassified. A 404 on a
+//!   innermost Azure code, e.g. `ForbiddenByRbac`; `request_id` = `x-ms-request-id`). A disabled,
+//!   not-yet-valid or expired key (403 `KeyDisabled`, `KeyNotYetValid`, `KeyExpired`) is
+//!   `KeyStateInvalid` for the handle's own version and `KeyVersionUnusable` for a version taken
+//!   from input; `KeyOperationForbidden` is `KeyMismatch`, any other 403 `PermissionDenied`; a
+//!   key-size error is `InvalidArgument`.
+//!   A 404 on a
 //!   version taken from a signature or ciphertext is `VerificationFailed`/`DecryptFailed` once
 //!   the key-type check has seen the key. Server messages are redacted to a fingerprint.
 //! - **Credentials** are lazy: nothing is read or fetched before the first operation. Tokens are
@@ -95,7 +97,8 @@
 //!   The built-in transport follows no redirects (a 3xx is `Configuration`, no token or body is
 //!   sent on), uses rustls with the system roots (see [TLS crypto provider](#tls-crypto-provider))
 //!   with no way to skip verification, and never proxies IMDS. Plain HTTP exists only for
-//!   loopback test hosts.
+//!   loopback test hosts, IMDS (`169.254.169.254`) and an App Service / Functions identity
+//!   endpoint on `localhost` or a loopback, link-local or private address.
 //! - **Runtime.** The built-in transport requires a tokio runtime; called outside one, an
 //!   operation fails with `Configuration` instead of panicking, before the credential is asked.
 //!
@@ -166,7 +169,7 @@ pub use credential::{AccessToken, AzureCredential, StaticToken};
 pub use handles::AzureMacKey;
 pub use handles::{AzureAeadKey, AzureDigestKey, AzureKeyWrapKey};
 pub use keyinfo::{AzureKeyInfo, AzureKeyType, AzureVersionInfo};
-pub use provider::{AzureProvider, AzureProviderBuilder};
+pub use provider::{AzureProvider, AzureProviderBuilder, MAX_KEY_CACHE_TTL};
 pub use uri::{AzureKeyRef, SCHEME, SCHEMES};
 
 /// Internal parsers exposed for the fuzz targets. Not part of the public API.

@@ -10,9 +10,14 @@ fn config_err(backend: &'static str, m: &'static str) -> Error {
 
 /// Decodes the first private key in `pem` (PKCS#8, PKCS#1 or SEC1). Unlike rustls-pki-types'
 /// PEM reader, every intermediate buffer (base64 text, DER) is zeroizing; the DER moves into the
-/// returned key, which rustls wipes after loading it. Encrypted keys are refused. Errors are
-/// `Configuration` with fixed messages (never the contents).
-pub fn private_key_from_pem(backend: &'static str, pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
+/// returned key, which is zeroizing too: it is wiped when dropped, on every path (a caller that
+/// refuses the key type, an error after decoding). A caller handing it to rustls passes
+/// [`PrivateKeyDer::clone_key`], which rustls wipes after loading. Encrypted keys are refused.
+/// Errors are `Configuration` with fixed messages (never the contents).
+pub fn private_key_from_pem(
+    backend: &'static str,
+    pem: &[u8],
+) -> Result<Zeroizing<PrivateKeyDer<'static>>> {
     use base64::Engine as _;
     use rustls_pki_types::{PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
 
@@ -65,7 +70,21 @@ pub fn private_key_from_pem(backend: &'static str, pem: &[u8]) -> Result<Private
             .map_err(|_| bad())?;
         der.truncate(n);
         // Moves the allocation out; the emptied Zeroizing has nothing left to wipe.
-        return Ok(make(std::mem::take(&mut *der)));
+        return Ok(Zeroizing::new(make(std::mem::take(&mut *der))));
     }
     Err(bad())
+}
+
+/// Regression test for the security review (L23(b)): the decoded key must be wiped on every
+/// path, including callers that drop it without handing it to rustls (a service-account file
+/// with a PKCS#1 key, an error after decoding). The return type carries that guarantee.
+#[cfg(test)]
+mod review_tests {
+    #[test]
+    fn review_l23b_decoded_keys_are_zeroizing() {
+        fn zeroizing(_: &zeroize::Zeroizing<rustls_pki_types::PrivateKeyDer<'static>>) {}
+        let pem = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        let k = super::private_key_from_pem("t", pem).unwrap();
+        zeroizing(&k);
+    }
 }

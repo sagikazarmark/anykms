@@ -64,6 +64,37 @@ fn alias_ok(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+/// The URI as errors name it before it has resolved: without its query and fragment, and with an
+/// authority that is not a configured server alias (`known`) replaced by `<redacted>`. An
+/// authority is the first place a credential ends up by mistake
+/// (`hashivault://hvs.TOKEN@vault/...`, or a bare token pasted over the alias), and the alias
+/// grammar admits many token formats (`SECRET_TOKEN`), so syntax alone does not make an authority
+/// safe to echo: only an empty one or one naming a configured server is. The path still names
+/// the key.
+pub(crate) fn label(uri: &KeyUri, known: impl Fn(&str) -> bool) -> String {
+    let rest = uri.rest();
+    let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    match rest.strip_prefix("//") {
+        Some(r) => {
+            let (authority, path) = r.split_at(r.find('/').unwrap_or(r.len()));
+            let authority = shown_alias(authority, known);
+            format!("{}://{authority}{path}", uri.scheme())
+        }
+        // Not a `scheme://` URI: nothing in it is known to be safe to echo.
+        None => format!("{}:<redacted>", uri.scheme()),
+    }
+}
+
+/// A URI authority as errors may show it: itself when empty or a configured server alias
+/// (`known`), `<redacted>` otherwise (see [`label`]).
+pub(crate) fn shown_alias(authority: &str, known: impl Fn(&str) -> bool) -> &str {
+    if authority.is_empty() || (alias_ok(authority) && known(authority)) {
+        authority
+    } else {
+        "<redacted>"
+    }
+}
+
 pub(crate) fn namespace_ok(s: &str) -> bool {
     !s.is_empty() && s.split('/').all(segment_ok)
 }

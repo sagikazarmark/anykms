@@ -135,6 +135,28 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Every kind. New kinds may be appended in any release (the enum is `#[non_exhaustive]`), so
+    /// code that must treat every kind (a mapping table, a test over all kinds) iterates this
+    /// instead of keeping its own list.
+    pub const ALL: &'static [ErrorKind] = &[
+        ErrorKind::NotFound,
+        ErrorKind::PermissionDenied,
+        ErrorKind::Unauthenticated,
+        ErrorKind::KeyStateInvalid,
+        ErrorKind::DecryptFailed,
+        ErrorKind::VerificationFailed,
+        ErrorKind::InvalidArgument,
+        ErrorKind::KeyMismatch,
+        ErrorKind::Unsupported,
+        ErrorKind::Configuration,
+        ErrorKind::Throttled,
+        ErrorKind::Unavailable,
+        ErrorKind::Timeout,
+        ErrorKind::Backend,
+        ErrorKind::KeyVersionUnusable,
+        ErrorKind::UnknownKeyVersion,
+    ];
+
     /// A short, stable, lowercase name, suitable for logs and metrics.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -386,6 +408,12 @@ pub struct Error {
 }
 
 impl Error {
+    /// The largest [`retry_after`](Self::retry_after) and [`retry_hint`](Self::retry_hint) an
+    /// error carries: one day. [`with_retry_after`](Self::with_retry_after) and
+    /// [`with_retry_hint`](Self::with_retry_hint) clamp to it, so a server's `Retry-After`
+    /// never reaches the caller unbounded (to forward as a header or add to an `Instant`).
+    pub const MAX_RETRY_AFTER: Duration = Duration::from_hours(24);
+
     /// Creates an error; the constructor for backends and recipes. Application code usually wants
     /// [`app`](Self::app) or a shorthand such as [`invalid_argument`](Self::invalid_argument).
     /// `message` must not contain secrets.
@@ -438,9 +466,10 @@ impl Error {
         self
     }
 
-    /// Attaches a server-requested minimum retry delay.
+    /// Attaches a server-requested minimum retry delay, clamped to
+    /// [`MAX_RETRY_AFTER`](Self::MAX_RETRY_AFTER).
     pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
-        self.retry_after = Some(retry_after);
+        self.retry_after = Some(retry_after.min(Self::MAX_RETRY_AFTER));
         self
     }
 
@@ -449,9 +478,9 @@ impl Error {
     /// node that answered, a key version still being generated) but cannot tell it from the
     /// permanent one. [`RetryLayer`](crate::RetryLayer) acts on it only with
     /// [`RetryPolicy::retry_on_hint`](crate::RetryPolicy::retry_on_hint), see
-    /// [`retry_hint`](Self::retry_hint).
+    /// [`retry_hint`](Self::retry_hint). Clamped to [`MAX_RETRY_AFTER`](Self::MAX_RETRY_AFTER).
     pub fn with_retry_hint(mut self, delay: Duration) -> Self {
-        self.retry_hint = Some(delay);
+        self.retry_hint = Some(delay.min(Self::MAX_RETRY_AFTER));
         self
     }
 
@@ -623,9 +652,12 @@ impl fmt::Display for Error {
             write!(f, " {}", self.op)?;
         }
         if let Some(r) = &self.resource {
-            write!(f, " [{r}]")?;
+            f.write_str(" [")?;
+            write_loggable(f, r, MAX_SHOWN_RESOURCE)?;
+            f.write_str("]")?;
         }
-        write!(f, ": {}: {}", self.kind, self.message)?;
+        write!(f, ": {}: ", self.kind)?;
+        write_loggable(f, &self.message, MAX_SHOWN_MESSAGE)?;
         if let Some(d) = &self.detail {
             if let Some(s) = d.http_status {
                 write!(f, " (http {s})")?;
@@ -634,11 +666,44 @@ impl fmt::Display for Error {
                 write!(f, " (server: {m})")?;
             }
             if let Some(id) = &d.request_id {
-                write!(f, " (request id {id})")?;
+                f.write_str(" (request id ")?;
+                write_loggable(f, id, MAX_SHOWN_REQUEST_ID)?;
+                f.write_str(")")?;
             }
         }
         Ok(())
     }
+}
+
+/// The most of each free-form field [`Error`]'s `Display` shows, in bytes.
+const MAX_SHOWN_MESSAGE: usize = 1024;
+const MAX_SHOWN_RESOURCE: usize = 512;
+const MAX_SHOWN_REQUEST_ID: usize = 256;
+
+/// Writes `s` safe for one log line: control characters (newlines, ANSI escapes) and Unicode
+/// bidirectional controls escaped as `\n`, `\u{1b}`, ..., and cut after about `max` bytes. The
+/// fields `Error` shows are set by backends and recipes, which keep them free of secrets; this
+/// keeps a field that echoes server or input text from forging log lines or flooding them.
+fn write_loggable(f: &mut fmt::Formatter<'_>, s: &str, max: usize) -> fmt::Result {
+    use fmt::Write as _;
+    let mut shown = 0;
+    for c in s.chars() {
+        if shown >= max {
+            return f.write_str("...[truncated]");
+        }
+        if c.is_control()
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            for e in c.escape_default() {
+                f.write_char(e)?;
+                shown += 1;
+            }
+        } else {
+            f.write_char(c)?;
+            shown += c.len_utf8();
+        }
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Error {
@@ -903,5 +968,94 @@ mod tests {
             e.to_string(),
             "app verify: invalid_argument: malformed token"
         );
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// L25: Display escapes control characters (log injection) and bounds every field it shows.
+    #[test]
+    fn display_escapes_and_bounds_fields() {
+        let long = "m".repeat(10_000);
+        let e = Error::new(ErrorKind::Backend, "x", Operation::Encrypt, long.clone())
+            .with_resource(format!(
+                "r\n2026-01-01 FAKE LOG LINE\x1b[31m{}",
+                "r".repeat(10_000)
+            ))
+            .with_detail(BackendDetail {
+                request_id: Some(format!("id\r\n{}", "i".repeat(10_000))),
+                ..BackendDetail::default()
+            });
+        let s = e.to_string();
+        assert!(
+            !s.contains('\n') && !s.contains('\r') && !s.contains('\x1b'),
+            "{s:?}"
+        );
+        assert!(s.contains("\\n2026-01-01 FAKE LOG LINE"), "{s:?}");
+        assert!(s.len() < 4 * 1024, "{}", s.len());
+        // Bidi overrides are escaped too.
+        let e = Error::new(ErrorKind::Backend, "x", Operation::Encrypt, "a\u{202e}b");
+        assert!(!e.to_string().contains('\u{202e}'), "{e}");
+        // Ordinary messages are unchanged.
+        let e = Error::new(
+            ErrorKind::Backend,
+            "x",
+            Operation::Encrypt,
+            "plain \"quoted\" text",
+        );
+        assert_eq!(e.to_string(), "x encrypt: backend: plain \"quoted\" text");
+    }
+
+    /// L26: a server's Retry-After (or a hint) is clamped to one day when attached, so callers
+    /// never see, forward or add an unbounded duration.
+    #[test]
+    fn retry_after_and_hint_are_clamped() {
+        let e = Error::new(ErrorKind::Throttled, "x", Operation::Encrypt, "slow down")
+            .with_retry_after(Duration::MAX)
+            .with_retry_hint(Duration::from_secs(u64::MAX));
+        assert_eq!(e.retry_after(), Some(Error::MAX_RETRY_AFTER));
+        assert_eq!(e.retry_hint(), Some(Error::MAX_RETRY_AFTER));
+        assert_eq!(Error::MAX_RETRY_AFTER, Duration::from_hours(24));
+        let _ = crate::time::Instant::now() + e.retry_after().unwrap();
+        let e = e.with_retry_after(Duration::from_secs(5));
+        assert_eq!(e.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    /// L18: `ErrorKind::ALL` lists every kind (the match has no wildcard arm, so a new kind
+    /// breaks the build here until it is added).
+    #[test]
+    fn error_kind_all_is_complete() {
+        fn index(k: ErrorKind) -> usize {
+            match k {
+                ErrorKind::NotFound => 0,
+                ErrorKind::PermissionDenied => 1,
+                ErrorKind::Unauthenticated => 2,
+                ErrorKind::KeyStateInvalid => 3,
+                ErrorKind::DecryptFailed => 4,
+                ErrorKind::VerificationFailed => 5,
+                ErrorKind::InvalidArgument => 6,
+                ErrorKind::KeyMismatch => 7,
+                ErrorKind::Unsupported => 8,
+                ErrorKind::Configuration => 9,
+                ErrorKind::Throttled => 10,
+                ErrorKind::Unavailable => 11,
+                ErrorKind::Timeout => 12,
+                ErrorKind::Backend => 13,
+                ErrorKind::KeyVersionUnusable => 14,
+                ErrorKind::UnknownKeyVersion => 15,
+            }
+        }
+        let mut seen = [false; 16];
+        for k in ErrorKind::ALL {
+            assert!(
+                !std::mem::replace(&mut seen[index(*k)], true),
+                "{k:?} twice"
+            );
+        }
+        assert!(seen.iter().all(|s| *s), "ErrorKind::ALL misses a kind");
     }
 }

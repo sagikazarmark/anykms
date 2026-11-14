@@ -31,9 +31,24 @@ fn env(get: EnvGet<'_>, name: &str) -> Option<String> {
     get(name).filter(|v| !v.is_empty())
 }
 
+/// `AZURE_AUTHORITY_HOST`: one of the known Entra ID authority hosts only
+/// ([`AzureCloud::from_authority_host`]). A custom or loopback authority (tests, a private
+/// cloud) is a builder setting (`authority_host`), never something the environment can redirect
+/// a secret or a federated token to.
 fn authority_from_env(get: EnvGet<'_>) -> Result<String> {
     match env(get, "AZURE_AUTHORITY_HOST") {
-        Some(h) => validate_authority(&h),
+        Some(h) => {
+            let v = validate_authority(&h)?;
+            if AzureCloud::from_authority_host(&v).is_none() {
+                return Err(cred_config_err(
+                    "AZURE_AUTHORITY_HOST must be a known Entra ID authority host \
+                     (login.microsoftonline.com, login.windows.net, \
+                     login.partner.microsoftonline.cn, login.chinacloudapi.cn, \
+                     login.microsoftonline.us); set a custom one with authority_host()",
+                ));
+            }
+            Ok(v)
+        }
         None => Ok(AzureCloud::Public.authority_host().to_owned()),
     }
 }
@@ -147,8 +162,9 @@ impl WorkloadIdentity {
         me.authority_host(&authority_from_env(get)?)
     }
 
-    /// The Entra ID authority host (default `https://login.microsoftonline.com`). Plain http is
-    /// accepted only on a loopback IP (tests).
+    /// The Entra ID authority host (default `https://login.microsoftonline.com`): any https host
+    /// (a private cloud), or plain http on a loopback IP (tests). Only this builder setting takes
+    /// a custom host: `AZURE_AUTHORITY_HOST` must name a known Entra ID authority.
     pub fn authority_host(mut self, host: &str) -> Result<Self> {
         self.client.authority = validate_authority(host)?;
         Ok(self)
