@@ -125,7 +125,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "anykms"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "anykms-aws",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-aws"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-aws",
  "anykms-conformance",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-azure"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anykms-azure",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-conformance"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anykms-core",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "js-sys",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-gcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-conformance",
  "anykms-core",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-core",
  "base64 0.23.1",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-local"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anykms-conformance",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-recipes"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anykms-core",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-testkit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-core",
  "anykms-http",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-transit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-conformance",
  "anykms-core",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "anykms-wasm-tests"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anykms-aws",
  "anykms-azure",
