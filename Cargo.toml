@@ -113,8 +113,11 @@ similar_names = "allow"
 duration_suboptimal_units = "allow"
 
 [workspace.metadata.release]
-sign-commit = true
+# The Release workflow commits the version bump, without a signing key.
+# sign-commit = true
 sign-tag = true
 shared-version = true
+allow-branch = ["main"]
+pre-release-commit-message = "chore: release v{{version}}"
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
